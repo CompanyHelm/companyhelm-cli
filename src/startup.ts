@@ -14,7 +14,7 @@ function banner() {
 }
 
 async function dedicatedAuth(cfg: Config, db: any) {
-    const port = cfg.codex_auth_port;
+    const port = cfg.codex.codex_auth_port;
     const socatPort = port + 1; // socat listens on a separate port to avoid conflicting with codex
     const containerName = `companyhelm-codex-auth-${Date.now()}`;
 
@@ -25,7 +25,7 @@ async function dedicatedAuth(cfg: Config, db: any) {
     if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
     }
-    const destPath = join(configDir, cfg.codex_auth_file_path);
+    const destPath = join(configDir, cfg.codex.codex_auth_file_path);
 
     // Start codex interactively (full TTY passthrough so user can interact)
     // Host:port → container:socatPort (socat) → container:127.0.0.1:port (codex)
@@ -49,18 +49,27 @@ async function dedicatedAuth(cfg: Config, db: any) {
 
     await new Promise<void>((resolve, reject) => {
         const poll = setInterval(() => {
+            // Use sh -c so ~ is expanded by the container's shell
             const check = spawnSync(
                 "docker",
-                ["exec", containerName, "test", "-f", cfg.container_codex_auth_path],
+                ["exec", containerName, "sh", "-c", `test -f ${cfg.codex.codex_auth_path}`],
                 { stdio: "ignore" },
             );
             if (check.status === 0) {
                 clearInterval(poll);
 
+                // Resolve ~ inside the container to get the absolute path for docker cp
+                const resolveResult = spawnSync(
+                    "docker",
+                    ["exec", containerName, "sh", "-c", `echo ${cfg.codex.codex_auth_path}`],
+                    { encoding: "utf-8" },
+                );
+                const containerAuthAbsPath = resolveResult.stdout.trim();
+
                 // Copy auth file from container to host
                 const cpResult = spawnSync(
                     "docker",
-                    ["cp", `${containerName}:${cfg.container_codex_auth_path}`, destPath],
+                    ["cp", `${containerName}:${containerAuthAbsPath}`, destPath],
                     { stdio: "ignore" },
                 );
 
@@ -111,7 +120,7 @@ export async function startup() {
     // No SDK configured -- offer auth options
     p.intro("No agent SDK configured. Let's set up Codex authentication.");
 
-    const hostAuthPath = expandHome(cfg.host_codex_auth_path);
+    const hostAuthPath = expandHome(cfg.codex.codex_auth_path);
     const hostAuthExists = existsSync(hostAuthPath);
 
     const options: { value: "dedicated" | "host"; label: string; hint?: string }[] = [
@@ -125,7 +134,7 @@ export async function startup() {
         options.push({
             value: "host",
             label: "Host",
-            hint: `reuse existing credentials from ${cfg.host_codex_auth_path}`,
+            hint: `reuse existing credentials from ${cfg.codex.codex_auth_path}`,
         });
     }
 
