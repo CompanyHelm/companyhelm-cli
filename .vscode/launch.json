@@ -1,0 +1,22 @@
+{
+  "version": "0.1.0",
+  "configurations": [
+    {
+      "name": "Debug companyhelm CLI",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/dist/cli.js",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "npm: build",
+      "args": [
+        "hello",
+        "world"
+      ],
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": [
+        "<node_internals>/**"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,42 @@
+import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+
+// ── agent_sdks ──────────────────────────────────────────────────────────────
+
+export const agentSdks = sqliteTable("agent_sdks", {
+  name: text("name").primaryKey(),
+  authentication: text("authentication", {
+    enum: ["unauthenticated", "host", "dedicated", "api-key"],
+  }).notNull(),
+});
+
+// ── llm_models ──────────────────────────────────────────────────────────────
+
+export const llmModels = sqliteTable("llm_models", {
+  name: text("name").primaryKey(),
+  sdkName: text("sdk_name")
+    .notNull()
+    .references(() => agentSdks.name),
+  reasoningLevels: text("reasoning_levels", { mode: "json" })
+    .$type<string[]>(),
+});
+
+// ── agents ──────────────────────────────────────────────────────────────────
+
+export const agents = sqliteTable("agents", {
+  id: text("id")
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  name: text("name").notNull(),
+  sdk: text("sdk", { enum: ["codex"] }).notNull(),
+  model: text("model").notNull(),
+  reasoningLevel: text("reasoning_level").notNull(),
+  workspace: text("workspace").notNull(),
+  runtimeContainer: text("runtime_container").notNull(),
+  dindContainer: text("dind_container").notNull(),
+  // home directory within the container
+  homeDirectory: text("home_directory").notNull(),
+  // uid of the user within the container
+  uid: integer("uid").notNull(),
+  // gid of the user within the container
+  gid: integer("gid").notNull(),
+});

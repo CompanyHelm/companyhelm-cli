@@ -1,0 +1,30 @@
+import { z } from "zod";
+
+export const config = z.object({
+    config_directory: z.string()
+        .describe("The directory where the config files are stored.")
+        .default("~/.config/companyhelm"),
+    state_db_path: z.string()
+        .describe("The path to the state database.")
+        .default("~/.local/share/companyhelm/state.db"),
+    runtime_image: z.string()
+        .describe("The name of the runtime image.")
+        .default("companyhelm/runner:latest"),
+    dind_image: z.string()
+        .describe("The name of the DIND image.")
+        .default("docker:29-dind-rootless"),
+    codex_auth_file_path: z.string()
+        .describe("The path to the Codex authentication file on the host, relative to config_directory.")
+        .default("codex-auth.json"),
+    host_codex_auth_path: z.string()
+        .describe("The path to the host's Codex auth file. Used to check if host auth is available.")
+        .default("~/.codex/auth.json"),
+    container_codex_auth_path: z.string()
+        .describe("The path to the Codex auth file inside the runtime container.")
+        .default("/root/.codex/auth.json"),
+    codex_auth_port: z.number()
+        .describe("The port used by Codex OAuth callback during dedicated auth.")
+        .default(1455),
+});
+
+export type Config = z.infer<typeof config>;
