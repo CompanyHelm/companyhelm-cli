@@ -6,6 +6,7 @@ import figlet from "figlet";
 import { config as configSchema, type Config } from "./config.js";
 import { initDb, expandHome } from "./state/db.js";
 import { agentSdks } from "./state/schema.js";
+import { getHostInfo } from "./service/host.js";
 
 function banner() {
     console.log();
@@ -120,8 +121,7 @@ export async function startup() {
     // No SDK configured -- offer auth options
     p.intro("No agent SDK configured. Let's set up Codex authentication.");
 
-    const hostAuthPath = expandHome(cfg.codex.codex_auth_path);
-    const hostAuthExists = existsSync(hostAuthPath);
+    const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
 
     const options: { value: "dedicated" | "host"; label: string; hint?: string }[] = [
         {
@@ -130,7 +130,7 @@ export async function startup() {
             hint: "recommended -- runs Codex login inside a container",
         },
     ];
-    if (hostAuthExists) {
+    if (hostInfo.codexAuthExists) {
         options.push({
             value: "host",
             label: "Host",

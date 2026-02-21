@@ -440,7 +440,7 @@ function getVersion(): string {
 const program = new Command();
 
 program
-  .name("yolodock")
+  .name("comapanyhelm")
   .description("Run coding agents in fully isolated Docker sandboxes, locally.")
   .version(getVersion())
   .action(async () => {
