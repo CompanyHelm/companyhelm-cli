@@ -28,10 +28,10 @@ async function dedicatedAuth(cfg: Config, db: any) {
             "-it",
             "--name", containerName,
             "-p", `${port}:${port}`,
-            "--entrypoint", "sh",
+            "--entrypoint", "bash",
             cfg.runtime_image,
             "-c",
-            `socat TCP-LISTEN:${port},fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:${port} & exec codex login`,
+            `source "$NVM_DIR/nvm.sh" && socat TCP-LISTEN:${port},fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:${port} & exec codex login`,
         ],
         { stdio: "inherit" },
     );
