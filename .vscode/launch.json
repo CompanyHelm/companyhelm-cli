@@ -9,8 +9,6 @@
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "npm: build",
       "args": [
-        "hello",
-        "world"
       ],
       "console": "integratedTerminal",
       "internalConsoleOptions": "neverOpen",
