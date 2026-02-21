@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import figlet from "figlet";
 import { config as configSchema, type Config } from "./config.js";
@@ -15,58 +15,80 @@ function banner() {
 
 async function dedicatedAuth(cfg: Config, db: any) {
     const port = cfg.codex_auth_port;
+    const socatPort = port + 1; // socat listens on a separate port to avoid conflicting with codex
     const containerName = `companyhelm-codex-auth-${Date.now()}`;
 
     p.log.info("Starting Codex login inside a container...");
     p.log.info("A browser URL will appear -- open it to complete authentication.");
 
-    // Run interactive login (no --rm so container persists for docker cp)
-    const result = spawnSync(
-        "docker",
-        [
-            "run",
-            "-it",
-            "--name", containerName,
-            "-p", `${port}:${port}`,
-            "--entrypoint", "bash",
-            cfg.runtime_image,
-            "-c",
-            `source "$NVM_DIR/nvm.sh" && socat TCP-LISTEN:${port},fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:${port} & exec codex login`,
-        ],
-        { stdio: "inherit" },
-    );
-
-    if (result.status !== 0) {
-        // Clean up container on failure
-        spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
-        p.cancel("Codex login failed or was cancelled.");
-        process.exit(1);
-    }
-
-    // Copy auth file from container to host
     const configDir = expandHome(cfg.config_directory);
     if (!existsSync(configDir)) {
         mkdirSync(configDir, { recursive: true });
     }
     const destPath = join(configDir, cfg.codex_auth_file_path);
 
-    const cpResult = spawnSync(
+    // Start codex interactively (full TTY passthrough so user can interact)
+    // Host:port → container:socatPort (socat) → container:127.0.0.1:port (codex)
+    const child = spawn(
         "docker",
-        ["cp", `${containerName}:${cfg.container_codex_auth_path}`, destPath],
+        [
+            "run",
+            "-it",
+            "--name", containerName,
+            "-p", `${port}:${socatPort}`,
+            "--entrypoint", "bash",
+            cfg.runtime_image,
+            "-c",
+            `source "$NVM_DIR/nvm.sh"; socat TCP-LISTEN:${socatPort},fork,bind=0.0.0.0,reuseaddr TCP:127.0.0.1:${port} 2>/dev/null & codex`,
+        ],
         { stdio: "inherit" },
     );
 
-    // Clean up container
-    spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+    // Poll for auth file inside the container — once it exists, login succeeded
+    let authCopied = false;
 
-    if (cpResult.status !== 0) {
-        p.cancel("Failed to extract auth file from container.");
-        process.exit(1);
-    }
+    await new Promise<void>((resolve, reject) => {
+        const poll = setInterval(() => {
+            const check = spawnSync(
+                "docker",
+                ["exec", containerName, "test", "-f", cfg.container_codex_auth_path],
+                { stdio: "ignore" },
+            );
+            if (check.status === 0) {
+                clearInterval(poll);
+
+                // Copy auth file from container to host
+                const cpResult = spawnSync(
+                    "docker",
+                    ["cp", `${containerName}:${cfg.container_codex_auth_path}`, destPath],
+                    { stdio: "ignore" },
+                );
+
+                if (cpResult.status !== 0) {
+                    spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+                    reject(new Error("Failed to extract auth file from container."));
+                    return;
+                }
+
+                // Mark success before killing container to avoid race with exit handler
+                authCopied = true;
+                spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+                resolve();
+            }
+        }, 1000);
+
+        // If codex exits before auth file appeared, user cancelled
+        child.on("exit", () => {
+            clearInterval(poll);
+            if (!authCopied) {
+                spawnSync("docker", ["rm", "-f", containerName], { stdio: "ignore" });
+                reject(new Error("Codex login failed or was cancelled."));
+            }
+        });
+    });
 
     await db.insert(agentSdks).values({ name: "codex", authentication: "dedicated" });
     p.log.success(`Codex auth saved to ${destPath}`);
-    p.log.success("Codex SDK configured with dedicated authentication.");
 }
 
 export async function startup() {
@@ -124,6 +146,11 @@ export async function startup() {
     }
 
     // Dedicated auth flow
-    await dedicatedAuth(cfg, db);
-    p.outro("Setup complete!");
+    try {
+        await dedicatedAuth(cfg, db);
+        p.outro("Codex login successful!");
+    } catch (err: any) {
+        p.cancel(err.message ?? "Codex login failed or was cancelled.");
+        process.exit(1);
+    }
 }
