@@ -8,6 +8,13 @@
       "when": 1771739401031,
       "tag": "0000_nice_stepford_cuckoos",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1771741349847,
+      "tag": "0001_third_vermin",
+      "breakpoints": true
     }
   ]
 }

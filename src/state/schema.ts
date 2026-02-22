@@ -28,15 +28,26 @@ export const agents = sqliteTable("agents", {
     .$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
   sdk: text("sdk", { enum: ["codex"] }).notNull(),
-  model: text("model").notNull(),
-  reasoningLevel: text("reasoning_level").notNull(),
-  workspace: text("workspace").notNull(),
-  runtimeContainer: text("runtime_container").notNull(),
-  dindContainer: text("dind_container").notNull(),
-  // home directory within the container
-  homeDirectory: text("home_directory").notNull(),
-  // uid of the user within the container
-  uid: integer("uid").notNull(),
-  // gid of the user within the container
-  gid: integer("gid").notNull(),
+
+});
+
+// -- threads ──────────────────────────────────────────────────────────────────
+
+export const threads = sqliteTable("threads", {
+  id: text("id")
+    .primaryKey(),
+  agentId: text("agent_id")
+    .notNull()
+    .references(() => agents.id),
+    model: text("model").notNull(),
+    reasoningLevel: text("reasoning_level").notNull(),
+    workspace: text("workspace").notNull(),
+    runtimeContainer: text("runtime_container").notNull(),
+    dindContainer: text("dind_container").notNull(),
+    // home directory within the container
+    homeDirectory: text("home_directory").notNull(),
+    // uid of the user within the container
+    uid: integer("uid").notNull(),
+    // gid of the user within the container
+    gid: integer("gid").notNull(),
 });
