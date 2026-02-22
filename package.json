@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@clack/prompts": "^1.0.1",
-    "@companyhelm/protos": "^0.1.0",
+    "@companyhelm/protos": "^0.1.2",
     "@libsql/client": "^0.17.0",
     "commander": "^14.0.0",
     "dockerode": "^4.0.9",
