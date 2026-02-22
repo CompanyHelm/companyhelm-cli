@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Command } from "commander";
-import { startup } from "./startup.js";
+import { registerCommands } from "./commands/index.js";
 
 function getVersion(): string {
   try {
@@ -20,9 +20,8 @@ const program = new Command();
 program
   .name("companyhelm")
   .description("Run coding agents in fully isolated Docker sandboxes, locally.")
-  .version(getVersion())
-  .action(async () => {
-    await startup();
-  });
+  .version(getVersion());
+
+registerCommands(program);
 
 program.parse(process.argv);
