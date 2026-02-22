@@ -22,6 +22,9 @@ export const config = z.object({
     state_db_path: z.string()
         .describe("The path to the state database.")
         .default("~/.local/share/companyhelm/state.db"),
+    companyhelm_api_url: z.string()
+        .describe("CompanyHelm control plane gRPC endpoint URL.")
+        .default("api.companyhelm.com/grpc"),
     runtime_image: z.string()
         .describe("The name of the runtime image.")
         .default("companyhelm/runner:latest"),
