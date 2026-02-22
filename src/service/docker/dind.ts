@@ -1,6 +1,11 @@
 import Dockerode from "dockerode";
+import { config as configSchema, type Config } from "../../config.js";
+import {
+  COMPANYHELM_DOCKER_MANAGED_LABEL,
+  COMPANYHELM_DOCKER_SERVICE_LABEL,
+  DIND_CONTAINER_NAME_PREFIX,
+} from "./constants.js";
 
-const DIND_IMAGE = "docker:dind-rootless";
 const DIND_PORT = 2375;
 const READY_TIMEOUT_MS = 30_000;
 const READY_POLL_MS = 500;
@@ -12,11 +17,19 @@ export interface DinDEndpoint {
 
 export class DinDService {
   private docker: Dockerode;
+  private image: string;
   private container: Dockerode.Container | null = null;
   private _endpoint: DinDEndpoint | null = null;
 
-  constructor(docker?: Dockerode) {
+  constructor(docker?: Dockerode, image?: string) {
     this.docker = docker ?? new Dockerode();
+    if (image) {
+      this.image = image;
+      return;
+    }
+
+    const cfg: Config = configSchema.parse({});
+    this.image = cfg.dind_image;
   }
 
   async start(): Promise<void> {
@@ -32,8 +45,13 @@ export class DinDService {
     await this.pullImage();
 
     const container = await this.docker.createContainer({
-      Image: DIND_IMAGE,
+      name: `${DIND_CONTAINER_NAME_PREFIX}${Date.now()}`,
+      Image: this.image,
       User: String(uid),
+      Labels: {
+        [COMPANYHELM_DOCKER_MANAGED_LABEL]: "true",
+        [COMPANYHELM_DOCKER_SERVICE_LABEL]: "dind",
+      },
       Env: [
         // Disable TLS so the inner daemon listens on plain 2375.
         "DOCKER_TLS_CERTDIR=",
@@ -98,13 +116,13 @@ export class DinDService {
 
   private async pullImage(): Promise<void> {
     try {
-      await this.docker.getImage(DIND_IMAGE).inspect();
+      await this.docker.getImage(this.image).inspect();
       return; // already present
     } catch {
       // not found – pull it
     }
 
-    const stream = await this.docker.pull(DIND_IMAGE);
+    const stream = await this.docker.pull(this.image);
     await new Promise<void>((resolve, reject) => {
       this.docker.modem.followProgress(
         stream,

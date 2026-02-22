@@ -9,6 +9,11 @@ import { AsyncQueue } from "../../utils/async_queue.js";
 import { expandHome } from "../../utils/path.js";
 import type { AppServerTransport, AppServerTransportEvent } from "../app_server.js";
 import { getHostInfo } from "../host.js";
+import {
+  APP_SERVER_CONTAINER_NAME_PREFIX,
+  COMPANYHELM_DOCKER_MANAGED_LABEL,
+  COMPANYHELM_DOCKER_SERVICE_LABEL,
+} from "./constants.js";
 
 const DEFAULT_APP_SERVER_COMMAND = 'source "$NVM_DIR/nvm.sh"; codex app-server --listen stdio://';
 const BOOTSTRAP_TEMPLATE_PATH = "templates/app_server_bootstrap.sh.j2";
@@ -94,7 +99,7 @@ export class AppServerContainerService implements AppServerTransport {
       mountArgs.push("--mount", `type=bind,src=${hostDedicatedAuthPath},dst=${containerAuthPath}`);
     }
 
-    this.containerName = `companyhelm-codex-app-server-${Date.now()}`;
+    this.containerName = `${APP_SERVER_CONTAINER_NAME_PREFIX}${Date.now()}`;
 
     const bootstrapTemplate = readFileSync(resolveTemplatePath(), "utf8");
     const bootstrapScript = renderJinjaTemplate(bootstrapTemplate, {
@@ -112,6 +117,10 @@ export class AppServerContainerService implements AppServerTransport {
       "-i",
       "--name",
       this.containerName,
+      "--label",
+      `${COMPANYHELM_DOCKER_MANAGED_LABEL}=true`,
+      "--label",
+      `${COMPANYHELM_DOCKER_SERVICE_LABEL}=app-server`,
       "--entrypoint",
       "bash",
       ...mountArgs,

@@ -6,6 +6,11 @@ import figlet from "figlet";
 import { config as configSchema, type Config } from "../config.js";
 import { initDb } from "../state/db.js";
 import { agentSdks } from "../state/schema.js";
+import {
+  AUTH_CONTAINER_NAME_PREFIX,
+  COMPANYHELM_DOCKER_MANAGED_LABEL,
+  COMPANYHELM_DOCKER_SERVICE_LABEL,
+} from "../service/docker/constants.js";
 import { getHostInfo } from "../service/host.js";
 import { refreshSdkModels } from "../service/sdk/refresh_models.js";
 import { expandHome } from "../utils/path.js";
@@ -27,7 +32,7 @@ async function refreshCodexModelsInStartup(): Promise<void> {
 async function dedicatedAuth(cfg: Config, db: any) {
   const port = cfg.codex.codex_auth_port;
   const socatPort = port + 1;
-  const containerName = `companyhelm-codex-auth-${Date.now()}`;
+  const containerName = `${AUTH_CONTAINER_NAME_PREFIX}${Date.now()}`;
 
   p.log.info("Starting Codex login inside a container...");
   p.log.info("A browser URL will appear -- open it to complete authentication.");
@@ -45,6 +50,10 @@ async function dedicatedAuth(cfg: Config, db: any) {
       "-it",
       "--name",
       containerName,
+      "--label",
+      `${COMPANYHELM_DOCKER_MANAGED_LABEL}=true`,
+      "--label",
+      `${COMPANYHELM_DOCKER_SERVICE_LABEL}=auth`,
       "-p",
       `${port}:${socatPort}`,
       "--entrypoint",
