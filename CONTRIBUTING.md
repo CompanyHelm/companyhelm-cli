@@ -8,6 +8,6 @@ To regenerate the Codex App Server TypeScript schemas, run:
 npm run generate:codex-app-server
 ```
 
-This runs `codex app-server generate-ts` and outputs the generated types to `src/generated/codex-app-server/`.
+This runs `codex app-server generate-ts` inside `companyhelm/runner:latest` and outputs the generated types to `src/generated/codex-app-server/`.
 
 Commit any changes to the generated files alongside the code that depends on them.
