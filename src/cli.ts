@@ -25,12 +25,4 @@ program
     await startup();
   });
 
-program
-  .command("codex")
-  .description("Print a hello message")
-  .argument("[name]", "Name to greet", "world")
-  .action((name: string) => {
-    process.stdout.write(`Hello, ${name}!\n`);
-  });
-
 program.parse(process.argv);
