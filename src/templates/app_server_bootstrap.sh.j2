@@ -1,5 +1,12 @@
 set -euo pipefail
 
+AGENT_USER={{ agent_user }}
+AGENT_HOME={{ agent_home }}
+AGENT_UID={{ agent_uid }}
+AGENT_GID={{ agent_gid }}
+CODEX_AUTH_PATH={{ codex_auth_path }}
+APP_SERVER_COMMAND={{ app_server_command }}
+
 AGENT_GROUP="$AGENT_USER"
 if getent group "$AGENT_GID" >/dev/null 2>&1; then
   AGENT_GROUP="$(getent group "$AGENT_GID" | cut -d: -f1)"
@@ -26,4 +33,4 @@ if [ -n "${CODEX_AUTH_PATH:-}" ]; then
 fi
 
 export HOME="$AGENT_HOME"
-exec sudo -E -H -u "$AGENT_USER" {{ app_server_command }}
+exec sudo -E -H -u "$AGENT_USER" bash -lc "$APP_SERVER_COMMAND"

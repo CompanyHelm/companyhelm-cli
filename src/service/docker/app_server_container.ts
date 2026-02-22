@@ -127,6 +127,10 @@ function renderJinjaTemplate(template: string, context: Record<string, string>):
   });
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
 export class AppServerContainerService {
   private readonly docker: Dockerode;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
@@ -181,7 +185,12 @@ export class AppServerContainerService {
     const containerName = `companyhelm-codex-app-server-${Date.now()}`;
     const bootstrapTemplate = readFileSync(resolveTemplatePath(), "utf8");
     const bootstrapScript = renderJinjaTemplate(bootstrapTemplate, {
-      app_server_command: DEFAULT_APP_SERVER_COMMAND,
+      agent_user: shellQuote(cfg.agent_user),
+      agent_home: shellQuote(containerHome),
+      agent_uid: shellQuote(String(hostInfo.uid)),
+      agent_gid: shellQuote(String(hostInfo.gid)),
+      codex_auth_path: shellQuote(containerAuthPath),
+      app_server_command: shellQuote(DEFAULT_APP_SERVER_COMMAND),
     });
 
     const container = await this.docker.createContainer({
@@ -194,13 +203,6 @@ export class AppServerContainerService {
       AttachStdout: true,
       AttachStderr: true,
       WorkingDir: containerHome,
-      Env: [
-        `AGENT_USER=${cfg.agent_user}`,
-        `AGENT_HOME=${containerHome}`,
-        `AGENT_UID=${hostInfo.uid}`,
-        `AGENT_GID=${hostInfo.gid}`,
-        `CODEX_AUTH_PATH=${containerAuthPath}`,
-      ],
       HostConfig: {
         Binds: binds,
       },
