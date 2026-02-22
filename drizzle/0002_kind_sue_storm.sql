@@ -1,0 +1,1 @@
+ALTER TABLE `threads` ADD `status` text NOT NULL;

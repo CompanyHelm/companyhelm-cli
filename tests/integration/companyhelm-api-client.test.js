@@ -18,7 +18,7 @@ const {
   createAgentRunnerControlServiceDefinition,
 } = require("../../dist/service/companyhelm_api_client.js");
 const { initDb } = require("../../dist/state/db.js");
-const { agentSdks, llmModels } = require("../../dist/state/schema.js");
+const { agents, agentSdks, llmModels } = require("../../dist/state/schema.js");
 
 function waitForExit(child, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
@@ -313,4 +313,82 @@ test("companyhelm root command retries until server becomes available", async (t
   assert.match(result.stdout, /Connected to CompanyHelm API/);
   assert.equal(commandChannelOpened, true);
   assert.equal(registerRequests, 1);
+});
+
+test("companyhelm root command handles createAgentCommand by storing agent and sending update", async (t) => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
+  t.after(async () => {
+    await rm(homeDirectory, { recursive: true, force: true });
+  });
+  await seedStateDatabase(homeDirectory);
+
+  let receivedClientUpdate = null;
+  let resolveClientUpdate;
+  const clientUpdatePromise = new Promise((resolve) => {
+    resolveClientUpdate = resolve;
+  });
+
+  const { server, port } = await startFakeServer("/grpc", {
+    registerRunner(call, callback) {
+      callback(null, create(RegisterRunnerResponseSchema, {}));
+    },
+    commandChannel(call) {
+      call.write(
+        create(ServerMessageSchema, {
+          commandId: "create-agent-1",
+          command: {
+            case: "createAgentCommand",
+            value: {
+              agentId: "agent-from-command",
+              agentSdk: "codex",
+            },
+          },
+        }),
+      );
+
+      call.on("data", (message) => {
+        receivedClientUpdate = message;
+        resolveClientUpdate();
+        call.end();
+      });
+    },
+  });
+
+  t.after(async () => {
+    await shutdownServer(server);
+  });
+
+  const repositoryRoot = path.resolve(__dirname, "../..");
+  const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+  const result = await waitForExit(
+    spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
+      cwd: repositoryRoot,
+      env: { ...process.env, HOME: homeDirectory },
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+    30_000,
+  );
+
+  await clientUpdatePromise;
+
+  assert.equal(
+    result.code,
+    0,
+    `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
+  );
+  assert.equal(receivedClientUpdate?.commandId, "create-agent-1");
+  assert.equal(receivedClientUpdate?.payload?.case, "agentCreatedUpdate");
+  assert.equal(receivedClientUpdate?.payload?.value?.status, 1);
+
+  const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+  const { db, client } = await initDb(stateDbPath);
+  try {
+    const storedAgents = await db.select().from(agents).all();
+    const createdAgent = storedAgents.find((agent) => agent.id === "agent-from-command");
+    assert.ok(createdAgent, "expected agent row to be created from createAgentCommand");
+    assert.equal(createdAgent.name, "agent-from-command");
+    assert.equal(createdAgent.sdk, "codex");
+  } finally {
+    client.close();
+  }
 });

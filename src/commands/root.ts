@@ -1,11 +1,18 @@
 import { create } from "@bufbuild/protobuf";
-import { RegisterRunnerRequestSchema, type RegisterRunnerRequest } from "@companyhelm/protos";
+import {
+  AgentCreatedUpdateStatus,
+  ClientMessageSchema,
+  type CreateAgentCommand,
+  type ServerMessage,
+  RegisterRunnerRequestSchema,
+  type RegisterRunnerRequest,
+} from "@companyhelm/protos";
 import type { Command } from "commander";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
-import { CompanyhelmApiClient } from "../service/companyhelm_api_client.js";
+import { CompanyhelmApiClient, type CompanyhelmCommandChannel } from "../service/companyhelm_api_client.js";
 import { initDb } from "../state/db.js";
-import { agentSdks, llmModels } from "../state/schema.js";
+import { agentSdks, llmModels, agents } from "../state/schema.js";
 
 interface RootCommandOptions {
   companyhelmApiUrl?: string;
@@ -76,6 +83,58 @@ async function hasConfiguredSdks(cfg: Config): Promise<boolean> {
   }
 }
 
+async function createAgentInDb(cfg: Config, command: CreateAgentCommand): Promise<string | null> {
+  if (command.agentSdk !== "codex") {
+    return `Unsupported agent SDK '${command.agentSdk}'.`;
+  }
+
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    await db.insert(agents).values({
+      id: command.agentId,
+      name: command.agentId,
+      sdk: "codex",
+    });
+    return null;
+  } catch (error: unknown) {
+    return error instanceof Error ? error.message : String(error);
+  } finally {
+    client.close();
+  }
+}
+
+async function handleCreateAgentCommand(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  serverMessage: ServerMessage,
+  command: CreateAgentCommand,
+): Promise<void> {
+  const failureMessage = await createAgentInDb(cfg, command);
+  const status = failureMessage ? AgentCreatedUpdateStatus.FAILED : AgentCreatedUpdateStatus.SUCCESS;
+
+  await commandChannel.send(
+    create(ClientMessageSchema, {
+      commandId: serverMessage.commandId,
+      payload: {
+        case: "agentCreatedUpdate",
+        value: {
+          status,
+          failureMessage: failureMessage ?? undefined,
+        },
+      },
+    }),
+  );
+}
+
+async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel): Promise<void> {
+  for await (const serverMessage of commandChannel) {
+    if (serverMessage.command.case !== "createAgentCommand") {
+      continue;
+    }
+    await handleCreateAgentCommand(cfg, commandChannel, serverMessage, serverMessage.command.value);
+  }
+}
+
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.companyhelmApiUrl,
@@ -93,8 +152,8 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     try {
       const commandChannel = await apiClient.connect(registerRequest);
       await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
-      commandChannel.closeWrite();
       console.log(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
+      await runCommandLoop(cfg, commandChannel);
       return;
     } catch (error: unknown) {
       lastError = error instanceof Error ? error : new Error(String(error));

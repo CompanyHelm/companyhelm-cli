@@ -41,6 +41,7 @@ export const threads = sqliteTable("threads", {
     .references(() => agents.id),
     model: text("model").notNull(),
     reasoningLevel: text("reasoning_level").notNull(),
+    status: text("status", { enum: ["pending", "ready", "running"] }).notNull(),
     workspace: text("workspace").notNull(),
     runtimeContainer: text("runtime_container").notNull(),
     dindContainer: text("dind_container").notNull(),

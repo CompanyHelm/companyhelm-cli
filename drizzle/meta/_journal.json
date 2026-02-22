@@ -15,6 +15,13 @@
       "when": 1771741349847,
       "tag": "0001_third_vermin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1771746278024,
+      "tag": "0002_kind_sue_storm",
+      "breakpoints": true
     }
   ]
 }
