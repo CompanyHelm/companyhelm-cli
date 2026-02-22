@@ -70,10 +70,8 @@ function shutdownServer(server) {
 }
 
 async function seedStateDatabase(homeDirectory) {
-  const previousHome = process.env.HOME;
-  process.env.HOME = homeDirectory;
-
-  const { db, client } = await initDb("~/.local/share/companyhelm/state.db");
+  const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+  const { db, client } = await initDb(stateDbPath);
   try {
     await db.insert(agentSdks).values({
       name: "codex",
@@ -87,11 +85,6 @@ async function seedStateDatabase(homeDirectory) {
     });
   } finally {
     client.close();
-    if (previousHome === undefined) {
-      delete process.env.HOME;
-    } else {
-      process.env.HOME = previousHome;
-    }
   }
 }
 

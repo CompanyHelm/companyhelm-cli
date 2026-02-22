@@ -75,11 +75,6 @@ class AsyncQueue<T> {
   }
 }
 
-const registerRunnerMethod =
-  AgentRunnerControlService.methods.find((method) => method.localName === "registerRunner")?.name ?? "RegisterRunner";
-const commandChannelMethod =
-  AgentRunnerControlService.methods.find((method) => method.localName === "commandChannel")?.name ?? "CommandChannel";
-
 function normalizePathPrefix(value: string): string {
   if (!value || value === "/") {
     return "";
@@ -157,9 +152,11 @@ function defaultCredentials(endpoint: CompanyhelmApiEndpoint): grpc.ChannelCrede
 }
 
 export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc.ServiceDefinition {
+  const methods = AgentRunnerControlService.method;
+
   return {
     registerRunner: {
-      path: buildRpcPath(registerRunnerMethod, pathPrefix),
+      path: buildRpcPath(methods.registerRunner.name, pathPrefix),
       requestStream: false,
       responseStream: false,
       requestSerialize: (request: RegisterRunnerRequest): Buffer =>
@@ -170,7 +167,7 @@ export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc
       responseDeserialize: (bytes: Buffer): RegisterRunnerResponse => fromBinary(RegisterRunnerResponseSchema, bytes),
     },
     commandChannel: {
-      path: buildRpcPath(commandChannelMethod, pathPrefix),
+      path: buildRpcPath(methods.commandChannel.name, pathPrefix),
       requestStream: true,
       responseStream: true,
       requestSerialize: (request: ClientMessage): Buffer => Buffer.from(toBinary(ClientMessageSchema, request)),

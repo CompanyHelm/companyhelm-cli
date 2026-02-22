@@ -2,6 +2,7 @@ import { create } from "@bufbuild/protobuf";
 import { RegisterRunnerRequestSchema, type RegisterRunnerRequest } from "@companyhelm/protos";
 import type { Command } from "commander";
 import { config as configSchema, type Config } from "../config.js";
+import { startup } from "./startup.js";
 import { CompanyhelmApiClient } from "../service/companyhelm_api_client.js";
 import { initDb } from "../state/db.js";
 import { agentSdks, llmModels } from "../state/schema.js";
@@ -61,10 +62,24 @@ async function buildRegisterRunnerRequest(cfg: Config): Promise<RegisterRunnerRe
   }
 }
 
+async function hasConfiguredSdks(cfg: Config): Promise<boolean> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const configuredSdks = await db.select().from(agentSdks).all();
+    return configuredSdks.length > 0;
+  } finally {
+    client.close();
+  }
+}
+
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.companyhelmApiUrl,
   });
+
+  if (!(await hasConfiguredSdks(cfg))) {
+    await startup();
+  }
 
   const registerRequest = await buildRegisterRunnerRequest(cfg);
   const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
