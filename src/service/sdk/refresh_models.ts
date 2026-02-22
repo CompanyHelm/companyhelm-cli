@@ -1,15 +1,10 @@
 import { eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
-import type { ClientRequest } from "../../generated/codex-app-server/index.js";
 import type { Model as AppServerModel } from "../../generated/codex-app-server/v2/Model.js";
-import type { ModelListResponse } from "../../generated/codex-app-server/v2/ModelListResponse.js";
 import { initDb } from "../../state/db.js";
 import { agentSdks, llmModels } from "../../state/schema.js";
-import {
-  type AppServerIncomingMessage,
-  type AppServerResponseMessage,
-  AppServerContainerService,
-} from "../docker/app_server_container.js";
+import { AppServerService } from "../app_server.js";
+import { AppServerContainerService } from "../docker/app_server_container.js";
 
 export interface RefreshModelsOptions {
   sdk?: string;
@@ -20,92 +15,17 @@ export interface RefreshModelsResult {
   modelCount: number;
 }
 
-function hasTag(
-  message: AppServerIncomingMessage,
-): message is Extract<AppServerIncomingMessage, { type: string }> {
-  return typeof message === "object" && message !== null && "type" in message;
-}
-
-function isResponseMessage(message: AppServerIncomingMessage): message is AppServerResponseMessage {
-  return (
-    typeof message === "object" &&
-    message !== null &&
-    "id" in message &&
-    !("method" in message) &&
-    !("type" in message)
-  );
-}
-
-function isModelListResponse(value: unknown): value is ModelListResponse {
-  if (typeof value !== "object" || value === null) {
-    return false;
-  }
-
-  const data = (value as { data?: unknown }).data;
-  const nextCursor = (value as { nextCursor?: unknown }).nextCursor;
-  return Array.isArray(data) && (typeof nextCursor === "string" || nextCursor === null);
-}
-
-function formatUnknownError(value: unknown): string {
-  if (value instanceof Error) {
-    return value.message;
-  }
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-async function waitForResponseResult(
-  stream: AsyncGenerator<AppServerIncomingMessage, void, void>,
-  requestId: number,
-): Promise<unknown> {
-  for await (const message of stream) {
-    if (hasTag(message)) {
-      if (message.type === "parse_error") {
-        throw new Error(`Failed to parse app-server message: ${message.reason}`);
-      }
-      continue;
-    }
-
-    if (!isResponseMessage(message) || message.id !== requestId) {
-      continue;
-    }
-
-    if (message.error !== undefined) {
-      throw new Error(`app-server returned an error for request ${requestId}: ${formatUnknownError(message.error)}`);
-    }
-
-    return message.result;
-  }
-
-  throw new Error("app-server stream ended before the response was received");
-}
-
-async function fetchCodexModelsFromAppServer(): Promise<AppServerModel[]> {
-  const appServer = new AppServerContainerService();
+async function fetchCodexModelsFromAppServer(clientName: string): Promise<AppServerModel[]> {
+  const transport = new AppServerContainerService();
+  const appServer = new AppServerService(transport, clientName);
   await appServer.start();
 
-  const stream = appServer.receiveMessages();
   const models: AppServerModel[] = [];
   let nextCursor: string | null = null;
-  let requestId = 0;
 
   try {
     while (true) {
-      requestId += 1;
-      const request: ClientRequest = {
-        method: "model/list",
-        id: requestId,
-        params: { cursor: nextCursor, limit: 100 },
-      };
-
-      await appServer.sendRequest(request);
-      const result = await waitForResponseResult(stream, requestId);
-      if (!isModelListResponse(result)) {
-        throw new Error("app-server returned an invalid model/list payload");
-      }
+      const result = await appServer.listModels(nextCursor, 100);
 
       models.push(...result.data);
       if (!result.nextCursor) {
@@ -121,7 +41,7 @@ async function fetchCodexModelsFromAppServer(): Promise<AppServerModel[]> {
 }
 
 async function refreshCodexModels(cfg: Config): Promise<number> {
-  const models = await fetchCodexModelsFromAppServer();
+  const models = await fetchCodexModelsFromAppServer(cfg.codex.app_server_client_name);
   const { db, client } = await initDb(cfg.state_db_path);
 
   try {

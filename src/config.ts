@@ -10,6 +10,9 @@ export const codexConfig = z.object({
     codex_auth_port: z.number()
         .describe("The port used by Codex OAuth callback during dedicated auth.")
         .default(1455),
+    app_server_client_name: z.string()
+        .describe("Client name reported to Codex app-server during initialize.")
+        .default("cli"),
 });
 
 export const config = z.object({

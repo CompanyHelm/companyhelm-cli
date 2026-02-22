@@ -1,7 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
-import { PassThrough } from "node:stream";
-import Dockerode from "dockerode";
 import { eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
 import { type RequestId, type ClientRequest, type ServerNotification, type ServerRequest } from "../../generated/codex-app-server/index.js";
@@ -10,7 +9,7 @@ import { agentSdks } from "../../state/schema.js";
 import { expandHome } from "../../utils/path.js";
 import { getHostInfo } from "../host.js";
 
-const DEFAULT_APP_SERVER_COMMAND = "codex app-server --listen stdio://";
+const DEFAULT_APP_SERVER_COMMAND = 'source "$NVM_DIR/nvm.sh"; codex app-server --listen stdio://';
 const BOOTSTRAP_TEMPLATE_PATH = "templates/app_server_bootstrap.sh.j2";
 
 type JsonObject = { [key: string]: unknown };
@@ -128,22 +127,17 @@ function renderJinjaTemplate(template: string, context: Record<string, string>):
 }
 
 function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 export class AppServerContainerService {
-  private readonly docker: Dockerode;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
 
-  private container: Dockerode.Container | null = null;
-  private stdioStream: NodeJS.ReadWriteStream | null = null;
+  private child: ChildProcessWithoutNullStreams | null = null;
+  private containerName: string | null = null;
   private stdoutBuffer = Buffer.alloc(0);
   private framing: "unknown" | "content-length" | "newline" = "unknown";
   private running = false;
-
-  constructor(docker?: Dockerode) {
-    this.docker = docker ?? new Dockerode();
-  }
 
   async start(): Promise<void> {
     if (this.running) {
@@ -168,21 +162,21 @@ export class AppServerContainerService {
     }
 
     const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
-    await this.pullImage(cfg.runtime_image);
 
     const containerHome = cfg.agent_home_directory;
     const containerAuthPath = resolveContainerPath(cfg.codex.codex_auth_path, containerHome);
     const hostDedicatedAuthPath = `${expandHome(cfg.config_directory)}/${cfg.codex.codex_auth_file_path}`;
 
-    const binds: string[] = [];
+    const mountArgs: string[] = [];
     if (codexAuthMode === "dedicated") {
       if (!getHostInfo(hostDedicatedAuthPath).codexAuthExists) {
         throw new Error(`Dedicated Codex auth file was not found at ${hostDedicatedAuthPath}`);
       }
-      binds.push(`${hostDedicatedAuthPath}:${containerAuthPath}:ro`);
+      mountArgs.push("--mount", `type=bind,src=${hostDedicatedAuthPath},dst=${containerAuthPath}`);
     }
 
-    const containerName = `companyhelm-codex-app-server-${Date.now()}`;
+    this.containerName = `companyhelm-codex-app-server-${Date.now()}`;
+
     const bootstrapTemplate = readFileSync(resolveTemplatePath(), "utf8");
     const bootstrapScript = renderJinjaTemplate(bootstrapTemplate, {
       agent_user: shellQuote(cfg.agent_user),
@@ -193,53 +187,45 @@ export class AppServerContainerService {
       app_server_command: shellQuote(DEFAULT_APP_SERVER_COMMAND),
     });
 
-    const container = await this.docker.createContainer({
-      name: containerName,
-      Image: cfg.runtime_image,
-      Tty: false,
-      OpenStdin: true,
-      StdinOnce: false,
-      AttachStdin: true,
-      AttachStdout: true,
-      AttachStderr: true,
-      WorkingDir: containerHome,
-      HostConfig: {
-        Binds: binds,
-      },
-      Cmd: ["bash", "-lc", bootstrapScript],
+    const args = [
+      "run",
+      "--rm",
+      "-i",
+      "--name",
+      this.containerName,
+      "--entrypoint",
+      "bash",
+      ...mountArgs,
+      cfg.runtime_image,
+      "-lc",
+      bootstrapScript,
+    ];
+
+    const child = spawn("docker", args, {
+      stdio: ["pipe", "pipe", "pipe"],
     });
 
-    await container.start();
-    const attached = await container.attach({
-      stream: true,
-      stdin: true,
-      stdout: true,
-      stderr: true,
-    });
-
-    const stdout = new PassThrough();
-    const stderr = new PassThrough();
-    this.docker.modem.demuxStream(attached, stdout, stderr);
-
-    stdout.on("data", (chunk: Buffer) => this.consumeStdout(chunk));
-    stderr.on("data", (chunk: Buffer) => {
+    child.stdout.on("data", (chunk: Buffer) => this.consumeStdout(chunk));
+    child.stderr.on("data", (chunk: Buffer) => {
       this.messageQueue.push({ type: "stderr", payload: chunk.toString("utf8") });
     });
 
-    attached.on("error", (err: Error) => {
+    child.on("error", (err: Error) => {
       this.messageQueue.push({
         type: "parse_error",
         payload: "",
-        reason: `attached stream error: ${err.message}`,
+        reason: `docker process error: ${err.message}`,
       });
-    });
-    attached.on("end", () => {
       this.running = false;
       this.messageQueue.close();
     });
 
-    this.container = container;
-    this.stdioStream = attached;
+    child.on("exit", () => {
+      this.running = false;
+      this.messageQueue.close();
+    });
+
+    this.child = child;
     this.running = true;
   }
 
@@ -247,45 +233,31 @@ export class AppServerContainerService {
     this.running = false;
     this.messageQueue.close();
 
-    if (this.stdioStream) {
-      this.stdioStream.end();
-      this.stdioStream = null;
+    const child = this.child;
+    this.child = null;
+
+    if (child) {
+      if (!child.killed) {
+        child.kill("SIGTERM");
+      }
+      await new Promise<void>((resolve) => {
+        child.once("exit", () => resolve());
+      });
     }
 
-    if (!this.container) {
-      return;
+    if (this.containerName) {
+      spawnSync("docker", ["rm", "-f", this.containerName], { stdio: "ignore" });
+      this.containerName = null;
     }
-
-    const c = this.container;
-    this.container = null;
-
-    try {
-      await c.stop();
-    } catch {
-      // already stopped
-    }
-    try {
-      await c.remove({ force: true });
-    } catch {
-      // already removed
-    }
-  }
-
-  getContainer(): Dockerode.Container {
-    if (!this.container) {
-      throw new Error("App server container is not running");
-    }
-    return this.container;
   }
 
   async sendMessage(message: AppServerOutgoingMessage): Promise<void> {
-    if (!this.running || !this.stdioStream) {
+    if (!this.running || !this.child || !this.child.stdin) {
       throw new Error("App server container is not running");
     }
 
     const payload = JSON.stringify(message);
-    const framed = `Content-Length: ${Buffer.byteLength(payload, "utf8")}\r\n\r\n${payload}`;
-    this.stdioStream.write(framed);
+    this.child.stdin.write(`${payload}\n`);
   }
 
   async sendRequest(request: ClientRequest): Promise<void> {
@@ -300,20 +272,6 @@ export class AppServerContainerService {
       }
       yield item;
     }
-  }
-
-  private async pullImage(imageName: string): Promise<void> {
-    try {
-      await this.docker.getImage(imageName).inspect();
-      return;
-    } catch {
-      // not present
-    }
-
-    const stream = await this.docker.pull(imageName);
-    await new Promise<void>((resolve, reject) => {
-      this.docker.modem.followProgress(stream, (err: Error | null) => (err ? reject(err) : resolve()));
-    });
   }
 
   private consumeStdout(chunk: Buffer): void {

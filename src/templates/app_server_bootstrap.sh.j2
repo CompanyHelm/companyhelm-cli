@@ -25,7 +25,7 @@ else
 fi
 
 mkdir -p "$AGENT_HOME"
-chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME"
+chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" || true
 
 if [ -n "${CODEX_AUTH_PATH:-}" ]; then
   mkdir -p "$(dirname "$CODEX_AUTH_PATH")"
@@ -33,4 +33,4 @@ if [ -n "${CODEX_AUTH_PATH:-}" ]; then
 fi
 
 export HOME="$AGENT_HOME"
-exec sudo -E -H -u "$AGENT_USER" bash -lc "$APP_SERVER_COMMAND"
+exec sudo -n -E -H -u "$AGENT_USER" bash -lc "$APP_SERVER_COMMAND"
