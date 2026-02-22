@@ -1,0 +1,29 @@
+set -euo pipefail
+
+AGENT_GROUP="$AGENT_USER"
+if getent group "$AGENT_GID" >/dev/null 2>&1; then
+  AGENT_GROUP="$(getent group "$AGENT_GID" | cut -d: -f1)"
+elif getent group "$AGENT_USER" >/dev/null 2>&1; then
+  groupmod -g "$AGENT_GID" "$AGENT_USER"
+  AGENT_GROUP="$AGENT_USER"
+else
+  groupadd -g "$AGENT_GID" "$AGENT_USER"
+  AGENT_GROUP="$AGENT_USER"
+fi
+
+if id -u "$AGENT_USER" >/dev/null 2>&1; then
+  usermod -u "$AGENT_UID" -g "$AGENT_GROUP" -d "$AGENT_HOME" "$AGENT_USER" || true
+else
+  useradd -m -d "$AGENT_HOME" -u "$AGENT_UID" -g "$AGENT_GROUP" -s /bin/bash "$AGENT_USER"
+fi
+
+mkdir -p "$AGENT_HOME"
+chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME"
+
+if [ -n "${CODEX_AUTH_PATH:-}" ]; then
+  mkdir -p "$(dirname "$CODEX_AUTH_PATH")"
+  chown -R "$AGENT_UID:$AGENT_GID" "$(dirname "$CODEX_AUTH_PATH")" || true
+fi
+
+export HOME="$AGENT_HOME"
+exec sudo -E -H -u "$AGENT_USER" {{ app_server_command }}

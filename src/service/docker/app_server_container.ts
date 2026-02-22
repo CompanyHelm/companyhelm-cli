@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import Dockerode from "dockerode";
 import { eq } from "drizzle-orm";
@@ -9,6 +11,7 @@ import { expandHome } from "../../utils/path.js";
 import { getHostInfo } from "../host.js";
 
 const DEFAULT_APP_SERVER_COMMAND = "codex app-server --listen stdio://";
+const BOOTSTRAP_TEMPLATE_PATH = "templates/app_server_bootstrap.sh.j2";
 
 type JsonObject = { [key: string]: unknown };
 
@@ -100,6 +103,30 @@ function hasMessageShape(value: unknown): value is JsonObject {
   return isJsonObject(value) && ("method" in value || "id" in value || "result" in value || "error" in value);
 }
 
+function resolveTemplatePath(): string {
+  const distRelativePath = join(__dirname, "..", "..", BOOTSTRAP_TEMPLATE_PATH);
+  if (existsSync(distRelativePath)) {
+    return distRelativePath;
+  }
+
+  const sourceRelativePath = join(__dirname, "..", "..", "..", "src", BOOTSTRAP_TEMPLATE_PATH);
+  if (existsSync(sourceRelativePath)) {
+    return sourceRelativePath;
+  }
+
+  throw new Error(`Bootstrap template was not found at ${distRelativePath} or ${sourceRelativePath}`);
+}
+
+function renderJinjaTemplate(template: string, context: Record<string, string>): string {
+  return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_match, key: string) => {
+    const value = context[key];
+    if (value === undefined) {
+      throw new Error(`Missing template value for key '${key}'`);
+    }
+    return value;
+  });
+}
+
 export class AppServerContainerService {
   private readonly docker: Dockerode;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
@@ -152,33 +179,10 @@ export class AppServerContainerService {
     }
 
     const containerName = `companyhelm-codex-app-server-${Date.now()}`;
-    const bootstrapScript = [
-      "set -euo pipefail",
-      "AGENT_GROUP=\"$AGENT_USER\"",
-      "if getent group \"$AGENT_USER\" >/dev/null 2>&1; then",
-      "  AGENT_GROUP=\"$AGENT_USER\"",
-      "else",
-      "  if getent group \"$AGENT_GID\" >/dev/null 2>&1; then",
-      "    AGENT_GROUP=\"$(getent group \"$AGENT_GID\" | cut -d: -f1)\"",
-      "  else",
-      "    groupadd -g \"$AGENT_GID\" \"$AGENT_USER\"",
-      "    AGENT_GROUP=\"$AGENT_USER\"",
-      "  fi",
-      "fi",
-      "if id -u \"$AGENT_USER\" >/dev/null 2>&1; then",
-      "  usermod -u \"$AGENT_UID\" -g \"$AGENT_GID\" -d \"$AGENT_HOME\" \"$AGENT_USER\" || true",
-      "else",
-      "  useradd -m -d \"$AGENT_HOME\" -u \"$AGENT_UID\" -g \"$AGENT_GID\" -s /bin/bash \"$AGENT_USER\"",
-      "fi",
-      "mkdir -p \"$AGENT_HOME\"",
-      "chown -R \"$AGENT_UID:$AGENT_GID\" \"$AGENT_HOME\"",
-      "if [ -n \"${CODEX_AUTH_PATH:-}\" ]; then",
-      "  mkdir -p \"$(dirname \"$CODEX_AUTH_PATH\")\"",
-      "  chown -R \"$AGENT_UID:$AGENT_GID\" \"$(dirname \"$CODEX_AUTH_PATH\")\" || true",
-      "fi",
-      "export HOME=\"$AGENT_HOME\"",
-      `exec sudo -E -H -u "$AGENT_USER" ${DEFAULT_APP_SERVER_COMMAND}`,
-    ].join("\n");
+    const bootstrapTemplate = readFileSync(resolveTemplatePath(), "utf8");
+    const bootstrapScript = renderJinjaTemplate(bootstrapTemplate, {
+      app_server_command: DEFAULT_APP_SERVER_COMMAND,
+    });
 
     const container = await this.docker.createContainer({
       name: containerName,
