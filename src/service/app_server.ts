@@ -1,5 +1,6 @@
 import type { ClientRequest, RequestId, ServerNotification, ServerRequest } from "../generated/codex-app-server/index.js";
 import type { ModelListResponse } from "../generated/codex-app-server/v2/ModelListResponse.js";
+import { AsyncQueue } from "../utils/async_queue.js";
 
 type JsonObject = { [key: string]: unknown };
 
@@ -42,47 +43,6 @@ export interface AppServerTransport {
   stop(): Promise<void>;
   sendRaw(payload: string): Promise<void>;
   receiveOutput(): AsyncGenerator<AppServerTransportEvent, void, void>;
-}
-
-class AsyncQueue<T> {
-  private readonly items: T[] = [];
-  private readonly waiters: Array<(value: T | null) => void> = [];
-  private closed = false;
-
-  push(item: T): void {
-    if (this.closed) {
-      return;
-    }
-
-    const waiter = this.waiters.shift();
-    if (waiter) {
-      waiter(item);
-      return;
-    }
-    this.items.push(item);
-  }
-
-  async pop(): Promise<T | null> {
-    if (this.items.length > 0) {
-      return this.items.shift() ?? null;
-    }
-    if (this.closed) {
-      return null;
-    }
-
-    return new Promise((resolve) => this.waiters.push(resolve));
-  }
-
-  close(): void {
-    if (this.closed) {
-      return;
-    }
-    this.closed = true;
-    for (const waiter of this.waiters) {
-      waiter(null);
-    }
-    this.waiters.length = 0;
-  }
 }
 
 class AppServerTimeoutError extends Error {
