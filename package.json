@@ -10,6 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "npm run build && node dist/cli.js",
     "test": "npm run build",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
     "generate:codex-app-server": "codex app-server generate-ts --out src/generated/codex-app-server"
   },
   "dependencies": {
@@ -26,6 +28,7 @@
     "@types/dockerode": "^4.0.1",
     "@types/figlet": "^1.7.0",
     "@types/node": "^22.13.5",
+    "drizzle-kit": "^0.31.9",
     "typescript": "^5.8.2"
   }
 }

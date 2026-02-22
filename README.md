@@ -49,6 +49,26 @@ Run companyhelm runner inside your workspace:
 companyhelm
 ```
 
+## Database Migrations (Drizzle Kit)
+
+Generate SQL migrations from the schema:
+
+```bash
+npm run db:generate
+```
+
+Apply migrations directly with Drizzle Kit (defaults to `~/.local/share/companyhelm/state.db`):
+
+```bash
+npm run db:migrate
+```
+
+Override the migration target database path when needed:
+
+```bash
+DRIZZLE_DB_PATH=/absolute/path/to/state.db npm run db:migrate
+```
+
 ---
 
 ## License
