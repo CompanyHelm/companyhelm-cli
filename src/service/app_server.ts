@@ -1,15 +1,47 @@
-import type { ClientRequest, RequestId } from "../generated/codex-app-server/index.js";
+import type { ClientRequest, RequestId, ServerNotification, ServerRequest } from "../generated/codex-app-server/index.js";
 import type { ModelListResponse } from "../generated/codex-app-server/v2/ModelListResponse.js";
-import type {
-  AppServerIncomingMessage,
-  AppServerResponseMessage,
-} from "./docker/app_server_container.js";
+
+type JsonObject = { [key: string]: unknown };
+
+export interface AppServerResponseMessage {
+  id: RequestId;
+  result?: unknown;
+  error?: unknown;
+}
+
+export interface AppServerParseErrorMessage {
+  type: "parse_error";
+  payload: string;
+  reason: string;
+}
+
+export interface AppServerStderrMessage {
+  type: "stderr";
+  payload: string;
+}
+
+export type AppServerIncomingMessage =
+  | ServerNotification
+  | ServerRequest
+  | AppServerResponseMessage
+  | AppServerParseErrorMessage
+  | AppServerStderrMessage;
+
+export type AppServerOutgoingMessage =
+  | ClientRequest
+  | { id: RequestId; result: unknown }
+  | { id: RequestId; error: unknown };
+
+export type AppServerTransportEvent =
+  | { type: "stdout"; payload: Buffer }
+  | { type: "stderr"; payload: string }
+  | { type: "error"; reason: string };
 
 export interface AppServerTransport {
   start(): Promise<void>;
   stop(): Promise<void>;
-  sendRequest(request: ClientRequest): Promise<void>;
-  receiveMessages(): AsyncGenerator<AppServerIncomingMessage, void, void>;
+  sendRaw(payload: string): Promise<void>;
+  receiveOutput(): AsyncGenerator<AppServerTransportEvent, void, void>;
 }
 
 class AsyncQueue<T> {
@@ -97,14 +129,24 @@ function isModelListResponse(value: unknown): value is ModelListResponse {
   return Array.isArray(data) && (typeof nextCursor === "string" || nextCursor === null);
 }
 
+function isJsonObject(value: unknown): value is JsonObject {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasMessageShape(value: unknown): value is JsonObject {
+  return isJsonObject(value) && ("method" in value || "id" in value || "result" in value || "error" in value);
+}
+
 export class AppServerService {
   private readonly transport: AppServerTransport;
   private readonly clientName: string;
-  private stream: AsyncGenerator<AppServerIncomingMessage, void, void> | null = null;
+  private stream: AsyncGenerator<AppServerTransportEvent, void, void> | null = null;
   private pumpTask: Promise<void> | null = null;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
   private nextRequestId = 1;
   private stderrLines: string[] = [];
+  private stdoutBuffer = Buffer.alloc(0);
+  private framing: "unknown" | "content-length" | "newline" = "unknown";
 
   constructor(transport: AppServerTransport, clientName: string) {
     this.transport = transport;
@@ -113,7 +155,7 @@ export class AppServerService {
 
   async start(): Promise<void> {
     await this.transport.start();
-    this.stream = this.transport.receiveMessages();
+    this.stream = this.transport.receiveOutput();
     this.pumpTask = this.pumpMessages();
     await this.initialize();
   }
@@ -123,6 +165,8 @@ export class AppServerService {
     this.pumpTask = null;
     this.stream = null;
     this.messageQueue.close();
+    this.stdoutBuffer = Buffer.alloc(0);
+    this.framing = "unknown";
     await this.transport.stop();
     if (pump) {
       await pump;
@@ -171,8 +215,12 @@ export class AppServerService {
       params,
     } as ClientRequest;
 
-    await this.transport.sendRequest(request);
+    await this.sendMessage(request);
     return this.waitForResponseResult(requestId, timeoutMs);
+  }
+
+  private async sendMessage(message: AppServerOutgoingMessage): Promise<void> {
+    await this.transport.sendRaw(`${JSON.stringify(message)}\n`);
   }
 
   private async pumpMessages(): Promise<void> {
@@ -181,12 +229,141 @@ export class AppServerService {
     }
 
     try {
-      for await (const message of this.stream) {
-        this.messageQueue.push(message);
+      for await (const event of this.stream) {
+        if (event.type === "stdout") {
+          this.consumeStdout(event.payload);
+          continue;
+        }
+
+        if (event.type === "stderr") {
+          this.messageQueue.push({ type: "stderr", payload: event.payload });
+          continue;
+        }
+
+        this.messageQueue.push({
+          type: "parse_error",
+          payload: "",
+          reason: event.reason,
+        });
       }
     } finally {
       this.messageQueue.close();
     }
+  }
+
+  private consumeStdout(chunk: Buffer): void {
+    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
+
+    while (true) {
+      if (this.framing === "unknown") {
+        if (this.stdoutBuffer.length === 0) {
+          return;
+        }
+
+        const head = this.stdoutBuffer.toString("utf8", 0, Math.min(this.stdoutBuffer.length, 64));
+        if (head.startsWith("Content-Length:")) {
+          this.framing = "content-length";
+        } else if (this.stdoutBuffer.includes(0x0a)) {
+          this.framing = "newline";
+        } else {
+          return;
+        }
+      }
+
+      if (this.framing === "content-length") {
+        const payload = this.tryParseContentLengthFrame();
+        if (!payload) {
+          return;
+        }
+        this.processPayload(payload);
+        continue;
+      }
+
+      const payload = this.tryParseNewlineFrame();
+      if (!payload) {
+        return;
+      }
+      this.processPayload(payload);
+    }
+  }
+
+  private tryParseContentLengthFrame(): string | null {
+    const crlfDelimiter = Buffer.from("\r\n\r\n");
+    const lfDelimiter = Buffer.from("\n\n");
+
+    let headerEnd = this.stdoutBuffer.indexOf(crlfDelimiter);
+    let delimiterBytes = 4;
+    if (headerEnd < 0) {
+      headerEnd = this.stdoutBuffer.indexOf(lfDelimiter);
+      delimiterBytes = 2;
+    }
+    if (headerEnd < 0) {
+      return null;
+    }
+
+    const headerText = this.stdoutBuffer.subarray(0, headerEnd).toString("utf8");
+    const match = /Content-Length:\s*(\d+)/i.exec(headerText);
+    if (!match) {
+      this.stdoutBuffer = this.stdoutBuffer.subarray(headerEnd + delimiterBytes);
+      this.messageQueue.push({
+        type: "parse_error",
+        payload: headerText,
+        reason: "missing Content-Length header",
+      });
+      return null;
+    }
+
+    const contentLength = Number.parseInt(match[1], 10);
+    const bodyStart = headerEnd + delimiterBytes;
+    const bodyEnd = bodyStart + contentLength;
+    if (this.stdoutBuffer.length < bodyEnd) {
+      return null;
+    }
+
+    const payload = this.stdoutBuffer.subarray(bodyStart, bodyEnd).toString("utf8");
+    this.stdoutBuffer = this.stdoutBuffer.subarray(bodyEnd);
+    return payload;
+  }
+
+  private tryParseNewlineFrame(): string | null {
+    const newlineIndex = this.stdoutBuffer.indexOf(0x0a);
+    if (newlineIndex < 0) {
+      return null;
+    }
+
+    const line = this.stdoutBuffer.subarray(0, newlineIndex).toString("utf8").replace(/\r$/, "");
+    this.stdoutBuffer = this.stdoutBuffer.subarray(newlineIndex + 1);
+
+    if (!line.trim()) {
+      return "";
+    }
+    return line;
+  }
+
+  private processPayload(payload: string): void {
+    if (!payload.trim()) {
+      return;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(payload) as unknown;
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : "invalid JSON";
+      this.messageQueue.push({ type: "parse_error", payload, reason });
+      return;
+    }
+
+    if (!hasMessageShape(parsed)) {
+      this.messageQueue.push({
+        type: "parse_error",
+        payload,
+        reason: "message does not match expected app-server envelope",
+      });
+      return;
+    }
+
+    this.messageQueue.push(parsed as AppServerIncomingMessage);
   }
 
   private async popMessageWithTimeout(timeoutMs: number): Promise<AppServerIncomingMessage | null> {
