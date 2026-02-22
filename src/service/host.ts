@@ -1,6 +1,6 @@
 import { homedir, userInfo } from "node:os";
 import { existsSync } from "node:fs";
-import { expandHome } from "../state/db.js";
+import { expandHome } from "../utils/path.js";
 
 export interface HostInfo {
     uid: number;

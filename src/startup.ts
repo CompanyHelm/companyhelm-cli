@@ -4,9 +4,10 @@ import { spawn, spawnSync } from "node:child_process";
 import * as p from "@clack/prompts";
 import figlet from "figlet";
 import { config as configSchema, type Config } from "./config.js";
-import { initDb, expandHome } from "./state/db.js";
+import { initDb } from "./state/db.js";
 import { agentSdks } from "./state/schema.js";
 import { getHostInfo } from "./service/host.js";
+import { expandHome } from "./utils/path.js";
 
 function banner() {
     console.log();

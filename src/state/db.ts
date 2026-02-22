@@ -2,16 +2,10 @@ import { createClient } from "@libsql/client";
 import { drizzle } from "drizzle-orm/libsql";
 import { migrate } from "drizzle-orm/libsql/migrator";
 import { mkdirSync, existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { join } from "node:path";
 import * as schema from "./schema.js";
-
-export function expandHome(p: string): string {
-    if (p.startsWith("~/")) {
-        return p.replace("~", homedir());
-    }
-    return p;
-}
+import { expandHome } from "../utils/path.js";
 
 export async function initDb(stateDbPath: string) {
     const resolved = expandHome(stateDbPath);
