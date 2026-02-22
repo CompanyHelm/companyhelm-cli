@@ -25,6 +25,12 @@ export const config = z.object({
     dind_image: z.string()
         .describe("The name of the DIND image.")
         .default("docker:29-dind-rootless"),
+    agent_user: z.string()
+        .describe("The user for the agent.")
+        .default("agent"),
+    agent_home_directory: z.string()
+        .describe("The home directory for the agent.")
+        .default("/home/agent"),
     codex: codexConfig.default(() => codexConfig.parse({})),
 });
 
