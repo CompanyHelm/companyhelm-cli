@@ -12,7 +12,7 @@
     "test": "npm run build",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "generate:codex-app-server": "docker run --rm --user \"$(id -u):$(id -g)\" -v \"$PWD:/workspace\" -w /workspace companyhelm/runner:latest bash -lc 'source \"$NVM_DIR/nvm.sh\"; codex app-server generate-ts --out src/generated/codex-app-server'"
+    "generate:codex-app-server": "docker run --rm --user \"$(id -u):$(id -g)\" -e CODEX_HOME=/workspace/node_modules/.cache/codex -v \"$PWD:/workspace\" -w /workspace companyhelm/runner:latest bash -lc 'mkdir -p /workspace/node_modules/.cache/codex; source \"$NVM_DIR/nvm.sh\"; codex app-server generate-ts --out src/generated/codex-app-server'"
   },
   "dependencies": {
     "@clack/prompts": "^1.0.1",
