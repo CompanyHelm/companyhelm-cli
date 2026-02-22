@@ -1,6 +1,7 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
 const { mkdtemp, rm } = require("node:fs/promises");
+const net = require("node:net");
 const path = require("node:path");
 const { tmpdir } = require("node:os");
 const test = require("node:test");
@@ -45,12 +46,12 @@ function waitForExit(child, timeoutMs = 15_000) {
   });
 }
 
-function startFakeServer(pathPrefix, implementation) {
+function startFakeServer(pathPrefix, implementation, bindAddress = "127.0.0.1:0") {
   const server = new grpc.Server();
   server.addService(createAgentRunnerControlServiceDefinition(pathPrefix), implementation);
 
   return new Promise((resolve, reject) => {
-    server.bindAsync("127.0.0.1:0", grpc.ServerCredentials.createInsecure(), (error, port) => {
+    server.bindAsync(bindAddress, grpc.ServerCredentials.createInsecure(), (error, port) => {
       if (error) {
         reject(error);
         return;
@@ -65,6 +66,28 @@ function shutdownServer(server) {
   return new Promise((resolve) => {
     server.tryShutdown(() => {
       resolve();
+    });
+  });
+}
+
+function reserveFreePort() {
+  return new Promise((resolve, reject) => {
+    const candidate = net.createServer();
+    candidate.on("error", reject);
+    candidate.listen(0, "127.0.0.1", () => {
+      const address = candidate.address();
+      if (!address || typeof address === "string") {
+        candidate.close(() => reject(new Error("failed to reserve local port")));
+        return;
+      }
+      const { port } = address;
+      candidate.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(port);
+      });
     });
   });
 }
@@ -195,6 +218,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
       if (!registerRequest) {
         commandOpenedBeforeRegister = true;
       }
+      call.sendMetadata(new grpc.Metadata());
       call.end();
     },
   });
@@ -224,4 +248,69 @@ test("companyhelm root command connects to API and triggers registration flow", 
   assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
   assert.equal(registerRequest?.agentSdks?.[0]?.models?.[0]?.name, "gpt-5.3-codex");
   assert.deepEqual(registerRequest?.agentSdks?.[0]?.models?.[0]?.reasoning, ["high"]);
+});
+
+test("companyhelm root command retries until server becomes available", async (t) => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
+  t.after(async () => {
+    await rm(homeDirectory, { recursive: true, force: true });
+  });
+  await seedStateDatabase(homeDirectory);
+
+  const port = await reserveFreePort();
+  let server;
+  let registerRequests = 0;
+  let commandChannelOpened = false;
+
+  const serverStartPromise = new Promise((resolve, reject) => {
+    setTimeout(async () => {
+      try {
+        const started = await startFakeServer(
+          "/grpc",
+          {
+            registerRunner(call, callback) {
+              registerRequests += 1;
+              callback(null, create(RegisterRunnerResponseSchema, {}));
+            },
+            commandChannel(call) {
+              commandChannelOpened = true;
+              call.sendMetadata(new grpc.Metadata());
+              call.end();
+            },
+          },
+          `127.0.0.1:${port}`,
+        );
+        server = started.server;
+        resolve();
+      } catch (error) {
+        reject(error);
+      }
+    }, 1_500);
+  });
+
+  const repositoryRoot = path.resolve(__dirname, "../..");
+  const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+  const cliProcess = spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
+    cwd: repositoryRoot,
+    env: { ...process.env, HOME: homeDirectory },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  const resultPromise = waitForExit(cliProcess, 30_000);
+  await serverStartPromise;
+  const result = await resultPromise;
+
+  if (server) {
+    await shutdownServer(server);
+  }
+
+  assert.equal(
+    result.code,
+    0,
+    `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
+  );
+  assert.match(result.stderr, /connection attempt 1\/4 failed/i);
+  assert.match(result.stdout, /Connected to CompanyHelm API/);
+  assert.equal(commandChannelOpened, true);
+  assert.equal(registerRequests, 1);
 });

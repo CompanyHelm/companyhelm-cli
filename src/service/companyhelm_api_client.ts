@@ -226,12 +226,14 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
   private readonly call: grpc.ClientDuplexStream<ClientMessage, ServerMessage>;
   private readonly opened: Promise<void>;
   private resolveOpened: (() => void) | null = null;
-  private hasOpened = false;
+  private rejectOpened: ((reason?: unknown) => void) | null = null;
+  private openState: "pending" | "opened" | "failed" = "pending";
 
   constructor(call: grpc.ClientDuplexStream<ClientMessage, ServerMessage>) {
     this.call = call;
-    this.opened = new Promise<void>((resolve) => {
+    this.opened = new Promise<void>((resolve, reject) => {
       this.resolveOpened = resolve;
+      this.rejectOpened = reject;
     });
 
     call.on("data", (message: ServerMessage) => {
@@ -242,34 +244,48 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
       this.setOpened();
     });
     call.on("end", () => {
-      this.setOpened();
+      this.failOpen(new Error("command channel closed before becoming usable"));
       this.messages.close();
     });
     call.on("error", (error: unknown) => {
-      this.setOpened();
       const serviceError = error as grpc.ServiceError;
       if (serviceError.code === grpc.status.CANCELLED) {
+        this.failOpen(new Error("command channel cancelled before becoming usable"));
         this.messages.close();
         return;
       }
-      this.messages.fail(toError(error));
+      const channelError = toError(error);
+      this.failOpen(channelError);
+      this.messages.fail(channelError);
     });
     call.on("status", (status: grpc.StatusObject) => {
-      this.setOpened();
       if (status.code === grpc.status.OK || status.code === grpc.status.CANCELLED) {
         return;
       }
-      this.messages.fail(new Error(`command channel closed with status ${status.code}: ${status.details}`));
+      const statusError = new Error(`command channel closed with status ${status.code}: ${status.details}`);
+      this.failOpen(statusError);
+      this.messages.fail(statusError);
     });
   }
 
   private setOpened(): void {
-    if (this.hasOpened) {
+    if (this.openState !== "pending") {
       return;
     }
-    this.hasOpened = true;
+    this.openState = "opened";
     this.resolveOpened?.();
     this.resolveOpened = null;
+    this.rejectOpened = null;
+  }
+
+  private failOpen(error: Error): void {
+    if (this.openState !== "pending") {
+      return;
+    }
+    this.openState = "failed";
+    this.rejectOpened?.(error);
+    this.resolveOpened = null;
+    this.rejectOpened = null;
   }
 
   send(message: ClientMessage): Promise<void> {

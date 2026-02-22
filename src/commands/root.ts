@@ -11,6 +11,10 @@ interface RootCommandOptions {
   companyhelmApiUrl?: string;
 }
 
+const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
+const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
+const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
+
 function normalizeReasoningLevels(value: unknown): string[] {
   if (Array.isArray(value)) {
     return value.filter((item): item is string => typeof item === "string");
@@ -82,16 +86,31 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   }
 
   const registerRequest = await buildRegisterRunnerRequest(cfg);
-  const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
+  let lastError: Error | null = null;
 
-  try {
-    const commandChannel = await apiClient.connect(registerRequest);
-    await commandChannel.waitForOpen();
-    commandChannel.closeWrite();
-    console.log(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
-  } finally {
-    apiClient.close();
+  for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
+    const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
+    try {
+      const commandChannel = await apiClient.connect(registerRequest);
+      await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
+      commandChannel.closeWrite();
+      console.log(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
+      return;
+    } catch (error: unknown) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt < COMMAND_CHANNEL_CONNECT_ATTEMPTS) {
+        const attemptLabel = `${attempt}/${COMMAND_CHANNEL_CONNECT_ATTEMPTS}`;
+        console.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
+        await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
+      }
+    } finally {
+      apiClient.close();
+    }
   }
+
+  throw new Error(
+    `Unable to establish CompanyHelm command channel after ${COMMAND_CHANNEL_CONNECT_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`,
+  );
 }
 
 export function registerRootCommand(program: Command): void {
