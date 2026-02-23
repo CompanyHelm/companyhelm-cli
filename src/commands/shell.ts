@@ -23,7 +23,7 @@ import { AsyncQueue } from "../utils/async_queue.js";
 const CONTROL_PLANE_BIND_HOST = "127.0.0.1";
 const CONTROL_PLANE_PATH_PREFIX = "/grpc";
 const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
-const REQUEST_TIMEOUT_MS = 15_000;
+const REQUEST_TIMEOUT_MS = 30_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
 type ShellMainAction = "grpc" | "db" | "show-daemon-logs" | "exit";
