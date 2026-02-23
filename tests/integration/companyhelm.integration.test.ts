@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { create } from "@bufbuild/protobuf";
 import * as grpc from "@grpc/grpc-js";
 import { vi } from "vitest";
+import Dockerode from "dockerode";
 
 const require = createRequire(import.meta.url);
 const {
@@ -138,6 +139,82 @@ async function writeHostAuthFile(homeDirectory: string): Promise<void> {
   const authDirectory = path.join(homeDirectory, ".codex");
   await mkdir(authDirectory, { recursive: true });
   await writeFile(path.join(authDirectory, "auth.json"), "{}", "utf8");
+}
+
+function isDockerNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+  if (statusCode === 404) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /No such container/i.test(message);
+}
+
+async function isDockerAvailable(): Promise<boolean> {
+  try {
+    const docker = new Dockerode();
+    await docker.ping();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function containerExists(docker: Dockerode, name: string): Promise<boolean> {
+  try {
+    await docker.getContainer(name).inspect();
+    return true;
+  } catch (error: unknown) {
+    if (isDockerNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function forceRemoveContainerIfExists(docker: Dockerode, name: string): Promise<void> {
+  try {
+    await docker.getContainer(name).remove({ force: true });
+  } catch (error: unknown) {
+    if (isDockerNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function supportsRealThreadContainerLifecycle(): Promise<boolean> {
+  const uid = process.getuid?.() ?? 1000;
+  const gid = process.getgid?.() ?? 1000;
+  const threadId = `preflight-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const names = threadLifecycle.buildThreadContainerNames(threadId);
+  const containerService = new threadLifecycle.ThreadContainerService();
+
+  try {
+    await containerService.createThreadContainers({
+      dindImage: "docker:29-dind-rootless",
+      runtimeImage: "companyhelm/runner:latest",
+      names,
+      mounts: [],
+      user: {
+        uid,
+        gid,
+        agentUser: "agent",
+        agentHomeDirectory: "/home/agent",
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await containerService.forceRemoveContainer(names.runtime).catch(() => undefined);
+    await containerService.forceRemoveContainer(names.dind).catch(() => undefined);
+  }
 }
 
 test("CompanyhelmApiClient registers first and streams messages both directions", async () => {
@@ -778,3 +855,194 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
+
+test(
+  "companyhelm root command creates real docker containers for thread and removes them on delete",
+  async () => {
+    if (!(await isDockerAvailable())) {
+      return;
+    }
+    if (!(await supportsRealThreadContainerLifecycle())) {
+      return;
+    }
+
+    const docker = new Dockerode();
+    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-real-docker-lifecycle-"));
+    let server: grpc.Server | undefined;
+    const previousHome = process.env.HOME;
+
+    let createdThreadId: string | null = null;
+    let runtimeContainerRunningAtReady: boolean | null = null;
+    let dindContainerRunningAtReady: boolean | null = null;
+    let runtimeContainerAbsentAfterDelete: boolean | null = null;
+    let dindContainerAbsentAfterDelete: boolean | null = null;
+    let workspaceExistsAtReady: boolean | null = null;
+    let receivedRequestError: any = null;
+    let receivedDeleteAgentUpdate = false;
+    let channelHandlerError: Error | null = null;
+
+    try {
+      process.env.HOME = homeDirectory;
+      await seedStateDatabase(homeDirectory);
+      await writeHostAuthFile(homeDirectory);
+
+      let sentCreateThreadRequest = false;
+      let sentDeleteThreadRequest = false;
+      let sentDeleteAgentRequest = false;
+
+      const started = await startFakeServer("/grpc", {
+        registerRunner(call, callback) {
+          callback(null, create(RegisterRunnerResponseSchema, {}));
+        },
+        controlChannel(call) {
+          call.write(
+            create(ServerMessageSchema, {
+              request: {
+                case: "createAgentRequest",
+                value: {
+                  agentId: "agent-real-docker",
+                  agentSdk: "codex",
+                },
+              },
+            }),
+          );
+
+          call.on("data", (message) => {
+            void (async () => {
+              if (message.payload.case === "requestError") {
+                receivedRequestError = message;
+                call.end();
+                return;
+              }
+
+              if (
+                !sentCreateThreadRequest &&
+                message.payload.case === "agentUpdate" &&
+                message.payload.value.agentId === "agent-real-docker" &&
+                message.payload.value.status === AgentStatus.READY
+              ) {
+                sentCreateThreadRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "createThreadRequest",
+                      value: {
+                        agentId: "agent-real-docker",
+                        model: "gpt-5.3-codex",
+                      },
+                    },
+                  }),
+                );
+                return;
+              }
+
+              if (
+                !sentDeleteThreadRequest &&
+                message.payload.case === "threadUpdate" &&
+                message.payload.value.status === ThreadStatus.READY
+              ) {
+                createdThreadId = message.payload.value.threadId;
+
+                const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
+                const runtimeInspect = await docker.getContainer(names.runtime).inspect();
+                const dindInspect = await docker.getContainer(names.dind).inspect();
+                runtimeContainerRunningAtReady = runtimeInspect.State?.Running ?? false;
+                dindContainerRunningAtReady = dindInspect.State?.Running ?? false;
+
+                const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+                const { db, client } = await initDb(stateDbPath);
+                try {
+                  const threadRow = await db.select().from(threads).where(eq(threads.id, createdThreadId)).get();
+                  workspaceExistsAtReady = threadRow ? existsSync(threadRow.workspace) : false;
+                } finally {
+                  client.close();
+                }
+
+                sentDeleteThreadRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "deleteThreadRequest",
+                      value: {
+                        agentId: "agent-real-docker",
+                        threadId: createdThreadId,
+                      },
+                    },
+                  }),
+                );
+                return;
+              }
+
+              if (
+                !sentDeleteAgentRequest &&
+                message.payload.case === "threadUpdate" &&
+                message.payload.value.status === ThreadStatus.DELETED
+              ) {
+                if (createdThreadId) {
+                  const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
+                  runtimeContainerAbsentAfterDelete = !(await containerExists(docker, names.runtime));
+                  dindContainerAbsentAfterDelete = !(await containerExists(docker, names.dind));
+                }
+
+                sentDeleteAgentRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "deleteAgentRequest",
+                      value: {
+                        agentId: "agent-real-docker",
+                      },
+                    },
+                  }),
+                );
+                return;
+              }
+
+              if (
+                message.payload.case === "agentUpdate" &&
+                message.payload.value.agentId === "agent-real-docker" &&
+                message.payload.value.status === AgentStatus.DELETED
+              ) {
+                receivedDeleteAgentUpdate = true;
+                call.end();
+              }
+            })().catch((error: unknown) => {
+              channelHandlerError = error instanceof Error ? error : new Error(String(error));
+              call.end();
+            });
+          });
+        },
+      });
+
+      server = started.server;
+
+      await runRootCommand({
+        companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+      });
+
+      assert.equal(channelHandlerError, null, channelHandlerError?.message ?? "unexpected channel handler error");
+      assert.equal(receivedRequestError, null, "did not expect requestError during real docker lifecycle");
+      assert.ok(createdThreadId, "expected thread id from thread ready update");
+      assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
+      assert.equal(runtimeContainerRunningAtReady, true, "expected runtime container to be running when thread is ready");
+      assert.equal(dindContainerRunningAtReady, true, "expected dind container to be running when thread is ready");
+      assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
+      assert.equal(runtimeContainerAbsentAfterDelete, true, "expected runtime container to be removed after deleteThreadRequest");
+      assert.equal(dindContainerAbsentAfterDelete, true, "expected dind container to be removed after deleteThreadRequest");
+    } finally {
+      if (createdThreadId) {
+        const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
+        await forceRemoveContainerIfExists(docker, names.runtime);
+        await forceRemoveContainerIfExists(docker, names.dind);
+      }
+
+      if (server) {
+        await shutdownServer(server);
+      }
+
+      process.env.HOME = previousHome;
+      await rm(homeDirectory, { recursive: true, force: true });
+    }
+  },
+  180_000,
+);
