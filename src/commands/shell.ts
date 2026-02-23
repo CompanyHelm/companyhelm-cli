@@ -26,14 +26,13 @@ const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
-type ShellMainAction = "grpc" | "db" | "show-daemon-logs" | "exit";
+type ShellMainAction = "grpc" | "db" | "show-state" | "show-daemon-logs" | "exit";
 
 type GrpcAction =
   | "create-agent"
   | "delete-agent"
   | "create-thread"
   | "delete-thread"
-  | "show-state"
   | "back";
 
 type DbAction = "list-sdk" | "list-agents" | "list-threads" | "back";
@@ -361,6 +360,7 @@ async function promptMainAction(): Promise<ShellMainAction | null> {
     options: [
       { value: "grpc", label: "(grpc) Commands" },
       { value: "db", label: "(db) Commands" },
+      { value: "show-state", label: "Show state" },
       { value: "show-daemon-logs", label: "Show daemon logs" },
       { value: "exit", label: "Exit shell" },
     ],
@@ -377,7 +377,6 @@ async function promptGrpcAction(): Promise<GrpcAction | null> {
       { value: "delete-agent", label: "Delete agent" },
       { value: "create-thread", label: "Create thread" },
       { value: "delete-thread", label: "Delete thread" },
-      { value: "show-state", label: "Show state" },
       { value: "back", label: "Back" },
     ],
   });
@@ -524,9 +523,6 @@ async function handleGrpcAction(
     case "delete-thread":
       await handleDeleteThread(controlPlane, state);
       return;
-    case "show-state":
-      printState(state);
-      return;
     case "back":
       return;
     default:
@@ -588,6 +584,11 @@ async function runShellLoop(
 
       if (mainAction === "show-daemon-logs") {
         printDaemonLogs(daemon.getOutput());
+        continue;
+      }
+
+      if (mainAction === "show-state") {
+        printState(state);
       }
     } catch (error: unknown) {
       p.log.error(toErrorMessage(error));
