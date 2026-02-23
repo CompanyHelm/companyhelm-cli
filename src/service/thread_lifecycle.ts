@@ -147,6 +147,20 @@ function isContainerNotFound(error: unknown): boolean {
   return /No such container/i.test(message);
 }
 
+function isImageNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+  if (statusCode === 404) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /No such image/i.test(message);
+}
+
 export class ThreadContainerService {
   private readonly docker: Dockerode;
 
@@ -154,7 +168,60 @@ export class ThreadContainerService {
     this.docker = docker ?? new Dockerode();
   }
 
+  private async pullImage(image: string): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      this.docker.pull(image, (error: Error | null, stream?: NodeJS.ReadableStream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        if (!stream) {
+          reject(new Error(`Docker returned an empty stream while pulling image '${image}'.`));
+          return;
+        }
+
+        const modem = (this.docker as unknown as {
+          modem?: {
+            followProgress?: (pullStream: NodeJS.ReadableStream, onFinished: (pullError: unknown) => void) => void;
+          };
+        }).modem;
+
+        if (!modem?.followProgress) {
+          resolve();
+          return;
+        }
+
+        modem.followProgress(stream, (pullError: unknown) => {
+          if (pullError) {
+            reject(pullError);
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+  }
+
+  private async ensureImageAvailable(image: string): Promise<void> {
+    try {
+      await this.docker.getImage(image).inspect();
+      return;
+    } catch (error: unknown) {
+      if (!isImageNotFound(error)) {
+        throw error;
+      }
+    }
+
+    await this.pullImage(image);
+  }
+
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
+    await this.ensureImageAvailable(options.dindImage);
+    if (options.runtimeImage !== options.dindImage) {
+      await this.ensureImageAvailable(options.runtimeImage);
+    }
+
     const dind = await this.docker.createContainer(buildDindContainerOptions(options));
     try {
       await dind.start();

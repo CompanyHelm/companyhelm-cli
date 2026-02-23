@@ -7,6 +7,7 @@ import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
   resolveThreadsRootDirectory,
+  ThreadContainerService,
 } from "../../dist/service/thread_lifecycle.js";
 
 test("buildThreadContainerNames returns deterministic runtime and dind names", () => {
@@ -116,4 +117,64 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share user, mou
   assert.deepEqual(runtimeOptions.HostConfig.Mounts, mounts);
   assert.equal(path.posix.normalize(dindOptions.WorkingDir), "/workspace");
   assert.equal(path.posix.normalize(runtimeOptions.WorkingDir), "/workspace");
+});
+
+test("ThreadContainerService pulls missing images before creating containers", async () => {
+  const pulledImages: string[] = [];
+  const createdImages: string[] = [];
+
+  const fakeDocker = {
+    getImage(image: string) {
+      return {
+        async inspect() {
+          if (image === "docker:29-dind-rootless" || image === "companyhelm/runner:latest") {
+            throw { statusCode: 404, message: `No such image: ${image}` };
+          }
+          return {};
+        },
+      };
+    },
+    pull(image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
+      pulledImages.push(image);
+      callback(null, {} as NodeJS.ReadableStream);
+    },
+    modem: {
+      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+        callback(null);
+      },
+    },
+    async createContainer(options: { Image: string }) {
+      createdImages.push(options.Image);
+      return {
+        async start() {
+          return undefined;
+        },
+      };
+    },
+    getContainer() {
+      return {
+        async remove() {
+          return undefined;
+        },
+      };
+    },
+  };
+
+  const service = new ThreadContainerService(fakeDocker as any);
+
+  await service.createThreadContainers({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names: buildThreadContainerNames("thread-pull"),
+    mounts: [],
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.deepEqual(pulledImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
+  assert.deepEqual(createdImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
 });
