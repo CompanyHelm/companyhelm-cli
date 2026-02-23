@@ -6,11 +6,12 @@ import {
   type CreateAgentRequest,
   type CreateThreadRequest,
   type DeleteAgentRequest,
+  type DeleteThreadRequest,
   type RegisterRunnerRequest,
   RegisterRunnerRequestSchema,
 } from "@companyhelm/protos";
 import type { Command } from "commander";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { mkdirSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { config as configSchema, type Config } from "../config.js";
@@ -353,6 +354,67 @@ async function handleDeleteAgentRequest(
   await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.DELETED);
 }
 
+async function handleDeleteThreadRequest(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  request: DeleteThreadRequest,
+): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+
+  let existingThread:
+    | {
+        id: string;
+        runtimeContainer: string;
+        dindContainer: string;
+      }
+    | undefined;
+
+  try {
+    existingThread = await db
+      .select({
+        id: threads.id,
+        runtimeContainer: threads.runtimeContainer,
+        dindContainer: threads.dindContainer,
+      })
+      .from(threads)
+      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
+      .get();
+
+    if (!existingThread) {
+      await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+      return;
+    }
+  } catch (error: unknown) {
+    await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
+    return;
+  } finally {
+    client.close();
+  }
+
+  const containerService = new ThreadContainerService();
+  try {
+    await containerService.forceRemoveContainer(existingThread.runtimeContainer);
+    await containerService.forceRemoveContainer(existingThread.dindContainer);
+  } catch (error: unknown) {
+    await sendRequestError(commandChannel, `Failed to delete containers for thread '${request.threadId}': ${toErrorMessage(error)}`);
+    return;
+  }
+
+  const { db: deleteDb, client: deleteClient } = await initDb(cfg.state_db_path);
+  try {
+    await deleteDb
+      .delete(threads)
+      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)));
+  } catch (error: unknown) {
+    await sendRequestError(commandChannel, `Failed to delete thread '${request.threadId}': ${toErrorMessage(error)}`);
+    return;
+  } finally {
+    deleteClient.close();
+  }
+
+  await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
+}
+
 async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel): Promise<void> {
   for await (const serverMessage of commandChannel) {
     switch (serverMessage.request.case) {
@@ -364,6 +426,9 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
         break;
       case "deleteAgentRequest":
         await handleDeleteAgentRequest(cfg, commandChannel, serverMessage.request.value);
+        break;
+      case "deleteThreadRequest":
+        await handleDeleteThreadRequest(cfg, commandChannel, serverMessage.request.value);
         break;
       default:
         break;

@@ -1,12 +1,18 @@
-const assert = require("node:assert/strict");
-const { spawn } = require("node:child_process");
-const { mkdtemp, rm, mkdir, writeFile } = require("node:fs/promises");
-const { existsSync } = require("node:fs");
-const net = require("node:net");
-const path = require("node:path");
-const { tmpdir } = require("node:os");
-const { create } = require("@bufbuild/protobuf");
-const grpc = require("@grpc/grpc-js");
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { create } from "@bufbuild/protobuf";
+import * as grpc from "@grpc/grpc-js";
+import { vi } from "vitest";
+
+const require = createRequire(import.meta.url);
 const {
   AgentStatus,
   ClientMessageSchema,
@@ -15,28 +21,35 @@ const {
   ServerMessageSchema,
   ThreadStatus,
 } = require("@companyhelm/protos");
+const { runRootCommand } = require("../../dist/commands/root.js");
 const {
   CompanyhelmApiClient,
   createAgentRunnerControlServiceDefinition,
 } = require("../../dist/service/companyhelm_api_client.js");
-const { runRootCommand } = require("../../dist/commands/root.js");
 const threadLifecycle = require("../../dist/service/thread_lifecycle.js");
 const { initDb } = require("../../dist/state/db.js");
 const { agents, agentSdks, llmModels, threads } = require("../../dist/state/schema.js");
 
-function waitForExit(child, timeoutMs = 15_000) {
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+function waitForExit(
+  child: ReturnType<typeof spawn>,
+  timeoutMs = 15_000,
+): Promise<{ code: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     let stdout = "";
     let stderr = "";
+
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
       reject(new Error(`CLI timed out after ${timeoutMs}ms.`));
     }, timeoutMs);
 
-    child.stdout?.on("data", (chunk) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
-    child.stderr?.on("data", (chunk) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
     child.on("error", (error) => {
@@ -50,7 +63,11 @@ function waitForExit(child, timeoutMs = 15_000) {
   });
 }
 
-function startFakeServer(pathPrefix, implementation, bindAddress = "127.0.0.1:0") {
+function startFakeServer(
+  pathPrefix: string,
+  implementation: grpc.UntypedServiceImplementation,
+  bindAddress = "127.0.0.1:0",
+): Promise<{ server: grpc.Server; port: number }> {
   const server = new grpc.Server();
   server.addService(createAgentRunnerControlServiceDefinition(pathPrefix), implementation);
 
@@ -66,7 +83,7 @@ function startFakeServer(pathPrefix, implementation, bindAddress = "127.0.0.1:0"
   });
 }
 
-function shutdownServer(server) {
+function shutdownServer(server: grpc.Server): Promise<void> {
   return new Promise((resolve) => {
     server.tryShutdown(() => {
       resolve();
@@ -74,7 +91,7 @@ function shutdownServer(server) {
   });
 }
 
-function reserveFreePort() {
+function reserveFreePort(): Promise<number> {
   return new Promise((resolve, reject) => {
     const candidate = net.createServer();
     candidate.on("error", reject);
@@ -84,6 +101,7 @@ function reserveFreePort() {
         candidate.close(() => reject(new Error("failed to reserve local port")));
         return;
       }
+
       const { port } = address;
       candidate.close((error) => {
         if (error) {
@@ -96,9 +114,10 @@ function reserveFreePort() {
   });
 }
 
-async function seedStateDatabase(homeDirectory) {
+async function seedStateDatabase(homeDirectory: string): Promise<void> {
   const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
   const { db, client } = await initDb(stateDbPath);
+
   try {
     await db.insert(agentSdks).values({
       name: "codex",
@@ -115,23 +134,24 @@ async function seedStateDatabase(homeDirectory) {
   }
 }
 
-async function writeHostAuthFile(homeDirectory) {
+async function writeHostAuthFile(homeDirectory: string): Promise<void> {
   const authDirectory = path.join(homeDirectory, ".codex");
   await mkdir(authDirectory, { recursive: true });
   await writeFile(path.join(authDirectory, "auth.json"), "{}", "utf8");
 }
 
 test("CompanyhelmApiClient registers first and streams messages both directions", async () => {
-  let registerRequest = null;
+  let registerRequest: any = null;
   let channelOpenedBeforeRegister = false;
-  let receivedClientMessage = null;
-  let resolveClientMessage;
-  const receivedClientMessagePromise = new Promise((resolve) => {
+  let receivedClientMessage: any = null;
+
+  let resolveClientMessage: (() => void) | null = null;
+  const receivedClientMessagePromise = new Promise<void>((resolve) => {
     resolveClientMessage = resolve;
   });
 
-  let server;
-  let client;
+  let server: grpc.Server | undefined;
+  let client: CompanyhelmApiClient | undefined;
 
   try {
     const started = await startFakeServer("/grpc", {
@@ -158,15 +178,14 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
 
         call.on("data", (message) => {
           receivedClientMessage = message;
-          resolveClientMessage();
+          resolveClientMessage?.();
           call.end();
         });
       },
     });
+
     server = started.server;
-    client = new CompanyhelmApiClient({
-      apiUrl: `127.0.0.1:${started.port}/grpc`,
-    });
+    client = new CompanyhelmApiClient({ apiUrl: `127.0.0.1:${started.port}/grpc` });
 
     const channel = await client.connect(
       create(RegisterRunnerRequestSchema, {
@@ -202,9 +221,7 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
     assert.equal(receivedClientMessage?.payload?.case, "requestError");
     assert.equal(receivedClientMessage?.payload?.value?.errorMessage, "ack");
   } finally {
-    if (client) {
-      client.close();
-    }
+    client?.close();
     if (server) {
       await shutdownServer(server);
     }
@@ -213,12 +230,12 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
 
 test("companyhelm root command connects to API and triggers registration flow", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
-  let server;
+  let server: grpc.Server | undefined;
 
   try {
     await seedStateDatabase(homeDirectory);
 
-    let registerRequest = null;
+    let registerRequest: any = null;
     let controlChannelOpened = false;
     let channelOpenedBeforeRegister = false;
 
@@ -236,6 +253,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
         call.end();
       },
     });
+
     server = started.server;
 
     const repositoryRoot = path.resolve(__dirname, "../..");
@@ -248,11 +266,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
       }),
     );
 
-    assert.equal(
-      result.code,
-      0,
-      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-    );
+    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.match(result.stdout, /Connected to CompanyHelm API/);
     assert.equal(controlChannelOpened, true);
     assert.equal(channelOpenedBeforeRegister, false);
@@ -269,7 +283,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
 
 test("companyhelm root command retries until server becomes available", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
-  let server;
+  let server: grpc.Server | undefined;
 
   try {
     await seedStateDatabase(homeDirectory);
@@ -278,7 +292,7 @@ test("companyhelm root command retries until server becomes available", async ()
     let registerRequests = 0;
     let controlChannelOpened = false;
 
-    const serverStartPromise = new Promise((resolve, reject) => {
+    const serverStartPromise = new Promise<void>((resolve, reject) => {
       setTimeout(async () => {
         try {
           const started = await startFakeServer(
@@ -296,6 +310,7 @@ test("companyhelm root command retries until server becomes available", async ()
             },
             `127.0.0.1:${port}`,
           );
+
           server = started.server;
           resolve();
         } catch (error) {
@@ -316,11 +331,7 @@ test("companyhelm root command retries until server becomes available", async ()
     await serverStartPromise;
     const result = await resultPromise;
 
-    assert.equal(
-      result.code,
-      0,
-      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-    );
+    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.match(result.stderr, /connection attempt 1\/4 failed/i);
     assert.match(result.stdout, /Connected to CompanyHelm API/);
     assert.equal(controlChannelOpened, true);
@@ -333,14 +344,71 @@ test("companyhelm root command retries until server becomes available", async ()
   }
 });
 
-test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
-  let server;
+test("companyhelm root command returns requestError for createThreadRequest when agent does not exist", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-thread-missing-agent-"));
+  let server: grpc.Server | undefined;
 
   try {
     await seedStateDatabase(homeDirectory);
 
-    let receivedClientUpdate = null;
+    let receivedClientUpdate: any = null;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createThreadRequest",
+              value: {
+                agentId: "missing-agent",
+                model: "gpt-5.3-codex",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          receivedClientUpdate = message;
+          call.end();
+        });
+      },
+    });
+
+    server = started.server;
+
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const result = await waitForExit(
+      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+        cwd: repositoryRoot,
+        env: { ...process.env, HOME: homeDirectory },
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
+
+    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
+    assert.ok(receivedClientUpdate, "expected CLI to send response for createThreadRequest");
+    assert.equal(receivedClientUpdate.payload.case, "requestError");
+    assert.match(receivedClientUpdate.payload.value.errorMessage, /missing-agent/i);
+  } finally {
+    if (server) {
+      await shutdownServer(server);
+    }
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
+  let server: grpc.Server | undefined;
+
+  try {
+    await seedStateDatabase(homeDirectory);
+
+    let receivedClientUpdate: any = null;
 
     const started = await startFakeServer("/grpc", {
       registerRunner(call, callback) {
@@ -365,6 +433,7 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
         });
       },
     });
+
     server = started.server;
 
     const repositoryRoot = path.resolve(__dirname, "../..");
@@ -378,11 +447,7 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
       30_000,
     );
 
-    assert.equal(
-      result.code,
-      0,
-      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-    );
+    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.ok(receivedClientUpdate, "expected agent update from runner");
     assert.equal(receivedClientUpdate.payload.case, "agentUpdate");
     assert.equal(receivedClientUpdate.payload.value.agentId, "agent-from-request");
@@ -407,26 +472,42 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
   }
 });
 
-test("companyhelm root command handles createThreadRequest and creates a ready thread", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-thread-success-"));
-  let server;
+test("companyhelm root command handles full lifecycle: create agent, create thread, delete thread, delete agent", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-thread-lifecycle-"));
+  let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
+  const activeContainerNames = new Set<string>();
 
   const createThreadContainersSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
-    .mockResolvedValue();
+    .mockImplementation(async (options) => {
+      activeContainerNames.add(options.names.runtime);
+      activeContainerNames.add(options.names.dind);
+    });
   const forceRemoveContainerSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
-    .mockResolvedValue();
+    .mockImplementation(async (name) => {
+      activeContainerNames.delete(name);
+    });
 
   try {
     process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory);
     await writeHostAuthFile(homeDirectory);
 
-    let receivedRequestError = null;
-    let receivedThreadUpdate = null;
+    let receivedRequestError: any = null;
+    let createdThreadId: string | null = null;
+
     let sentCreateThreadRequest = false;
+    let sentDeleteThreadRequest = false;
+    let sentDeleteAgentRequest = false;
+    let receivedDeleteAgentUpdate = false;
+    let runtimeContainerPresentAtReady: boolean | null = null;
+    let dindContainerPresentAtReady: boolean | null = null;
+    let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
+    let dindContainerPresentAfterThreadDelete: boolean | null = null;
+    let threadWorkspacePath: string | null = null;
+    let threadWorkspacePresentAtReady: boolean | null = null;
 
     const started = await startFakeServer("/grpc", {
       registerRunner(call, callback) {
@@ -438,7 +519,7 @@ test("companyhelm root command handles createThreadRequest and creates a ready t
             request: {
               case: "createAgentRequest",
               value: {
-                agentId: "agent-for-thread",
+                agentId: "agent-for-lifecycle",
                 agentSdk: "codex",
               },
             },
@@ -455,7 +536,7 @@ test("companyhelm root command handles createThreadRequest and creates a ready t
           if (
             !sentCreateThreadRequest &&
             message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-for-thread" &&
+            message.payload.value.agentId === "agent-for-lifecycle" &&
             message.payload.value.status === AgentStatus.READY
           ) {
             sentCreateThreadRequest = true;
@@ -464,7 +545,7 @@ test("companyhelm root command handles createThreadRequest and creates a ready t
                 request: {
                   case: "createThreadRequest",
                   value: {
-                    agentId: "agent-for-thread",
+                    agentId: "agent-for-lifecycle",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
                   },
@@ -474,49 +555,137 @@ test("companyhelm root command handles createThreadRequest and creates a ready t
             return;
           }
 
-          if (message.payload.case === "threadUpdate") {
-            receivedThreadUpdate = message;
+          if (
+            !sentDeleteThreadRequest &&
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.READY
+          ) {
+            createdThreadId = message.payload.value.threadId;
+            const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
+            const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
+            runtimeContainerPresentAtReady = activeContainerNames.has(expectedRuntimeContainer);
+            dindContainerPresentAtReady = activeContainerNames.has(expectedDindContainer);
+
+            const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
+            threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
+            threadWorkspacePresentAtReady = threadWorkspacePath ? existsSync(threadWorkspacePath) : false;
+
+            sentDeleteThreadRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "deleteThreadRequest",
+                  value: {
+                    agentId: "agent-for-lifecycle",
+                    threadId: createdThreadId,
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (
+            !sentDeleteAgentRequest &&
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.DELETED
+          ) {
+            if (createdThreadId) {
+              runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(
+                `companyhelm-runtime-thread-${createdThreadId}`,
+              );
+              dindContainerPresentAfterThreadDelete = activeContainerNames.has(
+                `companyhelm-dind-thread-${createdThreadId}`,
+              );
+            }
+
+            sentDeleteAgentRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "deleteAgentRequest",
+                  value: {
+                    agentId: "agent-for-lifecycle",
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "agent-for-lifecycle" &&
+            message.payload.value.status === AgentStatus.DELETED
+          ) {
+            receivedDeleteAgentUpdate = true;
             call.end();
           }
         });
       },
     });
+
     server = started.server;
 
     await runRootCommand({
       companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
     });
 
-    assert.equal(receivedRequestError, null, "did not expect requestError while creating thread");
-    assert.ok(receivedThreadUpdate, "expected threadUpdate message for createThreadRequest");
-    assert.equal(receivedThreadUpdate.payload.value.status, ThreadStatus.READY);
+    assert.equal(receivedRequestError, null, "did not expect requestError during lifecycle flow");
+    assert.ok(createdThreadId, "expected thread id from thread ready update");
+    assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
+    assert.equal(runtimeContainerPresentAtReady, true, "expected runtime container to exist when thread is ready");
+    assert.equal(dindContainerPresentAtReady, true, "expected dind container to exist when thread is ready");
+    assert.equal(
+      runtimeContainerPresentAfterThreadDelete,
+      false,
+      "expected runtime container to be removed after deleteThreadRequest",
+    );
+    assert.equal(
+      dindContainerPresentAfterThreadDelete,
+      false,
+      "expected dind container to be removed after deleteThreadRequest",
+    );
+    assert.equal(threadWorkspacePresentAtReady, true, "expected thread workspace directory to exist when thread is ready");
+    assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of lifecycle flow");
 
-    const threadId = receivedThreadUpdate.payload.value.threadId;
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
     const { db, client } = await initDb(stateDbPath);
 
     try {
+      const storedAgents = await db.select().from(agents).all();
+      assert.equal(
+        storedAgents.some((agent) => agent.id === "agent-for-lifecycle"),
+        false,
+        "expected lifecycle agent to be removed",
+      );
+
       const storedThreads = await db.select().from(threads).all();
-      const storedThread = storedThreads.find((thread) => thread.id === threadId);
-      assert.ok(storedThread, "expected thread row to be present after createThreadRequest");
-      assert.equal(storedThread.agentId, "agent-for-thread");
-      assert.equal(storedThread.model, "gpt-5.3-codex");
-      assert.equal(storedThread.reasoningLevel, "high");
-      assert.equal(storedThread.status, "ready");
-      assert.equal(existsSync(storedThread.workspace), true);
-      assert.equal(storedThread.runtimeContainer, `companyhelm-runtime-thread-${threadId}`);
-      assert.equal(storedThread.dindContainer, `companyhelm-dind-thread-${threadId}`);
+      assert.equal(
+        storedThreads.some((thread) => thread.id === createdThreadId),
+        false,
+        "expected lifecycle thread to be removed",
+      );
     } finally {
       client.close();
     }
 
     assert.equal(createThreadContainersSpy.mock.calls.length, 1);
-    assert.equal(forceRemoveContainerSpy.mock.calls.length, 0);
+    assert.equal(forceRemoveContainerSpy.mock.calls.length, 2);
 
     const createOptions = createThreadContainersSpy.mock.calls[0][0];
-    assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${threadId}`);
-    assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${threadId}`);
-    assert.equal(createOptions.mounts[0].Target, "/workspace");
+
+    assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${createdThreadId}`);
+    assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${createdThreadId}`);
+    assert.equal(createOptions.mounts[0]?.Target, "/workspace");
+    assert.equal(createOptions.mounts[0]?.Source, threadWorkspacePath);
+    assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, true, "expected thread workspace directory to remain on disk");
+
+    const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
+    assert.deepEqual(removedContainerNames, [
+      `companyhelm-runtime-thread-${createdThreadId}`,
+      `companyhelm-dind-thread-${createdThreadId}`,
+    ]);
   } finally {
     createThreadContainersSpy.mockRestore();
     forceRemoveContainerSpy.mockRestore();

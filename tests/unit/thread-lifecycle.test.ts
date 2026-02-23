@@ -1,13 +1,13 @@
-const assert = require("node:assert/strict");
-const path = require("node:path");
+import assert from "node:assert/strict";
+import path from "node:path";
 
-const {
-  buildThreadContainerNames,
-  resolveThreadsRootDirectory,
-  buildSharedThreadMounts,
+import {
   buildDindContainerOptions,
   buildRuntimeContainerOptions,
-} = require("../../dist/service/thread_lifecycle.js");
+  buildSharedThreadMounts,
+  buildThreadContainerNames,
+  resolveThreadsRootDirectory,
+} from "../../dist/service/thread_lifecycle.js";
 
 test("buildThreadContainerNames returns deterministic runtime and dind names", () => {
   const names = buildThreadContainerNames("thread-123");
@@ -78,7 +78,7 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share user, mou
   const names = buildThreadContainerNames("thread-5");
   const mounts = [
     {
-      Type: "bind",
+      Type: "bind" as const,
       Source: "/tmp/threads/thread-5",
       Target: "/workspace",
     },

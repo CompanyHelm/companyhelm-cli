@@ -3,6 +3,9 @@
   "version": "0.0.1",
   "description": "Run coding agents in fully isolated Docker sandboxes, locally.",
   "license": "Apache-2.0",
+  "engines": {
+    "node": ">=24"
+  },
   "bin": {
     "companyhelm-runner": "dist/cli.js"
   },
@@ -31,7 +34,7 @@
   "devDependencies": {
     "@types/dockerode": "^4.0.1",
     "@types/figlet": "^1.7.0",
-    "@types/node": "^22.13.5",
+    "@types/node": "^24.0.0",
     "drizzle-kit": "^0.31.9",
     "typescript": "^5.8.2",
     "vitest": "^2.1.8"
