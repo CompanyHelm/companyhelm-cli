@@ -152,6 +152,16 @@ test("ThreadContainerService pulls missing images before creating containers", a
         async inspect() {
           return { State: { Running: true, Status: "running", ExitCode: 0 } };
         },
+        async exec() {
+          return {
+            async start() {
+              return undefined;
+            },
+            async inspect() {
+              return { Running: false, ExitCode: 0 };
+            },
+          };
+        },
       };
     },
     getContainer() {
@@ -196,6 +206,16 @@ test("ThreadContainerService waits for dind container to be running before creat
         return { State: { Running: false, Status: "created", ExitCode: 0 } };
       }
       return { State: { Running: true, Status: "running", ExitCode: 0 } };
+    },
+    async exec() {
+      return {
+        async start() {
+          return undefined;
+        },
+        async inspect() {
+          return { Running: false, ExitCode: 0 };
+        },
+      };
     },
   };
 

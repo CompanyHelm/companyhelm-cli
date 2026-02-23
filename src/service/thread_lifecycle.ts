@@ -33,8 +33,10 @@ export interface ThreadContainerCreateOptions {
   mounts: MountSettings[];
 }
 
-const DIND_START_TIMEOUT_MS = 20_000;
-const DIND_START_POLL_MS = 250;
+const DIND_READY_TIMEOUT_MS = 30_000;
+const DIND_READY_POLL_MS = 500;
+const DIND_PROBE_TIMEOUT_MS = 5_000;
+const DIND_PROBE_POLL_MS = 100;
 
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
@@ -219,25 +221,59 @@ export class ThreadContainerService {
     await this.pullImage(image);
   }
 
-  private async waitForContainerRunning(container: Dockerode.Container, containerName: string): Promise<void> {
-    const deadline = Date.now() + DIND_START_TIMEOUT_MS;
+  private async runCommandInContainer(container: Dockerode.Container, command: string): Promise<number> {
+    const exec = await container.exec({
+      Cmd: ["sh", "-lc", command],
+      AttachStdout: false,
+      AttachStderr: false,
+    });
+
+    await exec.start({ Detach: false, Tty: false });
+
+    const deadline = Date.now() + DIND_PROBE_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      const result = await exec.inspect();
+      if (!result.Running) {
+        return result.ExitCode ?? 1;
+      }
+      await new Promise((resolve) => setTimeout(resolve, DIND_PROBE_POLL_MS));
+    }
+
+    throw new Error(`Timed out waiting for command '${command}' to finish in DinD container.`);
+  }
+
+  private async waitForDindReady(container: Dockerode.Container, containerName: string): Promise<void> {
+    const deadline = Date.now() + DIND_READY_TIMEOUT_MS;
+    let lastProbeError = "docker daemon readiness probe did not succeed";
 
     while (Date.now() < deadline) {
       const details = await container.inspect();
       const state = details.State;
-      if (state?.Running) {
-        return;
-      }
-
       if (state?.Status === "exited" || state?.Status === "dead") {
         const exitCode = state.ExitCode ?? "unknown";
-        throw new Error(`Container '${containerName}' exited before becoming ready (status=${state.Status}, exitCode=${exitCode}).`);
+        throw new Error(
+          `Container '${containerName}' exited before DinD became ready (status=${state.Status}, exitCode=${exitCode}).`,
+        );
       }
 
-      await new Promise((resolve) => setTimeout(resolve, DIND_START_POLL_MS));
+      if (state?.Running) {
+        try {
+          const exitCode = await this.runCommandInContainer(container, "docker info >/dev/null 2>&1");
+          if (exitCode === 0) {
+            return;
+          }
+          lastProbeError = `docker info probe exited with code ${exitCode}`;
+        } catch (error: unknown) {
+          lastProbeError = error instanceof Error ? error.message : String(error);
+        }
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, DIND_READY_POLL_MS));
     }
 
-    throw new Error(`Container '${containerName}' did not reach running state within ${DIND_START_TIMEOUT_MS}ms.`);
+    throw new Error(
+      `DinD container '${containerName}' did not become ready within ${DIND_READY_TIMEOUT_MS}ms (${lastProbeError}).`,
+    );
   }
 
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
@@ -249,7 +285,7 @@ export class ThreadContainerService {
     const dind = await this.docker.createContainer(buildDindContainerOptions(options));
     try {
       await dind.start();
-      await this.waitForContainerRunning(dind, options.names.dind);
+      await this.waitForDindReady(dind, options.names.dind);
     } catch (error) {
       await this.forceRemoveContainer(options.names.dind);
       throw error;
