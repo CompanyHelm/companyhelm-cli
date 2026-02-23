@@ -252,6 +252,30 @@ test("companyhelm root command in daemon mode fails when no sdk is configured", 
   }
 });
 
+test("companyhelm shell command fails early when daemon startup fails", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-shell-no-sdk-"));
+
+  try {
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const result = await waitForExit(
+      spawn(process.execPath, [cliEntryPoint, "shell"], {
+        cwd: repositoryRoot,
+        env: { ...process.env, HOME: homeDirectory },
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
+
+    assert.notEqual(result.code, 0, `CLI unexpectedly succeeded. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(
+      `${result.stdout}\n${result.stderr}`,
+      /No SDKs configured\. Daemon mode requires at least one configured SDK\./,
+    );
+  } finally {
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test("companyhelm root command connects to API and triggers registration flow", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
   let server: grpc.Server | undefined;
