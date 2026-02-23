@@ -37,6 +37,8 @@ const DIND_READY_TIMEOUT_MS = 30_000;
 const DIND_READY_POLL_MS = 500;
 const DIND_PROBE_TIMEOUT_MS = 5_000;
 const DIND_PROBE_POLL_MS = 100;
+const CONTAINER_LOG_TAIL_LINES = 120;
+const CONTAINER_LOG_MAX_CHARS = 8_000;
 
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
@@ -166,11 +168,94 @@ function isImageNotFound(error: unknown): boolean {
   return /No such image/i.test(message);
 }
 
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function decodeDockerLogs(rawLogs: unknown): string {
+  if (typeof rawLogs === "string") {
+    return rawLogs;
+  }
+
+  if (!Buffer.isBuffer(rawLogs)) {
+    return String(rawLogs ?? "");
+  }
+
+  const buffer = rawLogs;
+  let offset = 0;
+  let decoded = "";
+  let decodedFrames = 0;
+
+  while (offset + 8 <= buffer.length) {
+    const streamType = buffer[offset];
+    const hasDockerHeader = buffer[offset + 1] === 0 && buffer[offset + 2] === 0 && buffer[offset + 3] === 0;
+    const frameSize = buffer.readUInt32BE(offset + 4);
+
+    const isKnownStream = streamType === 0 || streamType === 1 || streamType === 2;
+    const frameEnd = offset + 8 + frameSize;
+    if (!hasDockerHeader || !isKnownStream || frameSize < 0 || frameEnd > buffer.length) {
+      break;
+    }
+
+    decoded += buffer.subarray(offset + 8, frameEnd).toString("utf8");
+    offset = frameEnd;
+    decodedFrames += 1;
+  }
+
+  if (decodedFrames > 0 && offset === buffer.length) {
+    return decoded;
+  }
+
+  return buffer.toString("utf8");
+}
+
 export class ThreadContainerService {
   private readonly docker: Dockerode;
 
   constructor(docker?: Dockerode) {
     this.docker = docker ?? new Dockerode();
+  }
+
+  private trimContainerLogs(logs: string): string {
+    const trimmed = logs.trim();
+    if (trimmed.length <= CONTAINER_LOG_MAX_CHARS) {
+      return trimmed;
+    }
+
+    return `...${trimmed.slice(trimmed.length - CONTAINER_LOG_MAX_CHARS)}`;
+  }
+
+  private async getContainerLogs(container: Dockerode.Container): Promise<string | null> {
+    try {
+      const rawLogs = await container.logs({
+        stdout: true,
+        stderr: true,
+        timestamps: false,
+        tail: CONTAINER_LOG_TAIL_LINES,
+      });
+
+      const decoded = decodeDockerLogs(rawLogs);
+      const trimmed = this.trimContainerLogs(decoded);
+      return trimmed.length > 0 ? trimmed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async enrichErrorWithContainerLogs(
+    error: unknown,
+    container: Dockerode.Container,
+    containerName: string,
+  ): Promise<Error> {
+    const baseMessage = toErrorMessage(error);
+    const logs = await this.getContainerLogs(container);
+    if (!logs) {
+      return new Error(baseMessage);
+    }
+
+    return new Error(
+      `${baseMessage}\nContainer '${containerName}' logs (tail ${CONTAINER_LOG_TAIL_LINES}):\n${logs}`,
+    );
   }
 
   private async pullImage(image: string): Promise<void> {
@@ -287,17 +372,19 @@ export class ThreadContainerService {
       await dind.start();
       await this.waitForDindReady(dind, options.names.dind);
     } catch (error) {
+      const enrichedError = await this.enrichErrorWithContainerLogs(error, dind, options.names.dind);
       await this.forceRemoveContainer(options.names.dind);
-      throw error;
+      throw enrichedError;
     }
 
     const runtime = await this.docker.createContainer(buildRuntimeContainerOptions(options));
     try {
       await runtime.start();
     } catch (error) {
+      const enrichedError = await this.enrichErrorWithContainerLogs(error, runtime, options.names.runtime);
       await this.forceRemoveContainer(options.names.runtime);
       await this.forceRemoveContainer(options.names.dind);
-      throw error;
+      throw enrichedError;
     }
   }
 
