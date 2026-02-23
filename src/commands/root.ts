@@ -1,8 +1,8 @@
 import { create } from "@bufbuild/protobuf";
 import {
-  AgentCreatedUpdateStatus,
+  AgentStatus,
   ClientMessageSchema,
-  type CreateAgentCommand,
+  type CreateAgentRequest,
   type ServerMessage,
   RegisterRunnerRequestSchema,
   type RegisterRunnerRequest,
@@ -83,7 +83,7 @@ async function hasConfiguredSdks(cfg: Config): Promise<boolean> {
   }
 }
 
-async function createAgentInDb(cfg: Config, command: CreateAgentCommand): Promise<string | null> {
+async function createAgentInDb(cfg: Config, command: CreateAgentRequest): Promise<string | null> {
   if (command.agentSdk !== "codex") {
     return `Unsupported agent SDK '${command.agentSdk}'.`;
   }
@@ -103,23 +103,33 @@ async function createAgentInDb(cfg: Config, command: CreateAgentCommand): Promis
   }
 }
 
-async function handleCreateAgentCommand(
+async function handleCreateAgentRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
-  serverMessage: ServerMessage,
-  command: CreateAgentCommand,
+  request: CreateAgentRequest,
 ): Promise<void> {
-  const failureMessage = await createAgentInDb(cfg, command);
-  const status = failureMessage ? AgentCreatedUpdateStatus.FAILED : AgentCreatedUpdateStatus.SUCCESS;
+  const failureMessage = await createAgentInDb(cfg, request);
+  if (failureMessage) {
+    await commandChannel.send(
+      create(ClientMessageSchema, {
+        payload: {
+          case: "requestError",
+          value: {
+            errorMessage: failureMessage,
+          },
+        },
+      }),
+    );
+    return;
+  }
 
   await commandChannel.send(
     create(ClientMessageSchema, {
-      commandId: serverMessage.commandId,
       payload: {
-        case: "agentCreatedUpdate",
+        case: "agentUpdate",
         value: {
-          status,
-          failureMessage: failureMessage ?? undefined,
+          agentId: request.agentId,
+          status: AgentStatus.READY,
         },
       },
     }),
@@ -128,10 +138,10 @@ async function handleCreateAgentCommand(
 
 async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel): Promise<void> {
   for await (const serverMessage of commandChannel) {
-    if (serverMessage.command.case !== "createAgentCommand") {
+    if (serverMessage.request.case !== "createAgentRequest") {
       continue;
     }
-    await handleCreateAgentCommand(cfg, commandChannel, serverMessage, serverMessage.command.value);
+    await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value);
   }
 }
 

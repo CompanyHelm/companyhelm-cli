@@ -104,8 +104,8 @@ export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc
         Buffer.from(toBinary(RegisterRunnerResponseSchema, response)),
       responseDeserialize: (bytes: Buffer): RegisterRunnerResponse => fromBinary(RegisterRunnerResponseSchema, bytes),
     },
-    commandChannel: {
-      path: buildRpcPath(methods.commandChannel.name, pathPrefix),
+    controlChannel: {
+      path: buildRpcPath(methods.controlChannel.name, pathPrefix),
       requestStream: true,
       responseStream: true,
       requestSerialize: (request: ClientMessage): Buffer => Buffer.from(toBinary(ClientMessageSchema, request)),
@@ -123,7 +123,7 @@ interface AgentRunnerControlClient extends grpc.Client {
     options: grpc.CallOptions,
     callback: grpc.requestCallback<RegisterRunnerResponse>,
   ): grpc.ClientUnaryCall;
-  commandChannel(metadata?: grpc.Metadata, options?: grpc.CallOptions): grpc.ClientDuplexStream<ClientMessage, ServerMessage>;
+  controlChannel(metadata?: grpc.Metadata, options?: grpc.CallOptions): grpc.ClientDuplexStream<ClientMessage, ServerMessage>;
 }
 
 type AgentRunnerControlClientConstructor = new (
@@ -320,7 +320,7 @@ export class CompanyhelmApiClient {
     options?: CompanyhelmApiCallOptions,
   ): Promise<CompanyhelmCommandChannel> {
     await this.registerRunner(registerRequest, options);
-    const stream = this.client.commandChannel(options?.metadata, options?.callOptions);
+    const stream = this.client.controlChannel(options?.metadata, options?.callOptions);
     return new CompanyhelmCommandChannel(stream);
   }
 

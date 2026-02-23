@@ -1,4 +1,3 @@
-import { boolean } from "drizzle-orm/gel-core";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 // ── agent_sdks ──────────────────────────────────────────────────────────────
@@ -33,23 +32,23 @@ export const agents = sqliteTable("agents", {
 // -- threads ──────────────────────────────────────────────────────────────────
 
 export const threads = sqliteTable("threads", {
-    id: text("id").primaryKey(),
-    agentId: text("agent_id")
-      .notNull()
-      .references(() => agents.id, { onDelete: "cascade" }),
-    sdkId: text("sdk_id"),
-    model: text("model").notNull(),
-    reasoningLevel: text("reasoning_level").notNull(),
-    status: text("status", { enum: ["creating", "ready", "deleting"] }).notNull(),
-    current_sdk_turn_id: text("current_sdk_turn_id"),
-    is_current_turn_running: boolean("is_current_turn_running").notNull(),
-    workspace: text("workspace").notNull(),
-    runtimeContainer: text("runtime_container").notNull(),
-    dindContainer: text("dind_container").notNull(),
-    // home directory within the container
-    homeDirectory: text("home_directory").notNull(),
-    // uid of the user within the container
-    uid: integer("uid").notNull(),
-    // gid of the user within the container
-    gid: integer("gid").notNull(),
+  id: text("id").primaryKey(),
+  agentId: text("agent_id")
+    .notNull()
+    .references(() => agents.id, { onDelete: "cascade" }),
+  sdkId: text("sdk_id"),
+  model: text("model").notNull(),
+  reasoningLevel: text("reasoning_level").notNull(),
+  status: text("status", { enum: ["creating", "ready", "deleting"] }).notNull(),
+  current_sdk_turn_id: text("current_sdk_turn_id"),
+  is_current_turn_running: integer("is_current_turn_running", { mode: "boolean" }).notNull(),
+  workspace: text("workspace").notNull(),
+  runtimeContainer: text("runtime_container").notNull(),
+  dindContainer: text("dind_container").notNull(),
+  // home directory within the container
+  homeDirectory: text("home_directory").notNull(),
+  // uid of the user within the container
+  uid: integer("uid").notNull(),
+  // gid of the user within the container
+  gid: integer("gid").notNull(),
 });
