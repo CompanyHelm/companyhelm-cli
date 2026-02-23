@@ -473,6 +473,21 @@ async function listThreadRows(cfg: Config): Promise<void> {
   }
 }
 
+async function loadShellStateFromDb(cfg: Config): Promise<ShellState> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const agentRows = await db.select({ id: agents.id, sdk: agents.sdk }).from(agents).all();
+    const threadRows = await db.select({ id: threads.id, agentId: threads.agentId }).from(threads).all();
+
+    return {
+      agentSdkById: new Map(agentRows.map((agent) => [agent.id, agent.sdk])),
+      threadAgentById: new Map(threadRows.map((thread) => [thread.id, thread.agentId])),
+    };
+  } finally {
+    client.close();
+  }
+}
+
 async function handleDbAction(cfg: Config, action: DbAction): Promise<void> {
   switch (action) {
     case "list-sdk":
@@ -880,16 +895,14 @@ export async function runShellCommand(): Promise<void> {
     const runnerRegistration = controlPlane.getRunnerCapabilities();
     const availableSdks = runnerRegistration.agentSdks.map((sdk) => sdk.name).sort();
     const modelsBySdk = buildModelCapabilities(runnerRegistration);
-    const state: ShellState = {
-      agentSdkById: new Map<string, string>(),
-      threadAgentById: new Map<string, string>(),
-    };
+    const state = await loadShellStateFromDb(cfg);
 
     p.intro("CompanyHelm protobuf shell");
     p.log.info("Runner daemon connected.");
     if (availableSdks.length > 0) {
       p.log.info(`Available SDKs: ${availableSdks.join(", ")}`);
     }
+    p.log.info(`Loaded state: ${state.agentSdkById.size} agents, ${state.threadAgentById.size} threads.`);
 
     await runShellLoop(cfg, controlPlane, state, availableSdks, modelsBySdk, daemon);
 
