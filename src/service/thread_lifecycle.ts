@@ -33,6 +33,9 @@ export interface ThreadContainerCreateOptions {
   mounts: MountSettings[];
 }
 
+const DIND_START_TIMEOUT_MS = 20_000;
+const DIND_START_POLL_MS = 250;
+
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
     return containerHome;
@@ -216,6 +219,27 @@ export class ThreadContainerService {
     await this.pullImage(image);
   }
 
+  private async waitForContainerRunning(container: Dockerode.Container, containerName: string): Promise<void> {
+    const deadline = Date.now() + DIND_START_TIMEOUT_MS;
+
+    while (Date.now() < deadline) {
+      const details = await container.inspect();
+      const state = details.State;
+      if (state?.Running) {
+        return;
+      }
+
+      if (state?.Status === "exited" || state?.Status === "dead") {
+        const exitCode = state.ExitCode ?? "unknown";
+        throw new Error(`Container '${containerName}' exited before becoming ready (status=${state.Status}, exitCode=${exitCode}).`);
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, DIND_START_POLL_MS));
+    }
+
+    throw new Error(`Container '${containerName}' did not reach running state within ${DIND_START_TIMEOUT_MS}ms.`);
+  }
+
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
     await this.ensureImageAvailable(options.dindImage);
     if (options.runtimeImage !== options.dindImage) {
@@ -225,6 +249,7 @@ export class ThreadContainerService {
     const dind = await this.docker.createContainer(buildDindContainerOptions(options));
     try {
       await dind.start();
+      await this.waitForContainerRunning(dind, options.names.dind);
     } catch (error) {
       await this.forceRemoveContainer(options.names.dind);
       throw error;
