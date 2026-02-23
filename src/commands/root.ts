@@ -30,6 +30,7 @@ import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 
 interface RootCommandOptions {
   companyhelmApiUrl?: string;
+  daemon?: boolean;
 }
 
 const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
@@ -441,7 +442,12 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     companyhelm_api_url: options.companyhelmApiUrl,
   });
 
-  if (!(await hasConfiguredSdks(cfg))) {
+  const configuredSdks = await hasConfiguredSdks(cfg);
+  if (!configuredSdks && options.daemon) {
+    throw new Error("No SDKs configured. Daemon mode requires at least one configured SDK.");
+  }
+
+  if (!configuredSdks) {
     await startup();
   }
 
@@ -476,6 +482,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 export function registerRootCommand(program: Command): void {
   program
     .option("--companyhelm-api-url <url>", "CompanyHelm gRPC API URL override.")
+    .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .action(async () => {
       await runRootCommand(program.opts<RootCommandOptions>());
     });
