@@ -1,3 +1,4 @@
+import { boolean } from "drizzle-orm/gel-core";
 import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 // ── agent_sdks ──────────────────────────────────────────────────────────────
@@ -15,7 +16,7 @@ export const llmModels = sqliteTable("llm_models", {
   name: text("name").primaryKey(),
   sdkName: text("sdk_name")
     .notNull()
-    .references(() => agentSdks.name),
+    .references(() => agentSdks.name, { onDelete: "cascade" }),
   reasoningLevels: text("reasoning_levels", { mode: "json" })
     .$type<string[]>(),
 });
@@ -28,20 +29,22 @@ export const agents = sqliteTable("agents", {
     .$defaultFn(() => crypto.randomUUID()),
   name: text("name").notNull(),
   sdk: text("sdk", { enum: ["codex"] }).notNull(),
-
 });
 
 // -- threads ──────────────────────────────────────────────────────────────────
 
 export const threads = sqliteTable("threads", {
-  id: text("id")
-    .primaryKey(),
-  agentId: text("agent_id")
-    .notNull()
-    .references(() => agents.id),
+    id: text("id")
+      .primaryKey(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    sdkId: text("sdk_id"),
     model: text("model").notNull(),
     reasoningLevel: text("reasoning_level").notNull(),
-    status: text("status", { enum: ["pending", "ready", "running"] }).notNull(),
+    status: text("status", { enum: ["creating", "ready", "deleting"] }).notNull(),
+    current_sdk_turn_id: text("current_sdk_turn_id"),
+    is_current_turn_running: boolean("is_current_turn_running").notNull(),
     workspace: text("workspace").notNull(),
     runtimeContainer: text("runtime_container").notNull(),
     dindContainer: text("dind_container").notNull(),
