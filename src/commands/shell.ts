@@ -26,7 +26,7 @@ const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
-type ShellMainAction = "grpc" | "db" | "exit";
+type ShellMainAction = "grpc" | "db" | "show-daemon-logs" | "exit";
 
 type GrpcAction =
   | "create-agent"
@@ -34,7 +34,6 @@ type GrpcAction =
   | "create-thread"
   | "delete-thread"
   | "show-state"
-  | "show-daemon-logs"
   | "back";
 
 type DbAction = "list-sdk" | "list-agents" | "list-threads" | "back";
@@ -229,7 +228,6 @@ class ProtoShellControlPlane {
             return;
           }
 
-          this.server.start();
           resolvePort(port);
         },
       );
@@ -363,6 +361,7 @@ async function promptMainAction(): Promise<ShellMainAction | null> {
     options: [
       { value: "grpc", label: "(grpc) Commands" },
       { value: "db", label: "(db) Commands" },
+      { value: "show-daemon-logs", label: "Show daemon logs" },
       { value: "exit", label: "Exit shell" },
     ],
   });
@@ -379,7 +378,6 @@ async function promptGrpcAction(): Promise<GrpcAction | null> {
       { value: "create-thread", label: "Create thread" },
       { value: "delete-thread", label: "Delete thread" },
       { value: "show-state", label: "Show state" },
-      { value: "show-daemon-logs", label: "Show daemon logs" },
       { value: "back", label: "Back" },
     ],
   });
@@ -512,7 +510,6 @@ async function handleGrpcAction(
   state: ShellState,
   availableSdks: string[],
   modelsBySdk: Map<string, RunnerModelCapability[]>,
-  daemonLogs: string,
 ): Promise<void> {
   switch (action) {
     case "create-agent":
@@ -529,9 +526,6 @@ async function handleGrpcAction(
       return;
     case "show-state":
       printState(state);
-      return;
-    case "show-daemon-logs":
-      printDaemonLogs(daemonLogs);
       return;
     case "back":
       return;
@@ -554,14 +548,13 @@ async function promptAndRunGrpcAction(
   state: ShellState,
   availableSdks: string[],
   modelsBySdk: Map<string, RunnerModelCapability[]>,
-  daemonLogs: string,
 ): Promise<void> {
   const grpcAction = await promptGrpcAction();
   if (!grpcAction || grpcAction === "back") {
     return;
   }
 
-  await handleGrpcAction(grpcAction, controlPlane, state, availableSdks, modelsBySdk, daemonLogs);
+  await handleGrpcAction(grpcAction, controlPlane, state, availableSdks, modelsBySdk);
 }
 
 async function runShellLoop(
@@ -584,12 +577,17 @@ async function runShellLoop(
 
     try {
       if (mainAction === "grpc") {
-        await promptAndRunGrpcAction(controlPlane, state, availableSdks, modelsBySdk, daemon.getOutput());
+        await promptAndRunGrpcAction(controlPlane, state, availableSdks, modelsBySdk);
         continue;
       }
 
       if (mainAction === "db") {
         await promptAndRunDbAction(cfg);
+        continue;
+      }
+
+      if (mainAction === "show-daemon-logs") {
+        printDaemonLogs(daemon.getOutput());
       }
     } catch (error: unknown) {
       p.log.error(toErrorMessage(error));
