@@ -15,7 +15,7 @@ DROP TABLE IF EXISTS `__new_threads`;--> statement-breakpoint
 CREATE TABLE `__new_threads` (
 	`id` text PRIMARY KEY NOT NULL,
 	`agent_id` text NOT NULL,
-	`sdk_id` text,
+	`sdk_thread_id` text,
 	`model` text NOT NULL,
 	`reasoning_level` text NOT NULL,
 	`status` text NOT NULL,
@@ -30,6 +30,6 @@ CREATE TABLE `__new_threads` (
 	FOREIGN KEY (`agent_id`) REFERENCES `agents`(`id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
-INSERT INTO `__new_threads`("id", "agent_id", "sdk_id", "model", "reasoning_level", "status", "current_sdk_turn_id", "is_current_turn_running", "workspace", "runtime_container", "dind_container", "home_directory", "uid", "gid") SELECT "id", "agent_id", NULL AS "sdk_id", "model", "reasoning_level", "status", NULL AS "current_sdk_turn_id", 0 AS "is_current_turn_running", "workspace", "runtime_container", "dind_container", "home_directory", "uid", "gid" FROM `threads`;--> statement-breakpoint
+INSERT INTO `__new_threads`("id", "agent_id", "sdk_thread_id", "model", "reasoning_level", "status", "current_sdk_turn_id", "is_current_turn_running", "workspace", "runtime_container", "dind_container", "home_directory", "uid", "gid") SELECT "id", "agent_id", NULL AS "sdk_thread_id", "model", "reasoning_level", "status", NULL AS "current_sdk_turn_id", 0 AS "is_current_turn_running", "workspace", "runtime_container", "dind_container", "home_directory", "uid", "gid" FROM `threads`;--> statement-breakpoint
 DROP TABLE `threads`;--> statement-breakpoint
 ALTER TABLE `__new_threads` RENAME TO `threads`;
