@@ -23,7 +23,14 @@ const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
-type ShellAction = "create-agent" | "delete-agent" | "create-thread" | "delete-thread" | "show-state" | "exit";
+type ShellAction =
+  | "create-agent"
+  | "delete-agent"
+  | "create-thread"
+  | "delete-thread"
+  | "show-state"
+  | "show-daemon-logs"
+  | "exit";
 
 interface RunnerModelCapability {
   name: string;
@@ -352,6 +359,7 @@ async function promptAction(): Promise<ShellAction | null> {
       { value: "create-thread", label: "Create thread" },
       { value: "delete-thread", label: "Delete thread" },
       { value: "show-state", label: "Show state" },
+      { value: "show-daemon-logs", label: "Show daemon logs" },
       { value: "exit", label: "Exit shell" },
     ],
   });
@@ -624,6 +632,19 @@ function printState(state: ShellState): void {
   console.log();
 }
 
+function printDaemonLogs(logOutput: string): void {
+  console.log();
+  if (!logOutput.trim()) {
+    console.log("Daemon logs are empty.");
+    console.log();
+    return;
+  }
+
+  console.log("Daemon logs:");
+  process.stdout.write(logOutput.endsWith("\n") ? logOutput : `${logOutput}\n`);
+  console.log();
+}
+
 export async function runShellCommand(): Promise<void> {
   const controlPlane = new ProtoShellControlPlane();
   let daemon: DaemonHandle | null = null;
@@ -680,6 +701,9 @@ export async function runShellCommand(): Promise<void> {
             break;
           case "show-state":
             printState(state);
+            break;
+          case "show-daemon-logs":
+            printDaemonLogs(daemon.getOutput());
             break;
           default:
             break;

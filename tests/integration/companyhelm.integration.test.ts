@@ -276,6 +276,38 @@ test("companyhelm shell command fails early when daemon startup fails", async ()
   }
 });
 
+test("initDb reconciles legacy threads.sdk_id column to sdk_thread_id", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-legacy-sdk-id-"));
+
+  try {
+    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+
+    {
+      const { client } = await initDb(stateDbPath);
+      try {
+        await client.execute("ALTER TABLE threads RENAME COLUMN sdk_thread_id TO sdk_id");
+      } finally {
+        client.close();
+      }
+    }
+
+    {
+      const { client } = await initDb(stateDbPath);
+      try {
+        const pragma = await client.execute("PRAGMA table_info('threads')");
+        const columnNames = new Set(pragma.rows.map((row: any) => String(row.name ?? "")));
+
+        assert.equal(columnNames.has("sdk_thread_id"), true, "expected compatibility reconciliation to add sdk_thread_id");
+        assert.equal(columnNames.has("sdk_id"), false, "expected legacy sdk_id column to be renamed");
+      } finally {
+        client.close();
+      }
+    }
+  } finally {
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test("companyhelm root command connects to API and triggers registration flow", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
   let server: grpc.Server | undefined;
