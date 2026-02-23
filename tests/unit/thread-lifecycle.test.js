@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const path = require("node:path");
-const test = require("node:test");
 
 const {
   buildThreadContainerNames,
