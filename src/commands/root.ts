@@ -27,10 +27,12 @@ import {
 } from "../service/thread_lifecycle.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
+import { createLogger, type Logger } from "../utils/logger.js";
 
 interface RootCommandOptions {
   companyhelmApiUrl?: string;
   daemon?: boolean;
+  logLevel?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
@@ -193,13 +195,17 @@ async function handleCreateAgentRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
   request: CreateAgentRequest,
+  logger: Logger,
 ): Promise<void> {
+  logger.debug(`Received createAgentRequest for agent '${request.agentId}' using sdk '${request.agentSdk}'.`);
   const failureMessage = await createAgentInDb(cfg, request);
   if (failureMessage) {
+    logger.warn(`Failed to create agent '${request.agentId}': ${failureMessage}`);
     await sendRequestError(commandChannel, failureMessage);
     return;
   }
 
+  logger.info(`Agent '${request.agentId}' created.`);
   await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.READY);
 }
 
@@ -207,6 +213,7 @@ async function handleCreateThreadRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
   request: CreateThreadRequest,
+  logger: Logger,
 ): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
 
@@ -214,12 +221,16 @@ async function handleCreateThreadRequest(
   const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, threadId);
   const containerNames = buildThreadContainerNames(threadId);
   const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
+  logger.debug(
+    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}').`,
+  );
 
   let authMode: ThreadAuthMode;
 
   try {
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
     if (!existingAgent) {
+      logger.warn(`Cannot create thread '${threadId}': agent '${request.agentId}' does not exist.`);
       await sendRequestError(commandChannel, `Agent '${request.agentId}' does not exist.`);
       return;
     }
@@ -242,7 +253,9 @@ async function handleCreateThreadRequest(
       uid: hostInfo.uid,
       gid: hostInfo.gid,
     });
+    logger.debug(`Thread '${threadId}' inserted with status 'pending'.`);
   } catch (error: unknown) {
+    logger.warn(`Failed to initialize thread '${threadId}': ${toErrorMessage(error)}`);
     await sendRequestError(commandChannel, `Failed to initialize thread '${threadId}': ${toErrorMessage(error)}`);
     return;
   } finally {
@@ -250,6 +263,7 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
+  logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();
   const mounts = buildSharedThreadMounts({
@@ -274,7 +288,9 @@ async function handleCreateThreadRequest(
       },
       mounts,
     });
+    logger.debug(`Thread '${threadId}' containers created (${containerNames.runtime}, ${containerNames.dind}).`);
   } catch (error: unknown) {
+    logger.warn(`Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
     await sendRequestError(commandChannel, `Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
     return;
   }
@@ -283,6 +299,7 @@ async function handleCreateThreadRequest(
   try {
     await updateDb.update(threads).set({ status: "ready" }).where(eq(threads.id, threadId));
   } catch (error: unknown) {
+    logger.warn(`Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     await containerService.forceRemoveContainer(containerNames.runtime);
     await containerService.forceRemoveContainer(containerNames.dind);
     await sendRequestError(commandChannel, `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
@@ -291,6 +308,7 @@ async function handleCreateThreadRequest(
     updateClient.close();
   }
 
+  logger.info(`Thread '${threadId}' created and ready for agent '${request.agentId}'.`);
   await sendThreadUpdate(commandChannel, threadId, ThreadStatus.READY);
 }
 
@@ -416,14 +434,14 @@ async function handleDeleteThreadRequest(
   await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
 }
 
-async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel): Promise<void> {
+async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel, logger: Logger): Promise<void> {
   for await (const serverMessage of commandChannel) {
     switch (serverMessage.request.case) {
       case "createAgentRequest":
-        await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value);
+        await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value, logger);
         break;
       case "createThreadRequest":
-        await handleCreateThreadRequest(cfg, commandChannel, serverMessage.request.value);
+        await handleCreateThreadRequest(cfg, commandChannel, serverMessage.request.value, logger);
         break;
       case "deleteAgentRequest":
         await handleDeleteAgentRequest(cfg, commandChannel, serverMessage.request.value);
@@ -438,6 +456,7 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
 }
 
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
+  const logger = createLogger(options.logLevel ?? "INFO");
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.companyhelmApiUrl,
   });
@@ -459,14 +478,14 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     try {
       const commandChannel = await apiClient.connect(registerRequest);
       await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
-      console.log(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
-      await runCommandLoop(cfg, commandChannel);
+      logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
+      await runCommandLoop(cfg, commandChannel, logger);
       return;
     } catch (error: unknown) {
       lastError = error instanceof Error ? error : new Error(String(error));
       if (attempt < COMMAND_CHANNEL_CONNECT_ATTEMPTS) {
         const attemptLabel = `${attempt}/${COMMAND_CHANNEL_CONNECT_ATTEMPTS}`;
-        console.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
+        logger.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
         await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
       }
     } finally {
@@ -483,6 +502,7 @@ export function registerRootCommand(program: Command): void {
   program
     .option("--companyhelm-api-url <url>", "CompanyHelm gRPC API URL override.")
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
+    .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
     .action(async () => {
       await runRootCommand(program.opts<RootCommandOptions>());
     });
