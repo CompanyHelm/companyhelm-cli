@@ -25,8 +25,7 @@ export const llmModels = sqliteTable("llm_models", {
 
 export const agents = sqliteTable("agents", {
   id: text("id")
-    .primaryKey()
-    .$defaultFn(() => crypto.randomUUID()),
+    .primaryKey(),
   name: text("name").notNull(),
   sdk: text("sdk", { enum: ["codex"] }).notNull(),
 });
@@ -34,8 +33,7 @@ export const agents = sqliteTable("agents", {
 // -- threads ──────────────────────────────────────────────────────────────────
 
 export const threads = sqliteTable("threads", {
-    id: text("id")
-      .primaryKey(),
+    id: text("id").primaryKey(),
     agentId: text("agent_id")
       .notNull()
       .references(() => agents.id, { onDelete: "cascade" }),
