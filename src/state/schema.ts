@@ -36,7 +36,7 @@ export const threads = sqliteTable("threads", {
   agentId: text("agent_id")
     .notNull()
     .references(() => agents.id, { onDelete: "cascade" }),
-  sdkId: text("sdk_id"),
+  sdkId: text("sdk_id").notNull(),
   model: text("model").notNull(),
   reasoningLevel: text("reasoning_level").notNull(),
   status: text("status", { enum: ["creating", "ready", "deleting"] }).notNull(),
