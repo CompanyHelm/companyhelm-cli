@@ -14,7 +14,10 @@ import type { Command } from "commander";
 import * as grpc from "@grpc/grpc-js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
+import { config as configSchema, type Config } from "../config.js";
 import { createAgentRunnerControlServiceDefinition } from "../service/companyhelm_api_client.js";
+import { initDb } from "../state/db.js";
+import { agentSdks, agents, threads } from "../state/schema.js";
 import { AsyncQueue } from "../utils/async_queue.js";
 
 const CONTROL_PLANE_BIND_HOST = "127.0.0.1";
@@ -23,14 +26,18 @@ const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
-type ShellAction =
+type ShellMainAction = "grpc" | "db" | "exit";
+
+type GrpcAction =
   | "create-agent"
   | "delete-agent"
   | "create-thread"
   | "delete-thread"
   | "show-state"
   | "show-daemon-logs"
-  | "exit";
+  | "back";
+
+type DbAction = "list-sdk" | "list-agents" | "list-threads" | "back";
 
 interface RunnerModelCapability {
   name: string;
@@ -350,9 +357,22 @@ function buildModelCapabilities(registration: RegisterRunnerRequest): Map<string
   return bySdk;
 }
 
-async function promptAction(): Promise<ShellAction | null> {
-  const action = await p.select<ShellAction>({
-    message: "Choose an action",
+async function promptMainAction(): Promise<ShellMainAction | null> {
+  const action = await p.select<ShellMainAction>({
+    message: "Choose command group",
+    options: [
+      { value: "grpc", label: "(grpc) Commands" },
+      { value: "db", label: "(db) Commands" },
+      { value: "exit", label: "Exit shell" },
+    ],
+  });
+
+  return p.isCancel(action) ? null : action;
+}
+
+async function promptGrpcAction(): Promise<GrpcAction | null> {
+  const action = await p.select<GrpcAction>({
+    message: "Choose (grpc) command",
     options: [
       { value: "create-agent", label: "Create agent" },
       { value: "delete-agent", label: "Delete agent" },
@@ -360,11 +380,206 @@ async function promptAction(): Promise<ShellAction | null> {
       { value: "delete-thread", label: "Delete thread" },
       { value: "show-state", label: "Show state" },
       { value: "show-daemon-logs", label: "Show daemon logs" },
-      { value: "exit", label: "Exit shell" },
+      { value: "back", label: "Back" },
     ],
   });
 
   return p.isCancel(action) ? null : action;
+}
+
+async function promptDbAction(): Promise<DbAction | null> {
+  const action = await p.select<DbAction>({
+    message: "Choose (db) command",
+    options: [
+      { value: "list-sdk", label: "List SDKs" },
+      { value: "list-agents", label: "List agents" },
+      { value: "list-threads", label: "List threads" },
+      { value: "back", label: "Back" },
+    ],
+  });
+
+  return p.isCancel(action) ? null : action;
+}
+
+async function listSdkRows(cfg: Config): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const sdkRows = await db.select().from(agentSdks).orderBy(agentSdks.name).all();
+
+    console.log();
+    console.log("SDKs (db):");
+    if (sdkRows.length === 0) {
+      console.log("  - none");
+    } else {
+      for (const sdk of sdkRows) {
+        console.log(`  - ${sdk.name} (authentication: ${sdk.authentication})`);
+      }
+    }
+    console.log();
+  } finally {
+    client.close();
+  }
+}
+
+async function listAgentRows(cfg: Config): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const agentRows = await db.select().from(agents).orderBy(agents.id).all();
+
+    console.log();
+    console.log("Agents (db):");
+    if (agentRows.length === 0) {
+      console.log("  - none");
+    } else {
+      for (const agent of agentRows) {
+        console.log(`  - ${agent.id} (name: ${agent.name}, sdk: ${agent.sdk})`);
+      }
+    }
+    console.log();
+  } finally {
+    client.close();
+  }
+}
+
+async function listThreadRows(cfg: Config): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const threadRows = await db
+      .select({
+        id: threads.id,
+        agentId: threads.agentId,
+        status: threads.status,
+        model: threads.model,
+        reasoningLevel: threads.reasoningLevel,
+      })
+      .from(threads)
+      .orderBy(threads.id)
+      .all();
+
+    console.log();
+    console.log("Threads (db):");
+    if (threadRows.length === 0) {
+      console.log("  - none");
+    } else {
+      for (const thread of threadRows) {
+        console.log(
+          `  - ${thread.id} (agent: ${thread.agentId}, status: ${thread.status}, model: ${thread.model}, reasoning: ${thread.reasoningLevel})`,
+        );
+      }
+    }
+    console.log();
+  } finally {
+    client.close();
+  }
+}
+
+async function handleDbAction(cfg: Config, action: DbAction): Promise<void> {
+  switch (action) {
+    case "list-sdk":
+      await listSdkRows(cfg);
+      return;
+    case "list-agents":
+      await listAgentRows(cfg);
+      return;
+    case "list-threads":
+      await listThreadRows(cfg);
+      return;
+    case "back":
+      return;
+    default:
+      return;
+  }
+}
+
+async function handleGrpcAction(
+  action: GrpcAction,
+  controlPlane: ProtoShellControlPlane,
+  state: ShellState,
+  availableSdks: string[],
+  modelsBySdk: Map<string, RunnerModelCapability[]>,
+  daemonLogs: string,
+): Promise<void> {
+  switch (action) {
+    case "create-agent":
+      await handleCreateAgent(controlPlane, state, availableSdks);
+      return;
+    case "delete-agent":
+      await handleDeleteAgent(controlPlane, state);
+      return;
+    case "create-thread":
+      await handleCreateThread(controlPlane, state, modelsBySdk);
+      return;
+    case "delete-thread":
+      await handleDeleteThread(controlPlane, state);
+      return;
+    case "show-state":
+      printState(state);
+      return;
+    case "show-daemon-logs":
+      printDaemonLogs(daemonLogs);
+      return;
+    case "back":
+      return;
+    default:
+      return;
+  }
+}
+
+async function promptAndRunDbAction(cfg: Config): Promise<void> {
+  const dbAction = await promptDbAction();
+  if (!dbAction || dbAction === "back") {
+    return;
+  }
+
+  await handleDbAction(cfg, dbAction);
+}
+
+async function promptAndRunGrpcAction(
+  controlPlane: ProtoShellControlPlane,
+  state: ShellState,
+  availableSdks: string[],
+  modelsBySdk: Map<string, RunnerModelCapability[]>,
+  daemonLogs: string,
+): Promise<void> {
+  const grpcAction = await promptGrpcAction();
+  if (!grpcAction || grpcAction === "back") {
+    return;
+  }
+
+  await handleGrpcAction(grpcAction, controlPlane, state, availableSdks, modelsBySdk, daemonLogs);
+}
+
+async function runShellLoop(
+  cfg: Config,
+  controlPlane: ProtoShellControlPlane,
+  state: ShellState,
+  availableSdks: string[],
+  modelsBySdk: Map<string, RunnerModelCapability[]>,
+  daemon: DaemonHandle,
+): Promise<void> {
+  while (true) {
+    if (daemon.getExitStatus()) {
+      throw new Error(buildDaemonExitMessage(daemon.getExitStatus()!, daemon.getOutput()));
+    }
+
+    const mainAction = await promptMainAction();
+    if (!mainAction || mainAction === "exit") {
+      return;
+    }
+
+    try {
+      if (mainAction === "grpc") {
+        await promptAndRunGrpcAction(controlPlane, state, availableSdks, modelsBySdk, daemon.getOutput());
+        continue;
+      }
+
+      if (mainAction === "db") {
+        await promptAndRunDbAction(cfg);
+      }
+    } catch (error: unknown) {
+      p.log.error(toErrorMessage(error));
+    }
+  }
 }
 
 async function handleCreateAgent(
@@ -646,6 +861,7 @@ function printDaemonLogs(logOutput: string): void {
 }
 
 export async function runShellCommand(): Promise<void> {
+  const cfg = configSchema.parse({});
   const controlPlane = new ProtoShellControlPlane();
   let daemon: DaemonHandle | null = null;
 
@@ -675,43 +891,7 @@ export async function runShellCommand(): Promise<void> {
       p.log.info(`Available SDKs: ${availableSdks.join(", ")}`);
     }
 
-    while (true) {
-      if (daemon.getExitStatus()) {
-        throw new Error(buildDaemonExitMessage(daemon.getExitStatus()!, daemon.getOutput()));
-      }
-
-      const action = await promptAction();
-      if (!action || action === "exit") {
-        break;
-      }
-
-      try {
-        switch (action) {
-          case "create-agent":
-            await handleCreateAgent(controlPlane, state, availableSdks);
-            break;
-          case "delete-agent":
-            await handleDeleteAgent(controlPlane, state);
-            break;
-          case "create-thread":
-            await handleCreateThread(controlPlane, state, modelsBySdk);
-            break;
-          case "delete-thread":
-            await handleDeleteThread(controlPlane, state);
-            break;
-          case "show-state":
-            printState(state);
-            break;
-          case "show-daemon-logs":
-            printDaemonLogs(daemon.getOutput());
-            break;
-          default:
-            break;
-        }
-      } catch (error: unknown) {
-        p.log.error(toErrorMessage(error));
-      }
-    }
+    await runShellLoop(cfg, controlPlane, state, availableSdks, modelsBySdk, daemon);
 
     p.outro("Shell session ended.");
   } finally {
