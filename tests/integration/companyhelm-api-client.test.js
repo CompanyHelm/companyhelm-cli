@@ -1,24 +1,28 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
-const { mkdtemp, rm } = require("node:fs/promises");
+const { mkdtemp, rm, mkdir, writeFile } = require("node:fs/promises");
+const { existsSync } = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const { tmpdir } = require("node:os");
-const test = require("node:test");
 const { create } = require("@bufbuild/protobuf");
 const grpc = require("@grpc/grpc-js");
 const {
+  AgentStatus,
   ClientMessageSchema,
   RegisterRunnerRequestSchema,
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
+  ThreadStatus,
 } = require("@companyhelm/protos");
 const {
   CompanyhelmApiClient,
   createAgentRunnerControlServiceDefinition,
 } = require("../../dist/service/companyhelm_api_client.js");
+const { runRootCommand } = require("../../dist/commands/root.js");
+const threadLifecycle = require("../../dist/service/thread_lifecycle.js");
 const { initDb } = require("../../dist/state/db.js");
-const { agents, agentSdks, llmModels } = require("../../dist/state/schema.js");
+const { agents, agentSdks, llmModels, threads } = require("../../dist/state/schema.js");
 
 function waitForExit(child, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
@@ -111,284 +115,417 @@ async function seedStateDatabase(homeDirectory) {
   }
 }
 
-test("CompanyhelmApiClient registers first and streams messages both directions", async (t) => {
+async function writeHostAuthFile(homeDirectory) {
+  const authDirectory = path.join(homeDirectory, ".codex");
+  await mkdir(authDirectory, { recursive: true });
+  await writeFile(path.join(authDirectory, "auth.json"), "{}", "utf8");
+}
+
+test("CompanyhelmApiClient registers first and streams messages both directions", async () => {
   let registerRequest = null;
-  let commandOpenedBeforeRegister = false;
+  let channelOpenedBeforeRegister = false;
   let receivedClientMessage = null;
   let resolveClientMessage;
   const receivedClientMessagePromise = new Promise((resolve) => {
     resolveClientMessage = resolve;
   });
 
-  const { server, port } = await startFakeServer("/grpc", {
-    registerRunner(call, callback) {
-      registerRequest = call.request;
-      callback(null, create(RegisterRunnerResponseSchema, {}));
-    },
-    commandChannel(call) {
-      if (!registerRequest) {
-        commandOpenedBeforeRegister = true;
-      }
-
-      call.write(
-        create(ServerMessageSchema, {
-          commandId: "command-1",
-          command: {
-            case: "createAgentCommand",
-            value: {
-              agentId: "agent-1",
-              agentSdk: "codex",
-            },
-          },
-        }),
-      );
-
-      call.on("data", (message) => {
-        receivedClientMessage = message;
-        resolveClientMessage();
-        call.end();
-      });
-    },
-  });
-
-  t.after(async () => {
-    await shutdownServer(server);
-  });
-
-  const client = new CompanyhelmApiClient({
-    apiUrl: `127.0.0.1:${port}/grpc`,
-  });
-  t.after(() => {
-    client.close();
-  });
-
-  const channel = await client.connect(
-    create(RegisterRunnerRequestSchema, {
-      agentSdks: [
-        {
-          name: "codex",
-          models: [{ name: "gpt-5.3-codex", reasoning: ["high"] }],
-        },
-      ],
-    }),
-  );
-
-  const firstServerMessage = await channel.nextMessage();
-  assert.equal(firstServerMessage?.commandId, "command-1");
-
-  await channel.send(
-    create(ClientMessageSchema, {
-      commandId: "command-1",
-      payload: {
-        case: "commandError",
-        value: {
-          message: "ack",
-        },
-      },
-    }),
-  );
-
-  await receivedClientMessagePromise;
-  channel.closeWrite();
-
-  assert.equal(commandOpenedBeforeRegister, false);
-  assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
-  assert.equal(receivedClientMessage?.commandId, "command-1");
-  assert.equal(receivedClientMessage?.payload?.case, "commandError");
-});
-
-test("companyhelm root command connects to API and triggers registration flow", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
-  t.after(async () => {
-    await rm(homeDirectory, { recursive: true, force: true });
-  });
-  await seedStateDatabase(homeDirectory);
-
-  let registerRequest = null;
-  let commandChannelOpened = false;
-  let commandOpenedBeforeRegister = false;
-
-  const { server, port } = await startFakeServer("/grpc", {
-    registerRunner(call, callback) {
-      registerRequest = call.request;
-      callback(null, create(RegisterRunnerResponseSchema, {}));
-    },
-    commandChannel(call) {
-      commandChannelOpened = true;
-      if (!registerRequest) {
-        commandOpenedBeforeRegister = true;
-      }
-      call.sendMetadata(new grpc.Metadata());
-      call.end();
-    },
-  });
-
-  t.after(async () => {
-    await shutdownServer(server);
-  });
-
-  const repositoryRoot = path.resolve(__dirname, "../..");
-  const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-  const result = await waitForExit(
-    spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
-      cwd: repositoryRoot,
-      env: { ...process.env, HOME: homeDirectory },
-      stdio: ["ignore", "pipe", "pipe"],
-    }),
-  );
-
-  assert.equal(
-    result.code,
-    0,
-    `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-  );
-  assert.match(result.stdout, /Connected to CompanyHelm API/);
-  assert.equal(commandChannelOpened, true);
-  assert.equal(commandOpenedBeforeRegister, false);
-  assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
-  assert.equal(registerRequest?.agentSdks?.[0]?.models?.[0]?.name, "gpt-5.3-codex");
-  assert.deepEqual(registerRequest?.agentSdks?.[0]?.models?.[0]?.reasoning, ["high"]);
-});
-
-test("companyhelm root command retries until server becomes available", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
-  t.after(async () => {
-    await rm(homeDirectory, { recursive: true, force: true });
-  });
-  await seedStateDatabase(homeDirectory);
-
-  const port = await reserveFreePort();
   let server;
-  let registerRequests = 0;
-  let commandChannelOpened = false;
+  let client;
 
-  const serverStartPromise = new Promise((resolve, reject) => {
-    setTimeout(async () => {
-      try {
-        const started = await startFakeServer(
-          "/grpc",
-          {
-            registerRunner(call, callback) {
-              registerRequests += 1;
-              callback(null, create(RegisterRunnerResponseSchema, {}));
+  try {
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        registerRequest = call.request;
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        if (!registerRequest) {
+          channelOpenedBeforeRegister = true;
+        }
+
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createAgentRequest",
+              value: {
+                agentId: "agent-1",
+                agentSdk: "codex",
+              },
             },
-            commandChannel(call) {
-              commandChannelOpened = true;
-              call.sendMetadata(new grpc.Metadata());
-              call.end();
-            },
-          },
-          `127.0.0.1:${port}`,
+          }),
         );
-        server = started.server;
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    }, 1_500);
-  });
 
-  const repositoryRoot = path.resolve(__dirname, "../..");
-  const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-  const cliProcess = spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
-    cwd: repositoryRoot,
-    env: { ...process.env, HOME: homeDirectory },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+        call.on("data", (message) => {
+          receivedClientMessage = message;
+          resolveClientMessage();
+          call.end();
+        });
+      },
+    });
+    server = started.server;
+    client = new CompanyhelmApiClient({
+      apiUrl: `127.0.0.1:${started.port}/grpc`,
+    });
 
-  const resultPromise = waitForExit(cliProcess, 30_000);
-  await serverStartPromise;
-  const result = await resultPromise;
+    const channel = await client.connect(
+      create(RegisterRunnerRequestSchema, {
+        agentSdks: [
+          {
+            name: "codex",
+            models: [{ name: "gpt-5.3-codex", reasoning: ["high"] }],
+          },
+        ],
+      }),
+    );
 
-  if (server) {
-    await shutdownServer(server);
+    const firstServerMessage = await channel.nextMessage();
+    assert.equal(firstServerMessage?.request.case, "createAgentRequest");
+    assert.equal(firstServerMessage?.request.value.agentId, "agent-1");
+
+    await channel.send(
+      create(ClientMessageSchema, {
+        payload: {
+          case: "requestError",
+          value: {
+            errorMessage: "ack",
+          },
+        },
+      }),
+    );
+
+    await receivedClientMessagePromise;
+    channel.closeWrite();
+
+    assert.equal(channelOpenedBeforeRegister, false);
+    assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
+    assert.equal(receivedClientMessage?.payload?.case, "requestError");
+    assert.equal(receivedClientMessage?.payload?.value?.errorMessage, "ack");
+  } finally {
+    if (client) {
+      client.close();
+    }
+    if (server) {
+      await shutdownServer(server);
+    }
   }
-
-  assert.equal(
-    result.code,
-    0,
-    `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-  );
-  assert.match(result.stderr, /connection attempt 1\/4 failed/i);
-  assert.match(result.stdout, /Connected to CompanyHelm API/);
-  assert.equal(commandChannelOpened, true);
-  assert.equal(registerRequests, 1);
 });
 
-test("companyhelm root command handles createAgentCommand by storing agent and sending update", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
-  t.after(async () => {
-    await rm(homeDirectory, { recursive: true, force: true });
-  });
-  await seedStateDatabase(homeDirectory);
+test("companyhelm root command connects to API and triggers registration flow", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
+  let server;
 
-  let receivedClientUpdate = null;
-  let resolveClientUpdate;
-  const clientUpdatePromise = new Promise((resolve) => {
-    resolveClientUpdate = resolve;
-  });
+  try {
+    await seedStateDatabase(homeDirectory);
 
-  const { server, port } = await startFakeServer("/grpc", {
-    registerRunner(call, callback) {
-      callback(null, create(RegisterRunnerResponseSchema, {}));
-    },
-    commandChannel(call) {
-      call.write(
-        create(ServerMessageSchema, {
-          commandId: "create-agent-1",
-          command: {
-            case: "createAgentCommand",
-            value: {
-              agentId: "agent-from-command",
-              agentSdk: "codex",
-            },
-          },
-        }),
-      );
+    let registerRequest = null;
+    let controlChannelOpened = false;
+    let channelOpenedBeforeRegister = false;
 
-      call.on("data", (message) => {
-        receivedClientUpdate = message;
-        resolveClientUpdate();
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        registerRequest = call.request;
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        controlChannelOpened = true;
+        if (!registerRequest) {
+          channelOpenedBeforeRegister = true;
+        }
+        call.sendMetadata(new grpc.Metadata());
         call.end();
-      });
-    },
-  });
+      },
+    });
+    server = started.server;
 
-  t.after(async () => {
-    await shutdownServer(server);
-  });
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const result = await waitForExit(
+      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+        cwd: repositoryRoot,
+        env: { ...process.env, HOME: homeDirectory },
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+    );
 
-  const repositoryRoot = path.resolve(__dirname, "../..");
-  const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-  const result = await waitForExit(
-    spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
+    assert.equal(
+      result.code,
+      0,
+      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
+    );
+    assert.match(result.stdout, /Connected to CompanyHelm API/);
+    assert.equal(controlChannelOpened, true);
+    assert.equal(channelOpenedBeforeRegister, false);
+    assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
+    assert.equal(registerRequest?.agentSdks?.[0]?.models?.[0]?.name, "gpt-5.3-codex");
+    assert.deepEqual(registerRequest?.agentSdks?.[0]?.models?.[0]?.reasoning, ["high"]);
+  } finally {
+    if (server) {
+      await shutdownServer(server);
+    }
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command retries until server becomes available", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
+  let server;
+
+  try {
+    await seedStateDatabase(homeDirectory);
+
+    const port = await reserveFreePort();
+    let registerRequests = 0;
+    let controlChannelOpened = false;
+
+    const serverStartPromise = new Promise((resolve, reject) => {
+      setTimeout(async () => {
+        try {
+          const started = await startFakeServer(
+            "/grpc",
+            {
+              registerRunner(call, callback) {
+                registerRequests += 1;
+                callback(null, create(RegisterRunnerResponseSchema, {}));
+              },
+              controlChannel(call) {
+                controlChannelOpened = true;
+                call.sendMetadata(new grpc.Metadata());
+                call.end();
+              },
+            },
+            `127.0.0.1:${port}`,
+          );
+          server = started.server;
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      }, 1_500);
+    });
+
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const cliProcess = spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
       cwd: repositoryRoot,
       env: { ...process.env, HOME: homeDirectory },
       stdio: ["ignore", "pipe", "pipe"],
-    }),
-    30_000,
-  );
+    });
 
-  await clientUpdatePromise;
+    const resultPromise = waitForExit(cliProcess, 30_000);
+    await serverStartPromise;
+    const result = await resultPromise;
 
-  assert.equal(
-    result.code,
-    0,
-    `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
-  );
-  assert.equal(receivedClientUpdate?.commandId, "create-agent-1");
-  assert.equal(receivedClientUpdate?.payload?.case, "agentCreatedUpdate");
-  assert.equal(receivedClientUpdate?.payload?.value?.status, 1);
-
-  const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
-  const { db, client } = await initDb(stateDbPath);
-  try {
-    const storedAgents = await db.select().from(agents).all();
-    const createdAgent = storedAgents.find((agent) => agent.id === "agent-from-command");
-    assert.ok(createdAgent, "expected agent row to be created from createAgentCommand");
-    assert.equal(createdAgent.name, "agent-from-command");
-    assert.equal(createdAgent.sdk, "codex");
+    assert.equal(
+      result.code,
+      0,
+      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
+    );
+    assert.match(result.stderr, /connection attempt 1\/4 failed/i);
+    assert.match(result.stdout, /Connected to CompanyHelm API/);
+    assert.equal(controlChannelOpened, true);
+    assert.equal(registerRequests, 1);
   } finally {
-    client.close();
+    if (server) {
+      await shutdownServer(server);
+    }
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
+  let server;
+
+  try {
+    await seedStateDatabase(homeDirectory);
+
+    let receivedClientUpdate = null;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createAgentRequest",
+              value: {
+                agentId: "agent-from-request",
+                agentSdk: "codex",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          receivedClientUpdate = message;
+          call.end();
+        });
+      },
+    });
+    server = started.server;
+
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const result = await waitForExit(
+      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+        cwd: repositoryRoot,
+        env: { ...process.env, HOME: homeDirectory },
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+      30_000,
+    );
+
+    assert.equal(
+      result.code,
+      0,
+      `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`,
+    );
+    assert.ok(receivedClientUpdate, "expected agent update from runner");
+    assert.equal(receivedClientUpdate.payload.case, "agentUpdate");
+    assert.equal(receivedClientUpdate.payload.value.agentId, "agent-from-request");
+    assert.equal(receivedClientUpdate.payload.value.status, AgentStatus.READY);
+
+    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+    const { db, client } = await initDb(stateDbPath);
+    try {
+      const storedAgents = await db.select().from(agents).all();
+      const createdAgent = storedAgents.find((agent) => agent.id === "agent-from-request");
+      assert.ok(createdAgent, "expected agent row to be created from createAgentRequest");
+      assert.equal(createdAgent.name, "agent-from-request");
+      assert.equal(createdAgent.sdk, "codex");
+    } finally {
+      client.close();
+    }
+  } finally {
+    if (server) {
+      await shutdownServer(server);
+    }
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command handles createThreadRequest and creates a ready thread", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-thread-success-"));
+  let server;
+  const previousHome = process.env.HOME;
+
+  const createThreadContainersSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+    .mockResolvedValue();
+  const forceRemoveContainerSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
+    .mockResolvedValue();
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+    await writeHostAuthFile(homeDirectory);
+
+    let receivedRequestError = null;
+    let receivedThreadUpdate = null;
+    let sentCreateThreadRequest = false;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createAgentRequest",
+              value: {
+                agentId: "agent-for-thread",
+                agentSdk: "codex",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            !sentCreateThreadRequest &&
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "agent-for-thread" &&
+            message.payload.value.status === AgentStatus.READY
+          ) {
+            sentCreateThreadRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "createThreadRequest",
+                  value: {
+                    agentId: "agent-for-thread",
+                    model: "gpt-5.3-codex",
+                    reasoningLevel: "high",
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (message.payload.case === "threadUpdate") {
+            receivedThreadUpdate = message;
+            call.end();
+          }
+        });
+      },
+    });
+    server = started.server;
+
+    await runRootCommand({
+      companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+    });
+
+    assert.equal(receivedRequestError, null, "did not expect requestError while creating thread");
+    assert.ok(receivedThreadUpdate, "expected threadUpdate message for createThreadRequest");
+    assert.equal(receivedThreadUpdate.payload.value.status, ThreadStatus.READY);
+
+    const threadId = receivedThreadUpdate.payload.value.threadId;
+    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+    const { db, client } = await initDb(stateDbPath);
+
+    try {
+      const storedThreads = await db.select().from(threads).all();
+      const storedThread = storedThreads.find((thread) => thread.id === threadId);
+      assert.ok(storedThread, "expected thread row to be present after createThreadRequest");
+      assert.equal(storedThread.agentId, "agent-for-thread");
+      assert.equal(storedThread.model, "gpt-5.3-codex");
+      assert.equal(storedThread.reasoningLevel, "high");
+      assert.equal(storedThread.status, "ready");
+      assert.equal(existsSync(storedThread.workspace), true);
+      assert.equal(storedThread.runtimeContainer, `companyhelm-runtime-thread-${threadId}`);
+      assert.equal(storedThread.dindContainer, `companyhelm-dind-thread-${threadId}`);
+    } finally {
+      client.close();
+    }
+
+    assert.equal(createThreadContainersSpy.mock.calls.length, 1);
+    assert.equal(forceRemoveContainerSpy.mock.calls.length, 0);
+
+    const createOptions = createThreadContainersSpy.mock.calls[0][0];
+    assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${threadId}`);
+    assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${threadId}`);
+    assert.equal(createOptions.mounts[0].Target, "/workspace");
+  } finally {
+    createThreadContainersSpy.mockRestore();
+    forceRemoveContainerSpy.mockRestore();
+
+    if (server) {
+      await shutdownServer(server);
+    }
+
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
   }
 });

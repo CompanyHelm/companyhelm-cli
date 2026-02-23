@@ -20,7 +20,7 @@ export const config = z.object({
         .describe("The directory where the config files are stored.")
         .default("~/.config/companyhelm"),
     threads_directory: z.string()
-        .describe("The directory where the threads are stored. Based on the config_directory.")
+        .describe("The directory where thread workspaces are stored, relative to config_directory when not absolute.")
         .default("threads"),
     state_db_path: z.string()
         .describe("The path to the state database.")
