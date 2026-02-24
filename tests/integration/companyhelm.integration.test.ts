@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
@@ -18,8 +18,11 @@ const require = createRequire(import.meta.url);
 const {
   AgentStatus,
   ClientMessageSchema,
+  GetGithubInstallationAccessTokenForRunnerResponseSchema,
+  GithubInstallationForRunnerSchema,
   ItemStatus,
   ItemType,
+  ListGithubInstallationsForRunnerResponseSchema,
   RegisterRunnerRequestSchema,
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
@@ -600,6 +603,146 @@ test("companyhelm root command returns requestError for createThreadRequest when
     assert.equal(receivedClientUpdate.payload.case, "requestError");
     assert.match(receivedClientUpdate.payload.value.errorMessage, /missing-agent/i);
   } finally {
+    if (server) {
+      await shutdownServer(server);
+    }
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command writes GitHub installations into thread AGENTS.md", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-thread-github-installations-"));
+  let server: grpc.Server | undefined;
+
+  const createThreadContainersSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+    .mockImplementation(async () => undefined);
+
+  try {
+    await seedStateDatabase(homeDirectory);
+    await writeHostAuthFile(homeDirectory);
+
+    let receivedRequestError: any = null;
+    let createdThreadId: string | null = null;
+    let sentCreateThreadRequest = false;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      listGithubInstallationsForRunner(_call, callback) {
+        callback(
+          null,
+          create(ListGithubInstallationsForRunnerResponseSchema, {
+            installations: [
+              create(GithubInstallationForRunnerSchema, {
+                installationId: BigInt(112102565),
+              }),
+            ],
+          }),
+        );
+      },
+      getGithubInstallationAccessTokenForRunner(call, callback) {
+        callback(
+          null,
+          create(GetGithubInstallationAccessTokenForRunnerResponseSchema, {
+            installationId: call.request.installationId,
+            accessToken: "ghs_test_installation_token",
+            accessTokenExpiresUnixTimeMs: BigInt(1767142800000),
+            repositories: ["acme/backend", "acme/frontend"],
+          }),
+        );
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createAgentRequest",
+              value: {
+                agentId: "agent-github-installations",
+                agentSdk: "codex",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            !sentCreateThreadRequest &&
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "agent-github-installations" &&
+            message.payload.value.status === AgentStatus.READY
+          ) {
+            sentCreateThreadRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "createThreadRequest",
+                  value: {
+                    agentId: "agent-github-installations",
+                    model: "gpt-5.3-codex",
+                    reasoningLevel: "high",
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.READY
+          ) {
+            createdThreadId = message.payload.value.threadId;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    const repositoryRoot = path.resolve(__dirname, "../..");
+    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
+    const result = await waitForExit(
+      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
+        cwd: repositoryRoot,
+        env: { ...process.env, HOME: homeDirectory },
+        stdio: ["ignore", "pipe", "pipe"],
+      }),
+      30_000,
+    );
+
+    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
+    assert.equal(receivedRequestError, null, "did not expect requestError during createThread flow");
+    assert.ok(createdThreadId, "expected thread to be created");
+
+    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+    const { db, client } = await initDb(stateDbPath);
+    let agentsMdContents = "";
+    try {
+      const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
+      assert.ok(threadRow, "expected thread row to exist");
+      const agentsPath = path.join(threadRow!.workspace, "AGENTS.md");
+      assert.equal(existsSync(agentsPath), true, "expected AGENTS.md to be created in thread workspace");
+      agentsMdContents = await readFile(agentsPath, "utf8");
+    } finally {
+      client.close();
+    }
+
+    assert.equal(agentsMdContents.includes("## GitHub Installations"), true);
+    assert.equal(agentsMdContents.includes("### Installation 112102565"), true);
+    assert.equal(agentsMdContents.includes("`ghs_test_installation_token`"), true);
+    assert.equal(agentsMdContents.includes("`acme/backend`"), true);
+    assert.equal(agentsMdContents.includes("`acme/frontend`"), true);
+  } finally {
+    createThreadContainersSpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }

@@ -23,7 +23,11 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
-import { CompanyhelmApiClient, type CompanyhelmCommandChannel } from "../service/companyhelm_api_client.js";
+import {
+  CompanyhelmApiClient,
+  type CompanyhelmApiCallOptions,
+  type CompanyhelmCommandChannel,
+} from "../service/companyhelm_api_client.js";
 import { getHostInfo } from "../service/host.js";
 import { AppServerService } from "../service/app_server.js";
 import { RuntimeContainerAppServerTransport } from "../service/docker/runtime_app_server_exec.js";
@@ -55,7 +59,7 @@ import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
-import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
+import { ensureWorkspaceAgentsMd, type RuntimeGithubInstallation } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
   serverUrl?: string;
@@ -203,6 +207,55 @@ function normalizeReasoningLevels(value: unknown): string[] {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isGrpcServiceError(error: unknown): error is grpc.ServiceError {
+  return Boolean(error && typeof error === "object" && "code" in error);
+}
+
+function isUnimplementedGrpcMethod(error: unknown): boolean {
+  return isGrpcServiceError(error) && error.code === grpc.status.UNIMPLEMENTED;
+}
+
+async function loadRuntimeGithubInstallations(
+  apiClient: CompanyhelmApiClient,
+  options: CompanyhelmApiCallOptions | undefined,
+  logger: Logger,
+): Promise<RuntimeGithubInstallation[]> {
+  let installationIds: bigint[] = [];
+  try {
+    const listResponse = await apiClient.listGithubInstallationsForRunner(options);
+    installationIds = listResponse.installations.map((installation) => installation.installationId);
+  } catch (error: unknown) {
+    const warning = isUnimplementedGrpcMethod(error)
+      ? "CompanyHelm API does not implement listGithubInstallationsForRunner yet."
+      : `Failed to fetch GitHub installations: ${toErrorMessage(error)}`;
+    logger.warn(warning);
+    return [];
+  }
+
+  const installationDetails: RuntimeGithubInstallation[] = [];
+
+  for (const installationId of installationIds) {
+    try {
+      const accessTokenResponse = await apiClient.getGithubInstallationAccessTokenForRunner(installationId, options);
+      const repositories = [...new Set(accessTokenResponse.repositories.filter((repository) => repository.trim().length > 0))]
+        .sort((left, right) => left.localeCompare(right));
+      installationDetails.push({
+        installationId: accessTokenResponse.installationId.toString(),
+        accessToken: accessTokenResponse.accessToken,
+        accessTokenExpiresUnixTimeMs: accessTokenResponse.accessTokenExpiresUnixTimeMs.toString(),
+        repositories,
+      });
+    } catch (error: unknown) {
+      const warning = isUnimplementedGrpcMethod(error)
+        ? "CompanyHelm API does not implement getGithubInstallationAccessTokenForRunner yet."
+        : `Failed to fetch GitHub access token for installation ${installationId.toString()}: ${toErrorMessage(error)}`;
+      logger.warn(warning);
+    }
+  }
+
+  return installationDetails;
 }
 
 function normalizeReasoningEffort(value: string | undefined): ReasoningEffort | null {
@@ -479,6 +532,8 @@ async function handleCreateThreadRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
   request: CreateThreadRequest,
+  apiClient: CompanyhelmApiClient,
+  apiCallOptions: CompanyhelmApiCallOptions | undefined,
   logger: Logger,
 ): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
@@ -529,7 +584,8 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
-  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
+  const githubInstallations = await loadRuntimeGithubInstallations(apiClient, apiCallOptions, logger);
+  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory, githubInstallations);
   logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();
@@ -1074,14 +1130,20 @@ async function handleCreateUserMessageRequest(
   );
 }
 
-async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel, logger: Logger): Promise<void> {
+async function runCommandLoop(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  apiClient: CompanyhelmApiClient,
+  apiCallOptions: CompanyhelmApiCallOptions | undefined,
+  logger: Logger,
+): Promise<void> {
   for await (const serverMessage of commandChannel) {
     switch (serverMessage.request.case) {
       case "createAgentRequest":
         await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value, logger);
         break;
       case "createThreadRequest":
-        await handleCreateThreadRequest(cfg, commandChannel, serverMessage.request.value, logger);
+        await handleCreateThreadRequest(cfg, commandChannel, serverMessage.request.value, apiClient, apiCallOptions, logger);
         break;
       case "deleteAgentRequest":
         await handleDeleteAgentRequest(cfg, commandChannel, serverMessage.request.value);
@@ -1129,16 +1191,17 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   }
 
   const registerRequest = await buildRegisterRunnerRequest(cfg);
+  const apiCallOptions = buildGrpcAuthCallOptions(options.secret);
   let lastError: Error | null = null;
 
   try {
     for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
       const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
       try {
-        const commandChannel = await apiClient.connect(registerRequest, buildGrpcAuthCallOptions(options.secret));
+        const commandChannel = await apiClient.connect(registerRequest, apiCallOptions);
         await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
         logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
-        await runCommandLoop(cfg, commandChannel, logger);
+        await runCommandLoop(cfg, commandChannel, apiClient, apiCallOptions, logger);
         return;
       } catch (error: unknown) {
         lastError = error instanceof Error ? error : new Error(String(error));

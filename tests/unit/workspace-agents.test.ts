@@ -13,6 +13,8 @@ test("renderRuntimeAgentsMd includes workspace and CLI tools sections", () => {
   const rendered = renderRuntimeAgentsMd();
 
   assert.equal(rendered.includes("## Workspace Structure"), true);
+  assert.equal(rendered.includes("## GitHub Installations"), true);
+  assert.equal(rendered.includes("No linked GitHub installations were provided for this thread."), true);
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
   assert.equal(rendered.includes("no additional CompanyHelm helper CLI tools"), true);
@@ -29,6 +31,7 @@ test("ensureWorkspaceAgentsMd creates AGENTS.md from the runtime template", () =
     const contents = readFileSync(join(workspaceDir, "AGENTS.md"), "utf8");
     assert.equal(contents.includes("# Agent Instructions"), true);
     assert.equal(contents.includes("## Workspace Structure"), true);
+    assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
@@ -46,9 +49,27 @@ test("ensureWorkspaceAgentsMd appends missing CLI section to existing AGENTS.md"
 
     const contents = readFileSync(agentsPath, "utf8");
     assert.equal(contents.includes("## Workspace Structure"), true);
+    assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
     assert.equal(contents.includes(AGENTS_MD_CLI_TOOLS_SECTION.trim()), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
   }
+});
+
+test("renderRuntimeAgentsMd includes GitHub installation tokens and repositories when provided", () => {
+  const rendered = renderRuntimeAgentsMd("/home/agent", [
+    {
+      installationId: "110600868",
+      accessToken: "ghs_example_token",
+      accessTokenExpiresUnixTimeMs: "1767142800000",
+      repositories: ["acme/backend", "acme/frontend"],
+    },
+  ]);
+
+  assert.equal(rendered.includes("### Installation 110600868"), true);
+  assert.equal(rendered.includes("`ghs_example_token`"), true);
+  assert.equal(rendered.includes("`1767142800000`"), true);
+  assert.equal(rendered.includes("`acme/backend`"), true);
+  assert.equal(rendered.includes("`acme/frontend`"), true);
 });

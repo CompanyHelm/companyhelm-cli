@@ -2,6 +2,14 @@ import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AgentRunnerControlService,
   ClientMessageSchema,
+  GetGithubInstallationAccessTokenForRunnerRequestSchema,
+  type GetGithubInstallationAccessTokenForRunnerRequest,
+  GetGithubInstallationAccessTokenForRunnerResponseSchema,
+  type GetGithubInstallationAccessTokenForRunnerResponse,
+  ListGithubInstallationsForRunnerRequestSchema,
+  type ListGithubInstallationsForRunnerRequest,
+  ListGithubInstallationsForRunnerResponseSchema,
+  type ListGithubInstallationsForRunnerResponse,
   type ClientMessage,
   RegisterRunnerRequestSchema,
   type RegisterRunnerRequest,
@@ -113,6 +121,32 @@ export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc
       responseSerialize: (response: ServerMessage): Buffer => Buffer.from(toBinary(ServerMessageSchema, response)),
       responseDeserialize: (bytes: Buffer): ServerMessage => fromBinary(ServerMessageSchema, bytes),
     },
+    listGithubInstallationsForRunner: {
+      path: buildRpcPath(methods.listGithubInstallationsForRunner.name, pathPrefix),
+      requestStream: false,
+      responseStream: false,
+      requestSerialize: (request: ListGithubInstallationsForRunnerRequest): Buffer =>
+        Buffer.from(toBinary(ListGithubInstallationsForRunnerRequestSchema, request)),
+      requestDeserialize: (bytes: Buffer): ListGithubInstallationsForRunnerRequest =>
+        fromBinary(ListGithubInstallationsForRunnerRequestSchema, bytes),
+      responseSerialize: (response: ListGithubInstallationsForRunnerResponse): Buffer =>
+        Buffer.from(toBinary(ListGithubInstallationsForRunnerResponseSchema, response)),
+      responseDeserialize: (bytes: Buffer): ListGithubInstallationsForRunnerResponse =>
+        fromBinary(ListGithubInstallationsForRunnerResponseSchema, bytes),
+    },
+    getGithubInstallationAccessTokenForRunner: {
+      path: buildRpcPath(methods.getGithubInstallationAccessTokenForRunner.name, pathPrefix),
+      requestStream: false,
+      responseStream: false,
+      requestSerialize: (request: GetGithubInstallationAccessTokenForRunnerRequest): Buffer =>
+        Buffer.from(toBinary(GetGithubInstallationAccessTokenForRunnerRequestSchema, request)),
+      requestDeserialize: (bytes: Buffer): GetGithubInstallationAccessTokenForRunnerRequest =>
+        fromBinary(GetGithubInstallationAccessTokenForRunnerRequestSchema, bytes),
+      responseSerialize: (response: GetGithubInstallationAccessTokenForRunnerResponse): Buffer =>
+        Buffer.from(toBinary(GetGithubInstallationAccessTokenForRunnerResponseSchema, response)),
+      responseDeserialize: (bytes: Buffer): GetGithubInstallationAccessTokenForRunnerResponse =>
+        fromBinary(GetGithubInstallationAccessTokenForRunnerResponseSchema, bytes),
+    },
   };
 }
 
@@ -124,6 +158,18 @@ interface AgentRunnerControlClient extends grpc.Client {
     callback: grpc.requestCallback<RegisterRunnerResponse>,
   ): grpc.ClientUnaryCall;
   controlChannel(metadata?: grpc.Metadata, options?: grpc.CallOptions): grpc.ClientDuplexStream<ClientMessage, ServerMessage>;
+  listGithubInstallationsForRunner(
+    request: ListGithubInstallationsForRunnerRequest,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<ListGithubInstallationsForRunnerResponse>,
+  ): grpc.ClientUnaryCall;
+  getGithubInstallationAccessTokenForRunner(
+    request: GetGithubInstallationAccessTokenForRunnerRequest,
+    metadata: grpc.Metadata,
+    options: grpc.CallOptions,
+    callback: grpc.requestCallback<GetGithubInstallationAccessTokenForRunnerResponse>,
+  ): grpc.ClientUnaryCall;
 }
 
 type AgentRunnerControlClientConstructor = new (
@@ -322,6 +368,55 @@ export class CompanyhelmApiClient {
     await this.registerRunner(registerRequest, options);
     const stream = this.client.controlChannel(options?.metadata, options?.callOptions);
     return new CompanyhelmCommandChannel(stream);
+  }
+
+  listGithubInstallationsForRunner(
+    options?: CompanyhelmApiCallOptions,
+  ): Promise<ListGithubInstallationsForRunnerResponse> {
+    const metadata = options?.metadata ?? new grpc.Metadata();
+    const callOptions = options?.callOptions ?? {};
+    const request = create(ListGithubInstallationsForRunnerRequestSchema, {});
+
+    return new Promise<ListGithubInstallationsForRunnerResponse>((resolve, reject) => {
+      this.client.listGithubInstallationsForRunner(
+        request,
+        metadata,
+        callOptions,
+        (error: grpc.ServiceError | null, response: ListGithubInstallationsForRunnerResponse | undefined) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(response ?? create(ListGithubInstallationsForRunnerResponseSchema, {}));
+        },
+      );
+    });
+  }
+
+  getGithubInstallationAccessTokenForRunner(
+    installationId: bigint,
+    options?: CompanyhelmApiCallOptions,
+  ): Promise<GetGithubInstallationAccessTokenForRunnerResponse> {
+    const metadata = options?.metadata ?? new grpc.Metadata();
+    const callOptions = options?.callOptions ?? {};
+    const request = create(GetGithubInstallationAccessTokenForRunnerRequestSchema, {
+      installationId,
+    });
+
+    return new Promise<GetGithubInstallationAccessTokenForRunnerResponse>((resolve, reject) => {
+      this.client.getGithubInstallationAccessTokenForRunner(
+        request,
+        metadata,
+        callOptions,
+        (error: grpc.ServiceError | null, response: GetGithubInstallationAccessTokenForRunnerResponse | undefined) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve(response ?? create(GetGithubInstallationAccessTokenForRunnerResponseSchema, {}));
+        },
+      );
+    });
   }
 
   close(): void {
