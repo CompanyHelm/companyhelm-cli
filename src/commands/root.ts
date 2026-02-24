@@ -56,6 +56,72 @@ const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
 
+interface ThreadAppServerSession {
+  runtimeContainer: string;
+  appServer: AppServerService;
+  sdkThreadId: string | null;
+  started: boolean;
+}
+
+const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
+
+async function getOrCreateThreadAppServerSession(
+  threadId: string,
+  runtimeContainer: string,
+  clientName: string,
+): Promise<ThreadAppServerSession> {
+  const existingSession = threadAppServerSessions.get(threadId);
+  if (existingSession && existingSession.runtimeContainer === runtimeContainer) {
+    return existingSession;
+  }
+
+  if (existingSession && existingSession.runtimeContainer !== runtimeContainer) {
+    await stopThreadAppServerSession(threadId);
+  }
+
+  const appServer = new AppServerService(new RuntimeContainerAppServerTransport(runtimeContainer), clientName);
+  const newSession: ThreadAppServerSession = {
+    runtimeContainer,
+    appServer,
+    sdkThreadId: null,
+    started: false,
+  };
+
+  threadAppServerSessions.set(threadId, newSession);
+  return newSession;
+}
+
+async function ensureThreadAppServerSessionStarted(session: ThreadAppServerSession): Promise<void> {
+  if (session.started) {
+    return;
+  }
+
+  await session.appServer.start();
+  session.started = true;
+}
+
+async function stopThreadAppServerSession(threadId: string): Promise<void> {
+  const session = threadAppServerSessions.get(threadId);
+  if (!session) {
+    return;
+  }
+
+  threadAppServerSessions.delete(threadId);
+  if (!session.started) {
+    return;
+  }
+
+  await session.appServer.stop().catch(() => undefined);
+  session.started = false;
+}
+
+async function stopAllThreadAppServerSessions(): Promise<void> {
+  const threadIds = [...threadAppServerSessions.keys()];
+  for (const threadId of threadIds) {
+    await stopThreadAppServerSession(threadId);
+  }
+}
+
 const SUPPORTED_REASONING_EFFORTS = new Set<ReasoningEffort>([
   "none",
   "minimal",
@@ -469,7 +535,7 @@ async function handleDeleteAgentRequest(
   const { db, client } = await initDb(cfg.state_db_path);
 
   let agentExists = false;
-  let threadResources: Array<{ runtimeContainer: string; dindContainer: string; workspace: string }> = [];
+  let threadResources: Array<{ id: string; runtimeContainer: string; dindContainer: string; workspace: string }> = [];
 
   try {
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
@@ -481,6 +547,7 @@ async function handleDeleteAgentRequest(
 
     threadResources = await db
       .select({
+        id: threads.id,
         runtimeContainer: threads.runtimeContainer,
         dindContainer: threads.dindContainer,
         workspace: threads.workspace,
@@ -502,6 +569,7 @@ async function handleDeleteAgentRequest(
   const containerService = new ThreadContainerService();
   try {
     for (const threadResource of threadResources) {
+      await stopThreadAppServerSession(threadResource.id);
       await containerService.forceRemoveContainer(threadResource.runtimeContainer);
       await containerService.forceRemoveContainer(threadResource.dindContainer);
       removeWorkspaceDirectory(threadResource.workspace);
@@ -566,6 +634,7 @@ async function handleDeleteThreadRequest(
 
   const containerService = new ThreadContainerService();
   try {
+    await stopThreadAppServerSession(request.threadId);
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
     await containerService.forceRemoveContainer(existingThread.dindContainer);
     removeWorkspaceDirectory(existingThread.workspace);
@@ -673,8 +742,12 @@ async function executeCreateUserMessageRequest(
   logger: Logger,
 ): Promise<void> {
   const containerService = new ThreadContainerService();
-  const transport = new RuntimeContainerAppServerTransport(threadState.runtimeContainer);
-  const appServer = new AppServerService(transport, cfg.codex.app_server_client_name);
+  const appServerSession = await getOrCreateThreadAppServerSession(
+    request.threadId,
+    threadState.runtimeContainer,
+    cfg.codex.app_server_client_name,
+  );
+  const appServer = appServerSession.appServer;
 
   let sdkThreadId = threadState.sdkThreadId;
   let sdkTurnId = threadState.currentSdkTurnId;
@@ -685,14 +758,20 @@ async function executeCreateUserMessageRequest(
     await containerService.waitForContainerRunning(threadState.dindContainer);
     await containerService.ensureContainerRunning(threadState.runtimeContainer);
 
-    await appServer.start();
+    await ensureThreadAppServerSessionStarted(appServerSession);
 
     if (sdkThreadId) {
-      const resumeParams: ThreadResumeParams = {
-        threadId: sdkThreadId,
-        persistExtendedHistory: true,
-      };
-      await appServer.resumeThread(resumeParams);
+      if (appServerSession.sdkThreadId !== sdkThreadId) {
+        const resumeParams: ThreadResumeParams = {
+          threadId: sdkThreadId,
+          persistExtendedHistory: true,
+        };
+        await appServer.resumeThread(resumeParams);
+        appServerSession.sdkThreadId = sdkThreadId;
+      }
+    } else if (appServerSession.sdkThreadId) {
+      sdkThreadId = appServerSession.sdkThreadId;
+      await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
     } else {
       const threadStartParams: ThreadStartParams = {
         model: request.model ?? threadState.model,
@@ -711,6 +790,7 @@ async function executeCreateUserMessageRequest(
 
       const threadStartResult = await appServer.startThread(threadStartParams);
       sdkThreadId = threadStartResult.thread.id;
+      appServerSession.sdkThreadId = sdkThreadId;
       await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
     }
 
@@ -785,8 +865,6 @@ async function executeCreateUserMessageRequest(
       `Failed to create user message turn for thread '${request.threadId}' (agent '${request.agentId}'): ${toErrorMessage(error)}`,
     );
     await sendRequestError(commandChannel, toErrorMessage(error));
-  } finally {
-    await appServer.stop().catch(() => undefined);
   }
 }
 
@@ -914,29 +992,33 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   const registerRequest = await buildRegisterRunnerRequest(cfg);
   let lastError: Error | null = null;
 
-  for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
-    const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
-    try {
-      const commandChannel = await apiClient.connect(registerRequest);
-      await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
-      logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
-      await runCommandLoop(cfg, commandChannel, logger);
-      return;
-    } catch (error: unknown) {
-      lastError = error instanceof Error ? error : new Error(String(error));
-      if (attempt < COMMAND_CHANNEL_CONNECT_ATTEMPTS) {
-        const attemptLabel = `${attempt}/${COMMAND_CHANNEL_CONNECT_ATTEMPTS}`;
-        logger.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
-        await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
+  try {
+    for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
+      const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
+      try {
+        const commandChannel = await apiClient.connect(registerRequest);
+        await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
+        logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
+        await runCommandLoop(cfg, commandChannel, logger);
+        return;
+      } catch (error: unknown) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        if (attempt < COMMAND_CHANNEL_CONNECT_ATTEMPTS) {
+          const attemptLabel = `${attempt}/${COMMAND_CHANNEL_CONNECT_ATTEMPTS}`;
+          logger.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
+          await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
+        }
+      } finally {
+        apiClient.close();
       }
-    } finally {
-      apiClient.close();
     }
-  }
 
-  throw new Error(
-    `Unable to establish CompanyHelm command channel after ${COMMAND_CHANNEL_CONNECT_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`,
-  );
+    throw new Error(
+      `Unable to establish CompanyHelm command channel after ${COMMAND_CHANNEL_CONNECT_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`,
+    );
+  } finally {
+    await stopAllThreadAppServerSessions();
+  }
 }
 
 export function registerRootCommand(program: Command): void {
