@@ -310,6 +310,50 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
   }
 });
 
+test("companyhelm root command forwards --secret as authorization metadata", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-secret-header-"));
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+
+  const secret = "7Rj8DjutkQTB_1SmyNpuizXh6SdyApPvBligVouPuRs";
+  let registerAuthorizationHeaders: string[] = [];
+  let controlChannelAuthorizationHeaders: string[] = [];
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        registerAuthorizationHeaders = call.metadata.get("authorization").map((value) => String(value));
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        controlChannelAuthorizationHeaders = call.metadata.get("authorization").map((value) => String(value));
+        call.sendMetadata(new grpc.Metadata());
+        call.end();
+      },
+    });
+
+    server = started.server;
+
+    await runRootCommand({
+      daemon: true,
+      secret,
+      serverUrl: `127.0.0.1:${started.port}/grpc`,
+    });
+
+    assert.deepEqual(registerAuthorizationHeaders, [`Bearer ${secret}`]);
+    assert.deepEqual(controlChannelAuthorizationHeaders, [`Bearer ${secret}`]);
+  } finally {
+    if (server) {
+      await shutdownServer(server);
+    }
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test("companyhelm root command in daemon mode fails when no sdk is configured", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-daemon-no-sdk-"));
 
