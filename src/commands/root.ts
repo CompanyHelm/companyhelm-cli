@@ -17,6 +17,7 @@ import {
 } from "@companyhelm/protos";
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
+import * as grpc from "@grpc/grpc-js";
 import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -51,6 +52,7 @@ interface RootCommandOptions {
   serverUrl?: string;
   daemon?: boolean;
   logLevel?: string;
+  secret?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
@@ -515,7 +517,7 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
-  ensureWorkspaceAgentsMd(threadDirectory);
+  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
   logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();
@@ -1139,6 +1141,16 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
   }
 }
 
+function buildGrpcAuthCallOptions(secret: string | undefined): { metadata: grpc.Metadata } | undefined {
+  if (!secret || secret.trim().length === 0) {
+    return undefined;
+  }
+
+  const metadata = new grpc.Metadata();
+  metadata.set("authorization", `Bearer ${secret}`);
+  return { metadata };
+}
+
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const logger = createLogger(options.logLevel ?? "INFO");
   const cfg: Config = configSchema.parse({
@@ -1161,7 +1173,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
       const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
       try {
-        const commandChannel = await apiClient.connect(registerRequest);
+        const commandChannel = await apiClient.connect(registerRequest, buildGrpcAuthCallOptions(options.secret));
         await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
         logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
         await runCommandLoop(cfg, commandChannel, logger);
@@ -1190,6 +1202,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 export function registerRootCommand(program: Command): void {
   program
     .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
+    .option("--secret <secret>", "Bearer secret used as gRPC Authorization header.")
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
     .action(async () => {
