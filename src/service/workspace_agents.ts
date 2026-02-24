@@ -17,6 +17,16 @@ export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 const RUNTIME_AGENTS_TEMPLATE_PATH = "templates/runtime_agents.md.j2";
 const DEFAULT_HOME_DIRECTORY = "/home/agent";
 
+function renderJinjaTemplate(template: string, context: Record<string, string>): string {
+  return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_match, key: string) => {
+    const value = context[key];
+    if (value === undefined) {
+      throw new Error(`Missing template value for key '${key}'`);
+    }
+    return value;
+  });
+}
+
 function resolveTemplatePath(): string {
   const distRelativePath = join(__dirname, "..", RUNTIME_AGENTS_TEMPLATE_PATH);
   if (existsSync(distRelativePath)) {
@@ -39,8 +49,7 @@ ${AGENTS_MD_CLI_TOOLS_SECTION}`;
 
   try {
     const template = readFileSync(resolveTemplatePath(), "utf8");
-    const renderedTemplate = template.replace(/{{\s*home_directory\s*}}/g, homeDirectory);
-    return renderedTemplate.trim() + "\n";
+    return renderJinjaTemplate(template, { home_directory: homeDirectory }).trim() + "\n";
   } catch {
     return defaultTemplate.trim() + "\n";
   }
