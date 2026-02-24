@@ -2,9 +2,12 @@ import { create } from "@bufbuild/protobuf";
 import * as p from "@clack/prompts";
 import {
   AgentStatus,
+  ItemStatus,
+  ItemType,
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
   ThreadStatus,
+  TurnStatus,
   type ClientMessage,
   type RegisterRunnerRequest,
   type RegisterRunnerResponse,
@@ -24,6 +27,7 @@ const CONTROL_PLANE_BIND_HOST = "127.0.0.1";
 const CONTROL_PLANE_PATH_PREFIX = "/grpc";
 const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
+const USER_MESSAGE_START_TIMEOUT_MS = 120_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
 type ShellMainAction = "grpc" | "db" | "show-state" | "show-daemon-logs" | "exit";
@@ -33,6 +37,7 @@ type GrpcAction =
   | "delete-agent"
   | "create-thread"
   | "delete-thread"
+  | "create-user-message"
   | "back";
 
 type DbAction = "list-sdk" | "list-agents" | "list-threads" | "back";
@@ -302,13 +307,23 @@ class ProtoShellControlPlane {
     message: ServerMessage,
     matches: (clientMessage: ClientMessage) => boolean,
     timeoutMs = REQUEST_TIMEOUT_MS,
+    onMessage?: (clientMessage: ClientMessage) => void,
   ): Promise<ClientMessage> {
     await this.send(message);
+    return this.waitFor(matches, timeoutMs, onMessage);
+  }
+
+  async waitFor(
+    matches: (clientMessage: ClientMessage) => boolean,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    onMessage?: (clientMessage: ClientMessage) => void,
+  ): Promise<ClientMessage> {
     const deadline = Date.now() + timeoutMs;
 
     while (true) {
       const remaining = Math.max(1, deadline - Date.now());
       const clientMessage = await this.nextClientMessage(remaining);
+      onMessage?.(clientMessage);
 
       if (clientMessage.payload.case === "requestError") {
         throw new Error(clientMessage.payload.value.errorMessage);
@@ -354,6 +369,68 @@ function buildModelCapabilities(registration: RegisterRunnerRequest): Map<string
   return bySdk;
 }
 
+function formatTurnStatus(status: TurnStatus): string {
+  switch (status) {
+    case TurnStatus.RUNNING:
+      return "running";
+    case TurnStatus.COMPLETED:
+      return "completed";
+    case TurnStatus.UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+function formatItemStatus(status: ItemStatus): string {
+  switch (status) {
+    case ItemStatus.RUNNING:
+      return "running";
+    case ItemStatus.COMPLETED:
+      return "completed";
+    case ItemStatus.UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+function formatItemType(itemType: ItemType): string {
+  switch (itemType) {
+    case ItemType.USER_MESSAGE:
+      return "user_message";
+    case ItemType.AGENT_MESSAGE:
+      return "agent_message";
+    case ItemType.REASONING:
+      return "reasoning";
+    case ItemType.COMMAND_EXECUTION:
+      return "command_execution";
+    case ItemType.ITEM_TYPE_UNKNOWN:
+    default:
+      return "unknown";
+  }
+}
+
+function describeGrpcUpdate(message: ClientMessage): string | null {
+  switch (message.payload.case) {
+    case "agentUpdate":
+      return `grpc update: agent ${message.payload.value.agentId} status=${AgentStatus[message.payload.value.status]}`;
+    case "threadUpdate":
+      return `grpc update: thread ${message.payload.value.threadId} status=${ThreadStatus[message.payload.value.status]}`;
+    case "turnUpdate":
+      return `grpc update: turn ${message.payload.value.sdkTurnId} status=${formatTurnStatus(message.payload.value.status)}`;
+    case "itemUpdate": {
+      const item = message.payload.value;
+      return `grpc update: item ${item.sdkItemId} status=${formatItemStatus(item.status)} type=${formatItemType(item.itemType)}`;
+    }
+    case "skillMpUpdate":
+      return `grpc update: skill package=${message.payload.value.packageName} agent=${message.payload.value.agentId}`;
+    case "requestError":
+      return `grpc update: request_error ${message.payload.value.errorMessage}`;
+    case undefined:
+    default:
+      return null;
+  }
+}
+
 async function promptMainAction(): Promise<ShellMainAction | null> {
   const action = await p.select<ShellMainAction>({
     message: "Choose command group",
@@ -376,6 +453,7 @@ async function promptGrpcAction(): Promise<GrpcAction | null> {
       { value: "create-agent", label: "Create agent" },
       { value: "delete-agent", label: "Delete agent" },
       { value: "create-thread", label: "Create thread" },
+      { value: "create-user-message", label: "Create user message" },
       { value: "delete-thread", label: "Delete thread" },
       { value: "back", label: "Back" },
     ],
@@ -519,6 +597,9 @@ async function handleGrpcAction(
       return;
     case "create-thread":
       await handleCreateThread(controlPlane, state, modelsBySdk);
+      return;
+    case "create-user-message":
+      await handleCreateUserMessage(controlPlane, state, modelsBySdk);
       return;
     case "delete-thread":
       await handleDeleteThread(controlPlane, state);
@@ -834,6 +915,160 @@ async function handleDeleteThread(controlPlane: ProtoShellControlPlane, state: S
 
   state.threadAgentById.delete(selectedThreadId);
   p.log.success(`Thread '${selectedThreadId}' deleted.`);
+}
+
+async function handleCreateUserMessage(
+  controlPlane: ProtoShellControlPlane,
+  state: ShellState,
+  modelsBySdk: Map<string, RunnerModelCapability[]>,
+): Promise<void> {
+  const knownThreads = [...state.threadAgentById.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+  if (knownThreads.length === 0) {
+    p.log.warn("No known threads. Create a thread first.");
+    return;
+  }
+
+  const selectedThreadId = await p.select<string>({
+    message: "Select thread",
+    options: knownThreads.map(([threadId, agentId]) => ({
+      value: threadId,
+      label: `${threadId} (agent: ${agentId})`,
+    })),
+  });
+  if (p.isCancel(selectedThreadId)) {
+    return;
+  }
+
+  const agentId = state.threadAgentById.get(selectedThreadId);
+  if (!agentId) {
+    throw new Error(`Agent mapping for thread '${selectedThreadId}' is missing.`);
+  }
+
+  const messageText = await p.text({
+    message: "User message text",
+    placeholder: "Write your message",
+    validate: (value) => ((value ?? "").trim().length === 0 ? "Message text is required." : undefined),
+  });
+  if (p.isCancel(messageText)) {
+    return;
+  }
+
+  const allowSteer = await p.confirm({
+    message: "Allow steering if a turn is already running?",
+    initialValue: false,
+  });
+  if (p.isCancel(allowSteer)) {
+    return;
+  }
+
+  let selectedModel: string | undefined;
+  let selectedReasoningLevel: string | undefined;
+  const sdkName = state.agentSdkById.get(agentId) ?? "";
+  const sdkModels = modelsBySdk.get(sdkName) ?? [];
+
+  if (sdkModels.length > 0) {
+    const modelChoice = await p.select<string>({
+      message: "Model override",
+      options: [
+        { value: "", label: "Use thread default" },
+        ...sdkModels.map((model) => ({ value: model.name, label: model.name })),
+      ],
+    });
+    if (p.isCancel(modelChoice)) {
+      return;
+    }
+    selectedModel = modelChoice || undefined;
+
+    const reasoningLevels = sdkModels.find((model) => model.name === modelChoice)?.reasoning ?? [];
+    if (reasoningLevels.length > 0) {
+      const reasoningChoice = await p.select<string>({
+        message: "Reasoning override",
+        options: [
+          { value: "", label: "Use thread default" },
+          ...reasoningLevels.map((level) => ({ value: level, label: level })),
+        ],
+      });
+      if (p.isCancel(reasoningChoice)) {
+        return;
+      }
+      selectedReasoningLevel = reasoningChoice || undefined;
+    }
+  } else {
+    const modelInput = await p.text({
+      message: "Model override (optional)",
+      placeholder: "leave empty to use thread default",
+    });
+    if (p.isCancel(modelInput)) {
+      return;
+    }
+    selectedModel = modelInput.trim().length > 0 ? modelInput.trim() : undefined;
+
+    const reasoningInput = await p.text({
+      message: "Reasoning override (optional)",
+      placeholder: "leave empty to use thread default",
+    });
+    if (p.isCancel(reasoningInput)) {
+      return;
+    }
+    selectedReasoningLevel = reasoningInput.trim().length > 0 ? reasoningInput.trim() : undefined;
+  }
+
+  const requestValue: {
+    agentId: string;
+    threadId: string;
+    text: string;
+    allowSteer: boolean;
+    model?: string;
+    modelReasoningLevel?: string;
+  } = {
+    agentId,
+    threadId: selectedThreadId,
+    text: messageText.trim(),
+    allowSteer,
+  };
+  if (selectedModel) {
+    requestValue.model = selectedModel;
+  }
+  if (selectedReasoningLevel) {
+    requestValue.modelReasoningLevel = selectedReasoningLevel;
+  }
+
+  await controlPlane.send(
+    create(ServerMessageSchema, {
+      request: {
+        case: "createUserMessageRequest",
+        value: requestValue,
+      },
+    }),
+  );
+
+  p.log.info("createUserMessageRequest sent. Waiting for turn updates...");
+
+  const firstTurnUpdate = await controlPlane.waitFor(
+    (message) => {
+      if (message.payload.case !== "turnUpdate") {
+        return false;
+      }
+      return (
+        message.payload.value.status === TurnStatus.RUNNING ||
+        message.payload.value.status === TurnStatus.COMPLETED
+      );
+    },
+    USER_MESSAGE_START_TIMEOUT_MS,
+    (message) => {
+      const update = describeGrpcUpdate(message);
+      if (update) {
+        p.log.info(update);
+      }
+    },
+  );
+
+  if (firstTurnUpdate.payload.case !== "turnUpdate") {
+    throw new Error("Expected turn update after createUserMessageRequest.");
+  }
+
+  const status = formatTurnStatus(firstTurnUpdate.payload.value.status);
+  p.log.success(`Turn '${firstTurnUpdate.payload.value.sdkTurnId}' is ${status}.`);
 }
 
 function printState(state: ShellState): void {
