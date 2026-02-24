@@ -43,4 +43,5 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
 ## Identity
 
 - Runtime container runs as host `uid:gid`.
+- On runtime start, CompanyHelm provisions `/etc/passwd` and `/etc/group` entries so that uid maps to `agent_user`.
 - `HOME` and `USER` are set from configured `agent_home_directory` and `agent_user`.

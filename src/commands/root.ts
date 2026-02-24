@@ -679,6 +679,9 @@ interface ThreadMessageExecutionState {
   isCurrentTurnRunning: boolean;
   runtimeContainer: string;
   dindContainer: string;
+  homeDirectory: string;
+  uid: number;
+  gid: number;
 }
 
 interface ThreadTurnStateUpdate {
@@ -768,6 +771,12 @@ async function executeCreateUserMessageRequest(
     await containerService.ensureContainerRunning(threadState.dindContainer);
     await containerService.waitForContainerRunning(threadState.dindContainer);
     await containerService.ensureContainerRunning(threadState.runtimeContainer);
+    await containerService.ensureRuntimeContainerIdentity(threadState.runtimeContainer, {
+      uid: threadState.uid,
+      gid: threadState.gid,
+      agentUser: cfg.agent_user,
+      agentHomeDirectory: threadState.homeDirectory,
+    });
 
     await ensureThreadAppServerSessionStarted(appServerSession);
 
@@ -913,6 +922,9 @@ async function handleCreateUserMessageRequest(
         isCurrentTurnRunning: threads.isCurrentTurnRunning,
         runtimeContainer: threads.runtimeContainer,
         dindContainer: threads.dindContainer,
+        homeDirectory: threads.homeDirectory,
+        uid: threads.uid,
+        gid: threads.gid,
       })
       .from(threads)
       .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))

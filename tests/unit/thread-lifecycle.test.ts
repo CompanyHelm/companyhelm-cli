@@ -287,3 +287,58 @@ test("ThreadContainerService removes dind container when runtime container creat
 
   assert.deepEqual(removedContainerNames, ["companyhelm-dind-thread-thread-runtime-create-failure"]);
 });
+
+test("ThreadContainerService provisions runtime user identity with docker exec as root", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerIdentity("companyhelm-runtime-thread-abc", {
+    uid: 501,
+    gid: 20,
+    agentUser: "agent",
+    agentHomeDirectory: "/home/agent",
+  });
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-abc", "bash", "-lc"]);
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /AGENT_USER='agent'/);
+  assert.match(invocation.args[6], /AGENT_UID='501'/);
+  assert.match(invocation.args[6], /AGENT_GID='20'/);
+});
+
+test("ThreadContainerService surfaces runtime identity bootstrap failures", async () => {
+  const runCommand = () =>
+    ({
+      pid: 1,
+      output: [null, "", "permission denied"],
+      stdout: "",
+      stderr: "permission denied",
+      status: 7,
+      signal: null,
+    }) as any;
+  const service = new ThreadContainerService({} as any, runCommand as any);
+
+  await assert.rejects(
+    () =>
+      service.ensureRuntimeContainerIdentity("companyhelm-runtime-thread-def", {
+        uid: 501,
+        gid: 20,
+        agentUser: "agent",
+        agentHomeDirectory: "/home/agent",
+      }),
+    /Failed to provision runtime user 'agent' in container 'companyhelm-runtime-thread-def' \(exit 7\): permission denied/,
+  );
+});

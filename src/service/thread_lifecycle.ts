@@ -1,4 +1,5 @@
 import Dockerode, { type ContainerCreateOptions, type MountSettings } from "dockerode";
+import { spawnSync } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { expandHome } from "../utils/path.js";
 
@@ -110,6 +111,40 @@ function buildCommonContainerEnv(user: ThreadContainerUser): string[] {
   ];
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string {
+  return [
+    "set -euo pipefail",
+    `AGENT_USER=${shellQuote(user.agentUser)}`,
+    `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
+    `AGENT_UID=${shellQuote(String(user.uid))}`,
+    `AGENT_GID=${shellQuote(String(user.gid))}`,
+    "",
+    'AGENT_GROUP="$AGENT_USER"',
+    'if getent group "$AGENT_GID" >/dev/null 2>&1; then',
+    '  AGENT_GROUP="$(getent group "$AGENT_GID" | cut -d: -f1)"',
+    'elif getent group "$AGENT_USER" >/dev/null 2>&1; then',
+    '  groupmod -g "$AGENT_GID" "$AGENT_USER"',
+    '  AGENT_GROUP="$AGENT_USER"',
+    "else",
+    '  groupadd -g "$AGENT_GID" "$AGENT_USER"',
+    '  AGENT_GROUP="$AGENT_USER"',
+    "fi",
+    "",
+    'if id -u "$AGENT_USER" >/dev/null 2>&1; then',
+    '  usermod -u "$AGENT_UID" -g "$AGENT_GROUP" -d "$AGENT_HOME" "$AGENT_USER" || true',
+    "else",
+    '  useradd -m -d "$AGENT_HOME" -u "$AGENT_UID" -g "$AGENT_GROUP" -s /bin/bash "$AGENT_USER"',
+    "fi",
+    "",
+    'mkdir -p "$AGENT_HOME"',
+    'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" || true',
+  ].join("\n");
+}
+
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
   return {
     name: options.names.dind,
@@ -205,9 +240,11 @@ function toErrorMessage(error: unknown): string {
 
 export class ThreadContainerService {
   private readonly docker: Dockerode;
+  private readonly runCommand: typeof spawnSync;
 
-  constructor(docker?: Dockerode) {
+  constructor(docker?: Dockerode, runCommand: typeof spawnSync = spawnSync) {
     this.docker = docker ?? new Dockerode();
+    this.runCommand = runCommand;
   }
 
   private async pullImage(image: string): Promise<void> {
@@ -311,6 +348,27 @@ export class ThreadContainerService {
   async ensureContainerRunning(name: string, timeoutMs = CONTAINER_START_TIMEOUT_MS): Promise<void> {
     await this.startContainer(name);
     await this.waitForContainerRunning(name, timeoutMs);
+  }
+
+  async ensureRuntimeContainerIdentity(name: string, user: ThreadContainerUser): Promise<void> {
+    const script = buildRuntimeIdentityProvisionScript(user);
+    const result = this.runCommand("docker", ["exec", "-u", "0", name, "bash", "-lc", script], {
+      encoding: "utf8",
+    });
+
+    if (result.status === 0 && !result.error) {
+      return;
+    }
+
+    const detail = [result.error?.message, result.stderr, result.stdout]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim())
+      .join(" | ");
+    const status = result.status === null ? "unknown" : String(result.status);
+    throw new Error(
+      `Failed to provision runtime user '${user.agentUser}' in container '${name}' (exit ${status})` +
+      (detail ? `: ${detail}` : "."),
+    );
   }
 
   async stopContainer(name: string): Promise<void> {
