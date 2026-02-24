@@ -288,27 +288,13 @@ class ProtoShellControlPlane {
   }
 
   private async nextClientMessage(timeoutMs: number): Promise<ClientMessage> {
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    try {
-      const message = await Promise.race([
-        this.incomingMessages.pop(),
-        new Promise<null>((resolveTimeout) => {
-          timeoutHandle = setTimeout(() => {
-            resolveTimeout(null);
-          }, timeoutMs);
-        }),
-      ]);
+    const message = await this.incomingMessages.popWithTimeout(timeoutMs);
 
-      if (message === null) {
-        throw new Error(`Timed out waiting for runner response after ${timeoutMs}ms.`);
-      }
-
-      return message;
-    } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
+    if (message === null) {
+      throw new Error(`Timed out waiting for runner response after ${timeoutMs}ms.`);
     }
+
+    return message;
   }
 
   async send(message: ServerMessage): Promise<void> {

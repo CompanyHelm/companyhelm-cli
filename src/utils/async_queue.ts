@@ -38,6 +38,56 @@ export class AsyncQueue<T> {
     });
   }
 
+  async popWithTimeout(timeoutMs: number): Promise<T | null> {
+    if (timeoutMs <= 0) {
+      if (this.items.length > 0) {
+        return this.items.shift() ?? null;
+      }
+      if (this.error) {
+        throw this.error;
+      }
+      return null;
+    }
+
+    if (this.items.length > 0) {
+      return this.items.shift() ?? null;
+    }
+    if (this.error) {
+      throw this.error;
+    }
+    if (this.closed) {
+      return null;
+    }
+
+    return new Promise<T | null>((resolve, reject) => {
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      const waiter: Waiter<T> = {
+        resolve: (value) => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+          }
+          resolve(value);
+        },
+        reject: (reason) => {
+          if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+          }
+          reject(reason);
+        },
+      };
+
+      timeoutHandle = setTimeout(() => {
+        const waiterIndex = this.waiters.indexOf(waiter);
+        if (waiterIndex >= 0) {
+          this.waiters.splice(waiterIndex, 1);
+        }
+        resolve(null);
+      }, timeoutMs);
+
+      this.waiters.push(waiter);
+    });
+  }
+
   fail(error: Error): void {
     if (this.closed || this.error) {
       return;

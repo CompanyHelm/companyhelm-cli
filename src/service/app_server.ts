@@ -431,14 +431,7 @@ export class AppServerService {
   }
 
   private async popMessageWithTimeout(timeoutMs: number): Promise<AppServerIncomingMessage | null> {
-    const result = await Promise.race([
-      this.messageQueue.pop(),
-      new Promise<null>((resolve) => {
-        setTimeout(() => resolve(null), timeoutMs);
-      }),
-    ]);
-
-    return result;
+    return this.messageQueue.popWithTimeout(timeoutMs);
   }
 
   private async waitForResponseResult(requestId: RequestId, timeoutMs: number): Promise<unknown> {
