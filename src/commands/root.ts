@@ -785,22 +785,7 @@ async function handleInterruptTurnRequest(
     return;
   }
 
-  try {
-    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
-      isCurrentTurnRunning: false,
-    });
-  } catch (error: unknown) {
-    const message = toErrorMessage(error);
-    logger.warn(`Interrupted turn but failed to update thread state for '${request.threadId}': ${message}`);
-    await sendRequestError(
-      commandChannel,
-      `Turn '${threadState.currentSdkTurnId}' was interrupted but thread state update failed: ${message}`,
-    );
-    return;
-  }
-
-  logger.info(`Interrupted turn '${threadState.currentSdkTurnId}' for thread '${request.threadId}'.`);
-  await sendTurnExecutionUpdate(commandChannel, threadState.currentSdkTurnId, TurnStatus.COMPLETED);
+  logger.info(`Requested interrupt of turn '${threadState.currentSdkTurnId}' for thread '${request.threadId}'.`);
 }
 
 interface ThreadMessageExecutionState {
