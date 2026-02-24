@@ -44,6 +44,9 @@ import {
 import type { ReasoningEffort } from "../generated/codex-app-server/ReasoningEffort.js";
 import type { ServerNotification } from "../generated/codex-app-server/ServerNotification.js";
 import type { ThreadItem } from "../generated/codex-app-server/v2/ThreadItem.js";
+import type { AskForApproval } from "../generated/codex-app-server/v2/AskForApproval.js";
+import type { SandboxMode } from "../generated/codex-app-server/v2/SandboxMode.js";
+import type { SandboxPolicy } from "../generated/codex-app-server/v2/SandboxPolicy.js";
 import type { ThreadResumeParams } from "../generated/codex-app-server/v2/ThreadResumeParams.js";
 import type { ThreadStartParams } from "../generated/codex-app-server/v2/ThreadStartParams.js";
 import type { TurnStartParams } from "../generated/codex-app-server/v2/TurnStartParams.js";
@@ -65,6 +68,9 @@ const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
+const YOLO_APPROVAL_POLICY: AskForApproval = "never";
+const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
+const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
 
 interface ThreadAppServerSession {
   runtimeContainer: string;
@@ -872,6 +878,8 @@ async function executeCreateUserMessageRequest(
       if (appServerSession.sdkThreadId !== sdkThreadId) {
         const resumeParams: ThreadResumeParams = {
           threadId: sdkThreadId,
+          approvalPolicy: YOLO_APPROVAL_POLICY,
+          sandbox: YOLO_SANDBOX_MODE,
           persistExtendedHistory: true,
         };
         const resumeResult = await appServer.resumeThread(resumeParams);
@@ -887,8 +895,8 @@ async function executeCreateUserMessageRequest(
         model: request.model ?? threadState.model,
         modelProvider: null,
         cwd: "/workspace",
-        approvalPolicy: null,
-        sandbox: null,
+        approvalPolicy: YOLO_APPROVAL_POLICY,
+        sandbox: YOLO_SANDBOX_MODE,
         config: null,
         baseInstructions: null,
         developerInstructions: null,
@@ -932,8 +940,8 @@ async function executeCreateUserMessageRequest(
         summary: null,
         personality: null,
         cwd: null,
-        approvalPolicy: null,
-        sandboxPolicy: null,
+        approvalPolicy: YOLO_APPROVAL_POLICY,
+        sandboxPolicy: YOLO_SANDBOX_POLICY,
         outputSchema: null,
         collaborationMode: null,
       };

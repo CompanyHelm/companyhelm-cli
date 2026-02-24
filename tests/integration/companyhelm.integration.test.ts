@@ -1336,6 +1336,12 @@ test(
       assert.equal(appServerStartSpy.mock.calls.length, 1, "expected app-server to stay warm across both messages");
       assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server to stop during daemon shutdown");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      for (const [params] of startTurnSpy.mock.calls) {
+        assert.equal(params.approvalPolicy, "never", "expected yolo approval on turn/start");
+        assert.deepEqual(params.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
+      }
       assert.equal(waitForTurnCompletionSpy.mock.calls.length, 2, "expected turn completion wait per user message");
       assert.equal(completedAgentResponses.length, 2, "expected one completed agent response item per user message");
       assert.deepEqual(
@@ -1583,6 +1589,10 @@ test(
       assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server session stop on shutdown");
       assert.equal(startThreadSpy.mock.calls.length, 1, "expected one sdk thread start");
       assert.equal(startTurnSpy.mock.calls.length, 1, "expected only initial turn/start call");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(startTurnSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on turn/start");
+      assert.deepEqual(startTurnSpy.mock.calls[0]?.[0]?.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
       assert.equal(steerTurnSpy.mock.calls.length, 1, "expected turn/steer for second user message");
       assert.equal(waitForTurnCompletionSpy.mock.calls.length, 1, "expected single completion waiter for running turn");
       assert.equal(runningUpdateCount, 2, "expected running updates for initial turn start and steer");
