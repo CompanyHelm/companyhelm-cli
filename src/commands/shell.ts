@@ -40,9 +40,12 @@ type GrpcAction =
   | "create-thread"
   | "delete-thread"
   | "create-user-message"
+  | "steer-thread"
+  | "interrupt-turn"
   | "back";
 
 type DbAction = "list-sdk" | "list-agents" | "list-threads" | "back";
+type ActiveTurnAction = "wait-for-completion" | "steer-turn" | "interrupt-turn";
 
 interface RunnerModelCapability {
   name: string;
@@ -52,6 +55,25 @@ interface RunnerModelCapability {
 interface ShellState {
   agentSdkById: Map<string, string>;
   threadAgentById: Map<string, string>;
+}
+
+interface ThreadSelection {
+  agentId: string;
+  threadId: string;
+}
+
+interface CreateUserMessageRequestPayload {
+  agentId: string;
+  threadId: string;
+  text: string;
+  allowSteer: boolean;
+  model?: string;
+  modelReasoningLevel?: string;
+}
+
+interface FirstTurnUpdate {
+  sdkTurnId: string;
+  status: TurnStatus.RUNNING | TurnStatus.COMPLETED;
 }
 
 interface DaemonExitStatus {
@@ -337,6 +359,27 @@ class ProtoShellControlPlane {
     }
   }
 
+  async drainPendingMessages(
+    onMessage?: (clientMessage: ClientMessage) => void,
+    idleTimeoutMs = 25,
+  ): Promise<number> {
+    let drainedCount = 0;
+
+    while (true) {
+      try {
+        const clientMessage = await this.nextClientMessage(idleTimeoutMs);
+        drainedCount += 1;
+        onMessage?.(clientMessage);
+      } catch (error: unknown) {
+        const message = toErrorMessage(error);
+        if (message.startsWith("Timed out waiting for runner response after")) {
+          return drainedCount;
+        }
+        throw error;
+      }
+    }
+  }
+
   async shutdown(): Promise<void> {
     this.incomingMessages.close();
 
@@ -462,6 +505,208 @@ function describeGrpcUpdate(message: ClientMessage): string | null {
   }
 }
 
+function createGrpcUpdateLogger(): (message: ClientMessage) => void {
+  return (message: ClientMessage): void => {
+    const update = describeGrpcUpdate(message);
+    if (update) {
+      p.log.info(update);
+    }
+  };
+}
+
+function listKnownAgents(state: ShellState): string[] {
+  return [...state.agentSdkById.keys()].sort();
+}
+
+function listKnownThreadsForAgent(state: ShellState, agentId: string): string[] {
+  return [...state.threadAgentById.entries()]
+    .filter(([, mappedAgentId]) => mappedAgentId === agentId)
+    .map(([threadId]) => threadId)
+    .sort((a, b) => a.localeCompare(b));
+}
+
+async function promptAgentAndThreadSelection(
+  state: ShellState,
+  options: {
+    agentPrompt?: string;
+    threadPrompt?: string;
+    emptyAgentsMessage?: string;
+    emptyThreadsMessage?: (agentId: string) => string;
+  } = {},
+): Promise<ThreadSelection | null> {
+  const knownAgents = listKnownAgents(state);
+  if (knownAgents.length === 0) {
+    p.log.warn(options.emptyAgentsMessage ?? "No known agents. Create an agent first.");
+    return null;
+  }
+
+  const selectedAgentId = await p.select<string>({
+    message: options.agentPrompt ?? "Select agent",
+    options: knownAgents.map((agentId) => ({ value: agentId, label: agentId })),
+  });
+  if (p.isCancel(selectedAgentId)) {
+    return null;
+  }
+
+  const knownThreadsForAgent = listKnownThreadsForAgent(state, selectedAgentId);
+  if (knownThreadsForAgent.length === 0) {
+    const message =
+      options.emptyThreadsMessage?.(selectedAgentId) ??
+      `No known threads for agent '${selectedAgentId}'. Create a thread first.`;
+    p.log.warn(message);
+    return null;
+  }
+
+  const selectedThreadId = await p.select<string>({
+    message: options.threadPrompt ?? "Select thread",
+    options: knownThreadsForAgent.map((threadId) => ({ value: threadId, label: threadId })),
+  });
+  if (p.isCancel(selectedThreadId)) {
+    return null;
+  }
+
+  return {
+    agentId: selectedAgentId,
+    threadId: selectedThreadId,
+  };
+}
+
+async function sendCreateUserMessageAndWaitForRunningTurn(
+  controlPlane: ProtoShellControlPlane,
+  requestValue: CreateUserMessageRequestPayload,
+  logGrpcUpdate: (message: ClientMessage) => void,
+): Promise<FirstTurnUpdate> {
+  const turnUpdate = await controlPlane.sendAndWait(
+    create(ServerMessageSchema, {
+      request: {
+        case: "createUserMessageRequest",
+        value: requestValue,
+      },
+    }),
+    (message) =>
+      message.payload.case === "turnUpdate" &&
+      (message.payload.value.status === TurnStatus.RUNNING || message.payload.value.status === TurnStatus.COMPLETED),
+    USER_MESSAGE_START_TIMEOUT_MS,
+    logGrpcUpdate,
+  );
+
+  if (turnUpdate.payload.case !== "turnUpdate") {
+    throw new Error("Expected running turn update after createUserMessageRequest.");
+  }
+
+  return {
+    sdkTurnId: turnUpdate.payload.value.sdkTurnId,
+    status: turnUpdate.payload.value.status as TurnStatus.RUNNING | TurnStatus.COMPLETED,
+  };
+}
+
+async function waitForTrackedTurnCompletion(
+  controlPlane: ProtoShellControlPlane,
+  sdkTurnId: string,
+  logGrpcUpdate: (message: ClientMessage) => void,
+): Promise<void> {
+  await controlPlane.waitFor(
+    (message) =>
+      message.payload.case === "turnUpdate" &&
+      message.payload.value.sdkTurnId === sdkTurnId &&
+      message.payload.value.status === TurnStatus.COMPLETED,
+    USER_MESSAGE_COMPLETION_TIMEOUT_MS,
+    logGrpcUpdate,
+  );
+  p.log.success(`Turn '${sdkTurnId}' completed.`);
+}
+
+async function promptActiveTurnAction(sdkTurnId: string): Promise<ActiveTurnAction | null> {
+  const action = await p.select<ActiveTurnAction>({
+    message: `Turn '${sdkTurnId}' is running`,
+    options: [
+      { value: "wait-for-completion", label: "Wait for completion" },
+      { value: "steer-turn", label: "Send steering user message" },
+      { value: "interrupt-turn", label: "Interrupt running turn" },
+    ],
+  });
+  return p.isCancel(action) ? null : action;
+}
+
+async function promptSteeringMessageText(): Promise<string | null> {
+  const steeringText = await p.text({
+    message: "Steering message text",
+    placeholder: "Add additional user guidance",
+    validate: (value) => ((value ?? "").trim().length === 0 ? "Message text is required." : undefined),
+  });
+  if (p.isCancel(steeringText)) {
+    return null;
+  }
+
+  return steeringText.trim();
+}
+
+async function sendInterruptTurnRequest(
+  controlPlane: ProtoShellControlPlane,
+  threadSelection: ThreadSelection,
+): Promise<void> {
+  await controlPlane.send(
+    create(ServerMessageSchema, {
+      request: {
+        case: "interruptTurnRequest",
+        value: {
+          agentId: threadSelection.agentId,
+          threadId: threadSelection.threadId,
+        },
+      },
+    }),
+  );
+}
+
+async function runActiveTurnControlLoop(
+  controlPlane: ProtoShellControlPlane,
+  threadSelection: ThreadSelection,
+  initialSdkTurnId: string,
+): Promise<void> {
+  const logGrpcUpdate = createGrpcUpdateLogger();
+  let trackedTurnId = initialSdkTurnId;
+
+  p.log.info(`Tracking turn '${trackedTurnId}'.`);
+
+  while (true) {
+    const action = await promptActiveTurnAction(trackedTurnId);
+    if (action === null || action === "wait-for-completion") {
+      await waitForTrackedTurnCompletion(controlPlane, trackedTurnId, logGrpcUpdate);
+      return;
+    }
+
+    if (action === "interrupt-turn") {
+      await sendInterruptTurnRequest(controlPlane, threadSelection);
+      p.log.info(`interruptTurnRequest sent for turn '${trackedTurnId}'.`);
+      await waitForTrackedTurnCompletion(controlPlane, trackedTurnId, logGrpcUpdate);
+      return;
+    }
+
+    const steeringText = await promptSteeringMessageText();
+    if (!steeringText) {
+      continue;
+    }
+
+    const steeringTurn = await sendCreateUserMessageAndWaitForRunningTurn(
+      controlPlane,
+      {
+        agentId: threadSelection.agentId,
+        threadId: threadSelection.threadId,
+        text: steeringText,
+        allowSteer: true,
+      },
+      logGrpcUpdate,
+    );
+
+    trackedTurnId = steeringTurn.sdkTurnId;
+    if (steeringTurn.status === TurnStatus.COMPLETED) {
+      p.log.success(`Steering message accepted and turn '${trackedTurnId}' already completed.`);
+      return;
+    }
+    p.log.success(`Steering message sent. Continuing to track turn '${trackedTurnId}'.`);
+  }
+}
+
 async function promptMainAction(): Promise<ShellMainAction | null> {
   const action = await p.select<ShellMainAction>({
     message: "Choose command group",
@@ -486,6 +731,8 @@ async function promptGrpcAction(): Promise<GrpcAction | null> {
       { value: "delete-agent", label: "Delete agent" },
       { value: "create-thread", label: "Create thread" },
       { value: "create-user-message", label: "Create user message" },
+      { value: "steer-thread", label: "Steer conversation (message + allowSteer)" },
+      { value: "interrupt-turn", label: "Interrupt running turn" },
       { value: "delete-thread", label: "Delete thread" },
       { value: "back", label: "Back" },
     ],
@@ -606,6 +853,12 @@ async function handleGrpcAction(
     case "create-user-message":
       await handleCreateUserMessage(controlPlane, state, modelsBySdk);
       return;
+    case "steer-thread":
+      await handleSteerThread(controlPlane, state);
+      return;
+    case "interrupt-turn":
+      await handleInterruptTurn(controlPlane, state);
+      return;
     case "delete-thread":
       await handleDeleteThread(controlPlane, state);
       return;
@@ -636,45 +889,23 @@ async function promptAndRunGrpcAction(
     return;
   }
 
+  const drainedUpdates = await controlPlane.drainPendingMessages(createGrpcUpdateLogger());
+  if (drainedUpdates > 0) {
+    p.log.info(`Drained ${drainedUpdates} buffered grpc update(s) before running '${grpcAction}'.`);
+  }
+
   await handleGrpcAction(grpcAction, controlPlane, state, availableSdks, modelsBySdk);
 }
 
 async function handleThreadDockerShell(state: ShellState): Promise<void> {
-  const knownAgents = [...state.agentSdkById.keys()].sort();
-  if (knownAgents.length === 0) {
-    p.log.warn("No known agents. Create an agent first.");
-    return;
-  }
-
-  const selectedAgentId = await p.select<string>({
-    message: "Select agent",
-    options: knownAgents.map((agentId) => ({ value: agentId, label: agentId })),
-  });
-  if (p.isCancel(selectedAgentId)) {
-    return;
-  }
-
-  const knownThreadsForAgent = [...state.threadAgentById.entries()]
-    .filter(([, agentId]) => agentId === selectedAgentId)
-    .map(([threadId]) => threadId)
-    .sort((a, b) => a.localeCompare(b));
-
-  if (knownThreadsForAgent.length === 0) {
-    p.log.warn(`No known threads for agent '${selectedAgentId}'. Create a thread first.`);
-    return;
-  }
-
-  const selectedThreadId = await p.select<string>({
-    message: "Select thread",
-    options: knownThreadsForAgent.map((threadId) => ({ value: threadId, label: threadId })),
-  });
-  if (p.isCancel(selectedThreadId)) {
+  const selection = await promptAgentAndThreadSelection(state);
+  if (!selection) {
     return;
   }
 
   await runThreadDockerCommand({
-    agentId: selectedAgentId,
-    threadId: selectedThreadId,
+    agentId: selection.agentId,
+    threadId: selection.threadId,
   });
 }
 
@@ -971,26 +1202,9 @@ async function handleCreateUserMessage(
   state: ShellState,
   modelsBySdk: Map<string, RunnerModelCapability[]>,
 ): Promise<void> {
-  const knownThreads = [...state.threadAgentById.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-  if (knownThreads.length === 0) {
-    p.log.warn("No known threads. Create a thread first.");
+  const threadSelection = await promptAgentAndThreadSelection(state);
+  if (!threadSelection) {
     return;
-  }
-
-  const selectedThreadId = await p.select<string>({
-    message: "Select thread",
-    options: knownThreads.map(([threadId, agentId]) => ({
-      value: threadId,
-      label: `${threadId} (agent: ${agentId})`,
-    })),
-  });
-  if (p.isCancel(selectedThreadId)) {
-    return;
-  }
-
-  const agentId = state.threadAgentById.get(selectedThreadId);
-  if (!agentId) {
-    throw new Error(`Agent mapping for thread '${selectedThreadId}' is missing.`);
   }
 
   const messageText = await p.text({
@@ -1012,7 +1226,7 @@ async function handleCreateUserMessage(
 
   let selectedModel: string | undefined;
   let selectedReasoningLevel: string | undefined;
-  const sdkName = state.agentSdkById.get(agentId) ?? "";
+  const sdkName = state.agentSdkById.get(threadSelection.agentId) ?? "";
   const sdkModels = modelsBySdk.get(sdkName) ?? [];
 
   if (sdkModels.length > 0) {
@@ -1062,16 +1276,9 @@ async function handleCreateUserMessage(
     selectedReasoningLevel = reasoningInput.trim().length > 0 ? reasoningInput.trim() : undefined;
   }
 
-  const requestValue: {
-    agentId: string;
-    threadId: string;
-    text: string;
-    allowSteer: boolean;
-    model?: string;
-    modelReasoningLevel?: string;
-  } = {
-    agentId,
-    threadId: selectedThreadId,
+  const requestValue: CreateUserMessageRequestPayload = {
+    agentId: threadSelection.agentId,
+    threadId: threadSelection.threadId,
     text: messageText.trim(),
     allowSteer,
   };
@@ -1082,51 +1289,63 @@ async function handleCreateUserMessage(
     requestValue.modelReasoningLevel = selectedReasoningLevel;
   }
 
-  await controlPlane.send(
-    create(ServerMessageSchema, {
-      request: {
-        case: "createUserMessageRequest",
-        value: requestValue,
-      },
-    }),
+  p.log.info("createUserMessageRequest sent. Waiting for running turn update...");
+  const firstTurnUpdate = await sendCreateUserMessageAndWaitForRunningTurn(
+    controlPlane,
+    requestValue,
+    createGrpcUpdateLogger(),
   );
 
-  p.log.info("createUserMessageRequest sent. Waiting for turn updates...");
-  const logGrpcUpdate = (message: ClientMessage): void => {
-    const update = describeGrpcUpdate(message);
-    if (update) {
-      p.log.info(update);
-    }
-  };
-
-  const firstTurnUpdate = await controlPlane.waitFor(
-    (message) => {
-      if (message.payload.case !== "turnUpdate") {
-        return false;
-      }
-      return message.payload.value.status === TurnStatus.RUNNING;
-    },
-    USER_MESSAGE_START_TIMEOUT_MS,
-    logGrpcUpdate,
-  );
-
-  if (firstTurnUpdate.payload.case !== "turnUpdate") {
-    throw new Error("Expected turn update after createUserMessageRequest.");
+  if (firstTurnUpdate.status === TurnStatus.COMPLETED) {
+    p.log.success(`Turn '${firstTurnUpdate.sdkTurnId}' completed.`);
+    return;
   }
 
-  const sdkTurnId = firstTurnUpdate.payload.value.sdkTurnId;
-  p.log.info(`Tracking turn '${sdkTurnId}' until completion...`);
+  await runActiveTurnControlLoop(controlPlane, threadSelection, firstTurnUpdate.sdkTurnId);
+}
 
-  await controlPlane.waitFor(
-    (message) =>
-      message.payload.case === "turnUpdate" &&
-      message.payload.value.sdkTurnId === sdkTurnId &&
-      message.payload.value.status === TurnStatus.COMPLETED,
-    USER_MESSAGE_COMPLETION_TIMEOUT_MS,
-    logGrpcUpdate,
+async function handleSteerThread(controlPlane: ProtoShellControlPlane, state: ShellState): Promise<void> {
+  const threadSelection = await promptAgentAndThreadSelection(state);
+  if (!threadSelection) {
+    return;
+  }
+
+  const steeringText = await promptSteeringMessageText();
+  if (!steeringText) {
+    return;
+  }
+
+  p.log.info("createUserMessageRequest (allowSteer=true) sent. Waiting for running turn update...");
+  const firstTurnUpdate = await sendCreateUserMessageAndWaitForRunningTurn(
+    controlPlane,
+    {
+      agentId: threadSelection.agentId,
+      threadId: threadSelection.threadId,
+      text: steeringText,
+      allowSteer: true,
+    },
+    createGrpcUpdateLogger(),
   );
 
-  p.log.success(`Turn '${sdkTurnId}' completed.`);
+  if (firstTurnUpdate.status === TurnStatus.COMPLETED) {
+    p.log.success(`Turn '${firstTurnUpdate.sdkTurnId}' completed.`);
+    return;
+  }
+
+  await runActiveTurnControlLoop(controlPlane, threadSelection, firstTurnUpdate.sdkTurnId);
+}
+
+async function handleInterruptTurn(controlPlane: ProtoShellControlPlane, state: ShellState): Promise<void> {
+  const threadSelection = await promptAgentAndThreadSelection(state, {
+    threadPrompt: "Select thread to interrupt",
+  });
+  if (!threadSelection) {
+    return;
+  }
+
+  await sendInterruptTurnRequest(controlPlane, threadSelection);
+
+  p.log.success(`interruptTurnRequest sent for thread '${threadSelection.threadId}'.`);
 }
 
 function printState(state: ShellState): void {

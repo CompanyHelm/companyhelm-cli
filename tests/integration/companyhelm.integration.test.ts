@@ -1154,6 +1154,9 @@ test(
     const ensureRuntimeContainerIdentitySpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerToolingSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+      .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
       .mockImplementation(async () => undefined);
@@ -1351,19 +1354,253 @@ test(
       const stoppedContainerNames = stopContainerSpy.mock.calls.map((call) => call[0]);
       assert.deepEqual(stoppedContainerNames, [expectedRuntimeContainer, expectedDindContainer]);
       assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
-      assert.equal(waitForContainerRunningSpy.mock.calls.length, 2, "expected dind running wait on each message");
+      assert.equal(waitForContainerRunningSpy.mock.calls.length, 0, "expected no explicit dind wait in runtime ready helper");
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
     } finally {
       createThreadContainersSpy.mockRestore();
       ensureContainerRunningSpy.mockRestore();
       waitForContainerRunningSpy.mockRestore();
       ensureRuntimeContainerIdentitySpy.mockRestore();
+      ensureRuntimeContainerToolingSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
       startThreadSpy.mockRestore();
       resumeThreadSpy.mockRestore();
       startTurnSpy.mockRestore();
+      waitForTurnCompletionSpy.mockRestore();
+
+      if (server) {
+        await shutdownServer(server);
+      }
+
+      process.env.HOME = previousHome;
+      await rm(homeDirectory, { recursive: true, force: true });
+    }
+  },
+  180_000,
+);
+
+test(
+  "companyhelm root command steers a running turn without adding a second completion waiter",
+  async () => {
+    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-user-message-steer-"));
+    let server: grpc.Server | undefined;
+    const previousHome = process.env.HOME;
+
+    let createdThreadId: string | null = null;
+    let receivedRequestError: any = null;
+
+    const createThreadContainersSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+      .mockImplementation(async () => undefined);
+    const ensureContainerRunningSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerIdentitySpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerToolingSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+      .mockImplementation(async () => undefined);
+    const stopContainerSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
+      .mockImplementation(async () => undefined);
+
+    const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+    const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
+      return { thread: { id: "sdk-thread-steer", path: "/workspace/rollouts/steer.json" } };
+    });
+    const startTurnSpy = vi.spyOn(AppServerService.prototype, "startTurn").mockImplementation(async () => {
+      return { turn: { id: "sdk-turn-steer-1" } };
+    });
+    const steerTurnSpy = vi.spyOn(AppServerService.prototype, "steerTurn").mockImplementation(async () => {
+      return { turnId: "sdk-turn-steer-1" };
+    });
+
+    let completeTurn: (() => void) | null = null;
+    const waitForTurnCompletionSpy = vi
+      .spyOn(AppServerService.prototype, "waitForTurnCompletion")
+      .mockImplementation(async (threadId: string, turnId: string, onNotification?: (notification: any) => Promise<void> | void) => {
+        const item = {
+          id: `${turnId}-agent-item`,
+          type: "agentMessage",
+          text: "steered response",
+        };
+        await onNotification?.({
+          method: "item/started",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+        await onNotification?.({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+
+        return await new Promise<"completed">((resolve) => {
+          completeTurn = () => resolve("completed");
+        });
+      });
+
+    try {
+      process.env.HOME = homeDirectory;
+      await seedStateDatabase(homeDirectory);
+      await writeHostAuthFile(homeDirectory);
+
+      let sentCreateThreadRequest = false;
+      let sentFirstUserMessageRequest = false;
+      let sentSteerRequest = false;
+      let runningUpdateCount = 0;
+
+      const started = await startFakeServer("/grpc", {
+        registerRunner(call, callback) {
+          callback(null, create(RegisterRunnerResponseSchema, {}));
+        },
+        controlChannel(call) {
+          call.write(
+            create(ServerMessageSchema, {
+              request: {
+                case: "createAgentRequest",
+                value: {
+                  agentId: "agent-steer",
+                  agentSdk: "codex",
+                },
+              },
+            }),
+          );
+
+          call.on("data", (message) => {
+            if (message.payload.case === "requestError") {
+              receivedRequestError = message;
+              call.end();
+              return;
+            }
+
+            if (
+              !sentCreateThreadRequest &&
+              message.payload.case === "agentUpdate" &&
+              message.payload.value.agentId === "agent-steer" &&
+              message.payload.value.status === AgentStatus.READY
+            ) {
+              sentCreateThreadRequest = true;
+              call.write(
+                create(ServerMessageSchema, {
+                  request: {
+                    case: "createThreadRequest",
+                    value: {
+                      agentId: "agent-steer",
+                      model: "gpt-5.3-codex",
+                    },
+                  },
+                }),
+              );
+              return;
+            }
+
+            if (
+              !sentFirstUserMessageRequest &&
+              message.payload.case === "threadUpdate" &&
+              message.payload.value.status === ThreadStatus.READY
+            ) {
+              createdThreadId = message.payload.value.threadId;
+              sentFirstUserMessageRequest = true;
+              call.write(
+                create(ServerMessageSchema, {
+                  request: {
+                    case: "createUserMessageRequest",
+                    value: {
+                      agentId: "agent-steer",
+                      threadId: createdThreadId,
+                      text: "first message",
+                      allowSteer: false,
+                    },
+                  },
+                }),
+              );
+              return;
+            }
+
+            if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.RUNNING) {
+              runningUpdateCount += 1;
+              if (!sentSteerRequest) {
+                sentSteerRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "createUserMessageRequest",
+                      value: {
+                        agentId: "agent-steer",
+                        threadId: createdThreadId!,
+                        text: "steer message",
+                        allowSteer: true,
+                      },
+                    },
+                  }),
+                );
+
+                setTimeout(() => {
+                  if (completeTurn) {
+                    completeTurn();
+                    completeTurn = null;
+                  }
+                }, 200);
+                return;
+              }
+
+              if (completeTurn) {
+                completeTurn();
+                completeTurn = null;
+              }
+              return;
+            }
+
+            if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.COMPLETED) {
+              call.end();
+            }
+          });
+        },
+      });
+
+      server = started.server;
+
+      await runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      });
+
+      assert.equal(receivedRequestError, null, "did not expect requestError while steering running turn");
+      assert.ok(createdThreadId, "expected thread id for steering flow");
+      assert.equal(createThreadContainersSpy.mock.calls.length, 1);
+      assert.equal(appServerStartSpy.mock.calls.length, 1, "expected one app-server session start");
+      assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server session stop on shutdown");
+      assert.equal(startThreadSpy.mock.calls.length, 1, "expected one sdk thread start");
+      assert.equal(startTurnSpy.mock.calls.length, 1, "expected only initial turn/start call");
+      assert.equal(steerTurnSpy.mock.calls.length, 1, "expected turn/steer for second user message");
+      assert.equal(waitForTurnCompletionSpy.mock.calls.length, 1, "expected single completion waiter for running turn");
+      assert.equal(runningUpdateCount, 2, "expected running updates for initial turn start and steer");
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected runtime readiness for both messages");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
+      assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
+    } finally {
+      createThreadContainersSpy.mockRestore();
+      ensureContainerRunningSpy.mockRestore();
+      ensureRuntimeContainerIdentitySpy.mockRestore();
+      ensureRuntimeContainerToolingSpy.mockRestore();
+      stopContainerSpy.mockRestore();
+      appServerStartSpy.mockRestore();
+      appServerStopSpy.mockRestore();
+      startThreadSpy.mockRestore();
+      startTurnSpy.mockRestore();
+      steerTurnSpy.mockRestore();
       waitForTurnCompletionSpy.mockRestore();
 
       if (server) {

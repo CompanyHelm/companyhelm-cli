@@ -29,6 +29,11 @@ import { AppServerService } from "../service/app_server.js";
 import { RuntimeContainerAppServerTransport } from "../service/docker/runtime_app_server_exec.js";
 import { ensureThreadRuntimeReady } from "../service/thread_runtime.js";
 import {
+  loadThreadMessageExecutionState,
+  updateThreadTurnState as updateThreadTurnStateInDb,
+  type ThreadMessageExecutionState,
+} from "../service/thread_turn_state.js";
+import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
   resolveThreadDirectory,
@@ -707,32 +712,12 @@ async function handleInterruptTurnRequest(
   request: InterruptTurnRequest,
   logger: Logger,
 ): Promise<void> {
-  const { db, client } = await initDb(cfg.state_db_path);
   let threadState: ThreadMessageExecutionState | undefined;
   try {
-    threadState = await db
-      .select({
-        id: threads.id,
-        agentId: threads.agentId,
-        sdkThreadId: threads.sdkThreadId,
-        model: threads.model,
-        reasoningLevel: threads.reasoningLevel,
-        currentSdkTurnId: threads.currentSdkTurnId,
-        isCurrentTurnRunning: threads.isCurrentTurnRunning,
-        runtimeContainer: threads.runtimeContainer,
-        dindContainer: threads.dindContainer,
-        homeDirectory: threads.homeDirectory,
-        uid: threads.uid,
-        gid: threads.gid,
-      })
-      .from(threads)
-      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
-      .get();
+    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.agentId, request.threadId);
   } catch (error: unknown) {
     await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
     return;
-  } finally {
-    client.close();
   }
 
   if (!threadState) {
@@ -793,42 +778,17 @@ async function handleInterruptTurnRequest(
   logger.info(`Requested interrupt of turn '${threadState.currentSdkTurnId}' for thread '${request.threadId}'.`);
 }
 
-interface ThreadMessageExecutionState {
-  id: string;
-  agentId: string;
-  sdkThreadId: string | null;
-  model: string;
-  reasoningLevel: string;
-  currentSdkTurnId: string | null;
-  isCurrentTurnRunning: boolean;
-  runtimeContainer: string;
-  dindContainer: string;
-  homeDirectory: string;
-  uid: number;
-  gid: number;
-}
-
-interface ThreadTurnStateUpdate {
-  sdkThreadId?: string | null;
-  currentSdkTurnId?: string | null;
-  isCurrentTurnRunning?: boolean;
-}
-
 async function updateThreadTurnState(
   cfg: Config,
   agentId: string,
   threadId: string,
-  update: ThreadTurnStateUpdate,
+  update: {
+    sdkThreadId?: string | null;
+    currentSdkTurnId?: string | null;
+    isCurrentTurnRunning?: boolean;
+  },
 ): Promise<void> {
-  const { db, client } = await initDb(cfg.state_db_path);
-  try {
-    await db
-      .update(threads)
-      .set(update)
-      .where(and(eq(threads.id, threadId), eq(threads.agentId, agentId)));
-  } finally {
-    client.close();
-  }
+  await updateThreadTurnStateInDb(cfg.state_db_path, agentId, threadId, update);
 }
 
 async function waitForThreadTurnCompletion(
@@ -877,6 +837,7 @@ async function executeCreateUserMessageRequest(
   request: CreateUserMessageRequest,
   threadState: ThreadMessageExecutionState,
   startedFromIdle: boolean,
+  trackTurnCompletion: boolean,
   logger: Logger,
 ): Promise<void> {
   const containerService = new ThreadContainerService();
@@ -992,6 +953,11 @@ async function executeCreateUserMessageRequest(
     });
     await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.RUNNING);
 
+    if (!trackTurnCompletion) {
+      keepRuntimeWarm = true;
+      return;
+    }
+
     const terminalStatus = await waitForThreadTurnCompletion(appServer, commandChannel, sdkThreadId, sdkTurnId);
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       currentSdkTurnId: sdkTurnId,
@@ -999,11 +965,14 @@ async function executeCreateUserMessageRequest(
     });
     await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.COMPLETED);
 
-    if (terminalStatus !== "completed") {
+    if (terminalStatus === "failed") {
       await sendRequestError(
         commandChannel,
         `Turn '${sdkTurnId}' finished with status '${terminalStatus}' for thread '${request.threadId}'.`,
       );
+    } else if (terminalStatus === "interrupted") {
+      logger.info(`Turn '${sdkTurnId}' for thread '${request.threadId}' was interrupted.`);
+      keepRuntimeWarm = true;
     } else {
       // Keep app-server + containers warm for fast follow-up user messages on the same thread.
       keepRuntimeWarm = true;
@@ -1038,28 +1007,10 @@ async function handleCreateUserMessageRequest(
   request: CreateUserMessageRequest,
   logger: Logger,
 ): Promise<void> {
-  const { db, client } = await initDb(cfg.state_db_path);
   let threadState: ThreadMessageExecutionState | undefined;
 
   try {
-    threadState = await db
-      .select({
-        id: threads.id,
-        agentId: threads.agentId,
-        sdkThreadId: threads.sdkThreadId,
-        model: threads.model,
-        reasoningLevel: threads.reasoningLevel,
-        currentSdkTurnId: threads.currentSdkTurnId,
-        isCurrentTurnRunning: threads.isCurrentTurnRunning,
-        runtimeContainer: threads.runtimeContainer,
-        dindContainer: threads.dindContainer,
-        homeDirectory: threads.homeDirectory,
-        uid: threads.uid,
-        gid: threads.gid,
-      })
-      .from(threads)
-      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
-      .get();
+    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.agentId, request.threadId);
 
     if (!threadState) {
       await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
@@ -1084,8 +1035,6 @@ async function handleCreateUserMessageRequest(
   } catch (error: unknown) {
     await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
     return;
-  } finally {
-    client.close();
   }
 
   if (!threadState) {
@@ -1105,12 +1054,14 @@ async function handleCreateUserMessageRequest(
     }
   }
 
+  const trackTurnCompletion = startedFromIdle;
   void executeCreateUserMessageRequest(
     cfg,
     commandChannel,
     request,
     threadState,
     startedFromIdle,
+    trackTurnCompletion,
     logger,
   );
 }
