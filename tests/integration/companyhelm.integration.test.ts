@@ -18,6 +18,8 @@ const require = createRequire(import.meta.url);
 const {
   AgentStatus,
   ClientMessageSchema,
+  ItemStatus,
+  ItemType,
   RegisterRunnerRequestSchema,
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
@@ -1124,7 +1126,32 @@ test(
     });
     const waitForTurnCompletionSpy = vi
       .spyOn(AppServerService.prototype, "waitForTurnCompletion")
-      .mockImplementation(async () => "completed");
+      .mockImplementation(async (threadId: string, turnId: string, onNotification?: (notification: any) => Promise<void> | void) => {
+        const text = `assistant response for ${turnId}`;
+        const item = {
+          id: `${turnId}-agent-item`,
+          type: "agentMessage",
+          text,
+        };
+
+        await onNotification?.({
+          method: "item/started",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+        await onNotification?.({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+        return "completed";
+      });
 
     try {
       process.env.HOME = homeDirectory;
@@ -1135,6 +1162,7 @@ test(
       let sentFirstUserMessageRequest = false;
       let sentSecondUserMessageRequest = false;
       let completedTurns = 0;
+      const completedAgentResponses: Array<{ itemId: string; text: string }> = [];
 
       const started = await startFakeServer("/grpc", {
         registerRunner(call, callback) {
@@ -1157,6 +1185,18 @@ test(
             if (message.payload.case === "requestError") {
               receivedRequestError = message;
               call.end();
+              return;
+            }
+
+            if (
+              message.payload.case === "itemUpdate" &&
+              message.payload.value.itemType === ItemType.AGENT_MESSAGE &&
+              message.payload.value.status === ItemStatus.COMPLETED
+            ) {
+              completedAgentResponses.push({
+                itemId: message.payload.value.sdkItemId,
+                text: message.payload.value.text ?? "",
+              });
               return;
             }
 
@@ -1248,6 +1288,17 @@ test(
       assert.equal(appServerStopSpy.mock.calls.length, 2, "expected app-server to stop for each message");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
       assert.equal(waitForTurnCompletionSpy.mock.calls.length, 2, "expected turn completion wait per user message");
+      assert.equal(completedAgentResponses.length, 2, "expected one completed agent response item per user message");
+      assert.deepEqual(
+        completedAgentResponses.map((response) => response.itemId),
+        ["sdk-turn-1-agent-item", "sdk-turn-2-agent-item"],
+        "expected agent response item updates for both turns",
+      );
+      assert.deepEqual(
+        completedAgentResponses.map((response) => response.text),
+        ["assistant response for sdk-turn-1", "assistant response for sdk-turn-2"],
+        "expected agent response text for both turns",
+      );
 
       const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
       const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
