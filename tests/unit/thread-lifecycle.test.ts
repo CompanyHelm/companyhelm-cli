@@ -75,7 +75,7 @@ test("buildSharedThreadMounts uses codex_auth_path as both source and target in 
   ]);
 });
 
-test("buildDindContainerOptions and buildRuntimeContainerOptions share user, mounts and networking", () => {
+test("buildDindContainerOptions and buildRuntimeContainerOptions share mounts and networking", () => {
   const names = buildThreadContainerNames("thread-5");
   const mounts = [
     {
@@ -101,10 +101,10 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share user, mou
   const dindOptions = buildDindContainerOptions(common);
   const runtimeOptions = buildRuntimeContainerOptions(common);
 
-  assert.equal(dindOptions.User, "501:20");
+  assert.equal(dindOptions.User, undefined);
   assert.equal(runtimeOptions.User, "501:20");
-  assert.ok(dindOptions.Env.includes("HOME=/home/agent"));
-  assert.ok(dindOptions.Env.includes("USER=agent"));
+  assert.equal(dindOptions.Env.includes("HOME=/home/agent"), false);
+  assert.equal(dindOptions.Env.includes("USER=agent"), false);
   assert.ok(dindOptions.Env.includes("DOCKER_TLS_CERTDIR="));
 
   assert.ok(runtimeOptions.Env.includes("HOME=/home/agent"));
@@ -276,6 +276,91 @@ test("ThreadContainerService waits for dind container to be running before creat
 
   assert.ok(dindInspectCalls >= 2, "expected dind container inspect polling before runtime create");
   assert.deepEqual(createOrder, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
+});
+
+test("ThreadContainerService provisions runtime uid/gid user and home directory inside dind", async () => {
+  const execCalls: Array<{ Cmd: string[]; User?: string }> = [];
+
+  const dindContainer = {
+    async start() {
+      return undefined;
+    },
+    async inspect() {
+      return { State: { Running: true, Status: "running", ExitCode: 0 } };
+    },
+    async exec(options: { Cmd: string[]; User?: string }) {
+      execCalls.push(options);
+      return {
+        async start() {
+          return undefined;
+        },
+        async inspect() {
+          return { Running: false, ExitCode: 0 };
+        },
+      };
+    },
+  };
+
+  const runtimeContainer = {
+    async start() {
+      return undefined;
+    },
+  };
+
+  const fakeDocker = {
+    getImage() {
+      return {
+        async inspect() {
+          return {};
+        },
+      };
+    },
+    pull(_image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
+      callback(null, {} as NodeJS.ReadableStream);
+    },
+    modem: {
+      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+        callback(null);
+      },
+    },
+    async createContainer(options: { Image: string }) {
+      if (options.Image.includes("dind")) {
+        return dindContainer;
+      }
+      return runtimeContainer;
+    },
+    getContainer() {
+      return {
+        async remove() {
+          return undefined;
+        },
+      };
+    },
+  };
+
+  const service = new ThreadContainerService(fakeDocker as any);
+  await service.createThreadContainers({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names: buildThreadContainerNames("thread-provision-dind-user"),
+    mounts: [],
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.equal(execCalls.length, 2);
+  assert.match(execCalls[0].Cmd[2], /DOCKER_HOST=unix:\/\/\/run\/user\/1000\/docker\.sock docker info/);
+  assert.match(execCalls[0].Cmd[2], /DOCKER_HOST=tcp:\/\/127\.0\.0\.1:2375 docker info/);
+  assert.equal(execCalls[0].User, undefined);
+  assert.equal(execCalls[1].User, "0:0");
+  assert.match(execCalls[1].Cmd[2], /addgroup -g '20' 'agent'/);
+  assert.match(execCalls[1].Cmd[2], /adduser -D -h '\/home\/agent' -u '501'/);
+  assert.match(execCalls[1].Cmd[2], /mkdir -p '\/home\/agent'/);
+  assert.match(execCalls[1].Cmd[2], /chown '501':'20' '\/home\/agent'/);
 });
 
 test("ThreadContainerService includes dind container logs when dind exits before ready", async () => {

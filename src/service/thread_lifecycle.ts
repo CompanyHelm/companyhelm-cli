@@ -39,6 +39,12 @@ const DIND_PROBE_TIMEOUT_MS = 5_000;
 const DIND_PROBE_POLL_MS = 100;
 const CONTAINER_LOG_TAIL_LINES = 120;
 const CONTAINER_LOG_MAX_CHARS = 8_000;
+const DIND_READINESS_PROBE_COMMAND = [
+  "DOCKER_HOST=unix:///run/user/1000/docker.sock docker info >/dev/null 2>&1",
+  "DOCKER_HOST=unix:///var/run/docker.sock docker info >/dev/null 2>&1",
+  "DOCKER_HOST=tcp://127.0.0.1:2375 docker info >/dev/null 2>&1",
+  "DOCKER_HOST=tcp://127.0.0.1:2376 docker info >/dev/null 2>&1",
+].join(" || ");
 
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
@@ -109,10 +115,8 @@ export function buildDindContainerOptions(options: ThreadContainerCreateOptions)
   return {
     name: options.names.dind,
     Image: options.dindImage,
-    User: `${options.user.uid}:${options.user.gid}`,
     WorkingDir: "/workspace",
     Env: [
-      ...buildCommonContainerEnv(options.user),
       "DOCKER_TLS_CERTDIR=",
     ],
     HostConfig: {
@@ -170,6 +174,10 @@ function isImageNotFound(error: unknown): boolean {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
 }
 
 function decodeDockerLogs(rawLogs: unknown): string {
@@ -306,11 +314,12 @@ export class ThreadContainerService {
     await this.pullImage(image);
   }
 
-  private async runCommandInContainer(container: Dockerode.Container, command: string): Promise<number> {
+  private async runCommandInContainer(container: Dockerode.Container, command: string, user?: string): Promise<number> {
     const exec = await container.exec({
       Cmd: ["sh", "-lc", command],
       AttachStdout: false,
       AttachStderr: false,
+      User: user,
     });
 
     await exec.start({ Detach: false, Tty: false });
@@ -343,7 +352,7 @@ export class ThreadContainerService {
 
       if (state?.Running) {
         try {
-          const exitCode = await this.runCommandInContainer(container, "docker info >/dev/null 2>&1");
+          const exitCode = await this.runCommandInContainer(container, DIND_READINESS_PROBE_COMMAND);
           if (exitCode === 0) {
             return;
           }
@@ -361,21 +370,61 @@ export class ThreadContainerService {
     );
   }
 
+  private async startDindContainer(
+    options: ThreadContainerCreateOptions,
+  ): Promise<Dockerode.Container> {
+    const dind = await this.docker.createContainer(buildDindContainerOptions(options));
+
+    try {
+      await dind.start();
+      await this.waitForDindReady(dind, options.names.dind);
+      await this.ensureDindRuntimeUser(dind, options.user);
+      return dind;
+    } catch (error) {
+      const enrichedError = await this.enrichErrorWithContainerLogs(error, dind, options.names.dind);
+      await this.forceRemoveContainer(options.names.dind);
+      throw enrichedError;
+    }
+  }
+
+  private async ensureDindRuntimeUser(
+    container: Dockerode.Container,
+    user: ThreadContainerUser,
+  ): Promise<void> {
+    const uid = String(user.uid);
+    const gid = String(user.gid);
+    const agentUser = user.agentUser;
+    const homeDirectory = user.agentHomeDirectory;
+
+    const gidToken = shellEscape(gid);
+    const uidToken = shellEscape(uid);
+    const agentUserToken = shellEscape(agentUser);
+    const homeDirectoryToken = shellEscape(homeDirectory);
+
+    const command = [
+      `if ! getent group ${gidToken} >/dev/null 2>&1; then addgroup -g ${gidToken} ${agentUserToken}; fi`,
+      `group_name="$(getent group ${gidToken} | cut -d: -f1 | head -n 1)"`,
+      `if [ -z "$group_name" ]; then group_name=${agentUserToken}; fi`,
+      `if ! getent passwd ${uidToken} >/dev/null 2>&1; then adduser -D -h ${homeDirectoryToken} -u ${uidToken} -G "$group_name" ${agentUserToken}; fi`,
+      `mkdir -p ${homeDirectoryToken}`,
+      `chown ${uidToken}:${gidToken} ${homeDirectoryToken}`,
+    ].join(" && ");
+
+    const exitCode = await this.runCommandInContainer(container, command, "0:0");
+    if (exitCode !== 0) {
+      throw new Error(
+        `Failed to ensure runtime user '${agentUser}' (${uid}:${gid}) exists in DinD container.`,
+      );
+    }
+  }
+
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
     await this.ensureImageAvailable(options.dindImage);
     if (options.runtimeImage !== options.dindImage) {
       await this.ensureImageAvailable(options.runtimeImage);
     }
 
-    const dind = await this.docker.createContainer(buildDindContainerOptions(options));
-    try {
-      await dind.start();
-      await this.waitForDindReady(dind, options.names.dind);
-    } catch (error) {
-      const enrichedError = await this.enrichErrorWithContainerLogs(error, dind, options.names.dind);
-      await this.forceRemoveContainer(options.names.dind);
-      throw enrichedError;
-    }
+    const dind = await this.startDindContainer(options);
 
     const runtime = await this.docker.createContainer(buildRuntimeContainerOptions(options));
     try {

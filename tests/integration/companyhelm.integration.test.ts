@@ -12,6 +12,7 @@ import { create } from "@bufbuild/protobuf";
 import * as grpc from "@grpc/grpc-js";
 import { vi } from "vitest";
 import Dockerode from "dockerode";
+import { eq } from "drizzle-orm";
 
 const require = createRequire(import.meta.url);
 const {
