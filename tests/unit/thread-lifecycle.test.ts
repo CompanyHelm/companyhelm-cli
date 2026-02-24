@@ -317,6 +317,9 @@ test("ThreadContainerService provisions runtime user identity with docker exec a
   assert.match(invocation.args[6], /AGENT_USER='agent'/);
   assert.match(invocation.args[6], /AGENT_UID='501'/);
   assert.match(invocation.args[6], /AGENT_GID='20'/);
+  assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$AGENT_HOME"/);
+  assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$AGENT_HOME\/\.codex"/);
+  assert.match(invocation.args[6], /chown -R "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME"/);
 });
 
 test("ThreadContainerService surfaces runtime identity bootstrap failures", async () => {

@@ -124,6 +124,8 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
     `AGENT_UID=${shellQuote(String(user.uid))}`,
     `AGENT_GID=${shellQuote(String(user.gid))}`,
     "",
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME"',
+    "",
     'AGENT_GROUP="$AGENT_USER"',
     'if getent group "$AGENT_GID" >/dev/null 2>&1; then',
     '  AGENT_GROUP="$(getent group "$AGENT_GID" | cut -d: -f1)"',
@@ -141,8 +143,11 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
     '  useradd -m -d "$AGENT_HOME" -u "$AGENT_UID" -g "$AGENT_GROUP" -s /bin/bash "$AGENT_USER"',
     "fi",
     "",
-    'mkdir -p "$AGENT_HOME"',
-    'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" || true',
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME/.codex"',
+    'if [ -e "$AGENT_HOME/.codex/auth.json" ]; then',
+    '  chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME/.codex/auth.json" || true',
+    "fi",
+    'chown -R "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" || true',
   ].join("\n");
 }
 
