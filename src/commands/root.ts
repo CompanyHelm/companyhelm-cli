@@ -27,6 +27,7 @@ import { CompanyhelmApiClient, type CompanyhelmCommandChannel } from "../service
 import { getHostInfo } from "../service/host.js";
 import { AppServerService } from "../service/app_server.js";
 import { RuntimeContainerAppServerTransport } from "../service/docker/runtime_app_server_exec.js";
+import { ensureThreadRuntimeReady } from "../service/thread_runtime.js";
 import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
@@ -892,14 +893,16 @@ async function executeCreateUserMessageRequest(
   let keepRuntimeWarm = false;
 
   try {
-    await containerService.ensureContainerRunning(threadState.dindContainer);
-    await containerService.waitForContainerRunning(threadState.dindContainer);
-    await containerService.ensureContainerRunning(threadState.runtimeContainer);
-    await containerService.ensureRuntimeContainerIdentity(threadState.runtimeContainer, {
-      uid: threadState.uid,
-      gid: threadState.gid,
-      agentUser: cfg.agent_user,
-      agentHomeDirectory: threadState.homeDirectory,
+    await ensureThreadRuntimeReady({
+      dindContainer: threadState.dindContainer,
+      runtimeContainer: threadState.runtimeContainer,
+      containerService,
+      user: {
+        uid: threadState.uid,
+        gid: threadState.gid,
+        agentUser: cfg.agent_user,
+        agentHomeDirectory: threadState.homeDirectory,
+      },
     });
 
     await ensureThreadAppServerSessionStarted(appServerSession);

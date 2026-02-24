@@ -3,7 +3,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { Command } from "commander";
-import { registerCommands } from "./commands/index.js";
+import { registerCommands } from "./commands/register-commands.js";
 
 function getVersion(): string {
   try {

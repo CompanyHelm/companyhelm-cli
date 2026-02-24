@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
-import { ThreadContainerService } from "../../service/thread_lifecycle.js";
+import { ensureThreadRuntimeReady } from "../../service/thread_runtime.js";
 import { initDb } from "../../state/db.js";
 import { threads } from "../../state/schema.js";
 
@@ -47,20 +47,31 @@ export async function runThreadDockerCommand(options: ThreadDockerCommandOptions
     throw new Error(`Thread '${options.threadId}' was not found for agent '${options.agentId}'.`);
   }
 
-  const containerService = new ThreadContainerService();
-  await containerService.ensureContainerRunning(threadState.dindContainer);
-  await containerService.waitForContainerRunning(threadState.dindContainer);
-  await containerService.ensureContainerRunning(threadState.runtimeContainer);
-  await containerService.ensureRuntimeContainerIdentity(threadState.runtimeContainer, {
-    uid: threadState.uid,
-    gid: threadState.gid,
-    agentUser: cfg.agent_user,
-    agentHomeDirectory: threadState.homeDirectory,
+  await ensureThreadRuntimeReady({
+    dindContainer: threadState.dindContainer,
+    runtimeContainer: threadState.runtimeContainer,
+    user: {
+      uid: threadState.uid,
+      gid: threadState.gid,
+      agentUser: cfg.agent_user,
+      agentHomeDirectory: threadState.homeDirectory,
+    },
   });
 
-  const result = spawnSync("docker", ["exec", "-it", threadState.runtimeContainer, "bash"], {
-    stdio: "inherit",
-  });
+  const result = spawnSync(
+    "docker",
+    [
+      "exec",
+      "-it",
+      threadState.runtimeContainer,
+      "bash",
+      "-lc",
+      'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; . "$NVM_DIR/nvm.sh"; exec bash',
+    ],
+    {
+      stdio: "inherit",
+    },
+  );
 
   if (result.status !== 0 || result.signal || result.error) {
     resolveExecStatus(result);

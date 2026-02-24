@@ -108,6 +108,7 @@ function buildCommonContainerEnv(user: ThreadContainerUser): string[] {
   return [
     `HOME=${user.agentHomeDirectory}`,
     `USER=${user.agentUser}`,
+    `NVM_DIR=${join(user.agentHomeDirectory, ".nvm")}`,
   ];
 }
 
@@ -142,6 +143,24 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
     "",
     'mkdir -p "$AGENT_HOME"',
     'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME" || true',
+  ].join("\n");
+}
+
+function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string {
+  return [
+    "set -euo pipefail",
+    `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
+    'export HOME="$AGENT_HOME"',
+    'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"',
+    'if [ ! -s "$NVM_DIR/nvm.sh" ]; then',
+    '  echo "nvm is not configured: expected $NVM_DIR/nvm.sh" >&2',
+    "  exit 1",
+    "fi",
+    '. "$NVM_DIR/nvm.sh"',
+    'if ! command -v codex >/dev/null 2>&1; then',
+    '  echo "codex command is not available after sourcing nvm." >&2',
+    "  exit 1",
+    "fi",
   ].join("\n");
 }
 
@@ -245,6 +264,23 @@ export class ThreadContainerService {
   constructor(docker?: Dockerode, runCommand: typeof spawnSync = spawnSync) {
     this.docker = docker ?? new Dockerode();
     this.runCommand = runCommand;
+  }
+
+  private runDockerExecScript(args: string[], contextMessage: string): void {
+    const result = this.runCommand("docker", args, {
+      encoding: "utf8",
+    });
+
+    if (result.status === 0 && !result.error) {
+      return;
+    }
+
+    const detail = [result.error?.message, result.stderr, result.stdout]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .map((value) => value.trim())
+      .join(" | ");
+    const status = result.status === null ? "unknown" : String(result.status);
+    throw new Error(`${contextMessage} (exit ${status})${detail ? `: ${detail}` : "."}`);
   }
 
   private async pullImage(image: string): Promise<void> {
@@ -352,22 +388,17 @@ export class ThreadContainerService {
 
   async ensureRuntimeContainerIdentity(name: string, user: ThreadContainerUser): Promise<void> {
     const script = buildRuntimeIdentityProvisionScript(user);
-    const result = this.runCommand("docker", ["exec", "-u", "0", name, "bash", "-lc", script], {
-      encoding: "utf8",
-    });
+    this.runDockerExecScript(
+      ["exec", "-u", "0", name, "bash", "-lc", script],
+      `Failed to provision runtime user '${user.agentUser}' in container '${name}'`,
+    );
+  }
 
-    if (result.status === 0 && !result.error) {
-      return;
-    }
-
-    const detail = [result.error?.message, result.stderr, result.stdout]
-      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
-      .map((value) => value.trim())
-      .join(" | ");
-    const status = result.status === null ? "unknown" : String(result.status);
-    throw new Error(
-      `Failed to provision runtime user '${user.agentUser}' in container '${name}' (exit ${status})` +
-      (detail ? `: ${detail}` : "."),
+  async ensureRuntimeContainerTooling(name: string, user: ThreadContainerUser): Promise<void> {
+    const script = buildRuntimeToolingValidationScript(user);
+    this.runDockerExecScript(
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
+      `Failed to validate nvm/codex in runtime container '${name}'`,
     );
   }
 
