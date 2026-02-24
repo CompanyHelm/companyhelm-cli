@@ -151,24 +151,7 @@ test("ThreadContainerService pulls missing images before creating containers", a
     },
     async createContainer(options: { Image: string }) {
       createdImages.push(options.Image);
-      return {
-        async start() {
-          return undefined;
-        },
-        async inspect() {
-          return { State: { Running: true, Status: "running", ExitCode: 0 } };
-        },
-        async exec() {
-          return {
-            async start() {
-              return undefined;
-            },
-            async inspect() {
-              return { Running: false, ExitCode: 0 };
-            },
-          };
-        },
-      };
+      return {};
     },
     getContainer() {
       return {
@@ -198,41 +181,8 @@ test("ThreadContainerService pulls missing images before creating containers", a
   assert.deepEqual(createdImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
 });
 
-test("ThreadContainerService waits for dind container to be running before creating runtime", async () => {
+test("ThreadContainerService creates dind container before runtime container", async () => {
   const createOrder: string[] = [];
-  let dindInspectCalls = 0;
-
-  const dindContainer = {
-    async start() {
-      return undefined;
-    },
-    async inspect() {
-      dindInspectCalls += 1;
-      if (dindInspectCalls === 1) {
-        return { State: { Running: false, Status: "created", ExitCode: 0 } };
-      }
-      return { State: { Running: true, Status: "running", ExitCode: 0 } };
-    },
-    async exec() {
-      return {
-        async start() {
-          return undefined;
-        },
-        async inspect() {
-          return { Running: false, ExitCode: 0 };
-        },
-      };
-    },
-  };
-
-  const runtimeContainer = {
-    async start() {
-      return undefined;
-    },
-    async inspect() {
-      return { State: { Running: true, Status: "running", ExitCode: 0 } };
-    },
-  };
 
   const fakeDocker = {
     getImage() {
@@ -252,10 +202,7 @@ test("ThreadContainerService waits for dind container to be running before creat
     },
     async createContainer(options: { Image: string }) {
       createOrder.push(options.Image);
-      if (options.Image.includes("dind")) {
-        return dindContainer;
-      }
-      return runtimeContainer;
+      return {};
     },
     getContainer() {
       return {
@@ -280,38 +227,12 @@ test("ThreadContainerService waits for dind container to be running before creat
     },
   });
 
-  assert.ok(dindInspectCalls >= 2, "expected dind container inspect polling before runtime create");
   assert.deepEqual(createOrder, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
 });
 
-test("ThreadContainerService provisions runtime uid/gid user and home directory inside dind", async () => {
-  const execCalls: Array<{ Cmd: string[]; User?: string }> = [];
-
-  const dindContainer = {
-    async start() {
-      return undefined;
-    },
-    async inspect() {
-      return { State: { Running: true, Status: "running", ExitCode: 0 } };
-    },
-    async exec(options: { Cmd: string[]; User?: string }) {
-      execCalls.push(options);
-      return {
-        async start() {
-          return undefined;
-        },
-        async inspect() {
-          return { Running: false, ExitCode: 0 };
-        },
-      };
-    },
-  };
-
-  const runtimeContainer = {
-    async start() {
-      return undefined;
-    },
-  };
+test("ThreadContainerService removes dind container when runtime container creation fails", async () => {
+  const removedContainerNames: string[] = [];
+  let createCount = 0;
 
   const fakeDocker = {
     getImage() {
@@ -329,15 +250,17 @@ test("ThreadContainerService provisions runtime uid/gid user and home directory 
         callback(null);
       },
     },
-    async createContainer(options: { Image: string }) {
-      if (options.Image.includes("dind")) {
-        return dindContainer;
+    async createContainer() {
+      createCount += 1;
+      if (createCount === 1) {
+        return {};
       }
-      return runtimeContainer;
+      throw new Error("runtime create failed");
     },
-    getContainer() {
+    getContainer(name: string) {
       return {
         async remove() {
+          removedContainerNames.push(name);
           return undefined;
         },
       };
@@ -345,86 +268,12 @@ test("ThreadContainerService provisions runtime uid/gid user and home directory 
   };
 
   const service = new ThreadContainerService(fakeDocker as any);
-  await service.createThreadContainers({
-    dindImage: "docker:29-dind-rootless",
-    runtimeImage: "companyhelm/runner:latest",
-    names: buildThreadContainerNames("thread-provision-dind-user"),
-    mounts: [],
-    user: {
-      uid: 501,
-      gid: 20,
-      agentUser: "agent",
-      agentHomeDirectory: "/home/agent",
-    },
-  });
-
-  assert.equal(execCalls.length, 2);
-  assert.match(execCalls[0].Cmd[2], /DOCKER_HOST=unix:\/\/\/run\/user\/1000\/docker\.sock docker info/);
-  assert.match(execCalls[0].Cmd[2], /DOCKER_HOST=tcp:\/\/127\.0\.0\.1:2375 docker info/);
-  assert.equal(execCalls[0].User, undefined);
-  assert.equal(execCalls[1].User, "0:0");
-  assert.match(execCalls[1].Cmd[2], /addgroup -g '20' 'agent'/);
-  assert.match(execCalls[1].Cmd[2], /adduser -D -h '\/home\/agent' -u '501'/);
-  assert.match(execCalls[1].Cmd[2], /mkdir -p '\/home\/agent'/);
-  assert.match(execCalls[1].Cmd[2], /chown '501':'20' '\/home\/agent'/);
-});
-
-test("ThreadContainerService includes dind container logs when dind exits before ready", async () => {
-  const dindContainer = {
-    async start() {
-      return undefined;
-    },
-    async inspect() {
-      return { State: { Running: false, Status: "exited", ExitCode: 1 } };
-    },
-    async logs() {
-      return "dind failed to boot";
-    },
-  };
-
-  const fakeDocker = {
-    getImage() {
-      return {
-        async inspect() {
-          return {};
-        },
-      };
-    },
-    pull(_image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
-      callback(null, {} as NodeJS.ReadableStream);
-    },
-    modem: {
-      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
-        callback(null);
-      },
-    },
-    async createContainer(options: { Image: string }) {
-      if (options.Image.includes("dind")) {
-        return dindContainer;
-      }
-      return {
-        async start() {
-          return undefined;
-        },
-      };
-    },
-    getContainer() {
-      return {
-        async remove() {
-          return undefined;
-        },
-      };
-    },
-  };
-
-  const service = new ThreadContainerService(fakeDocker as any);
-
   await assert.rejects(
     () =>
       service.createThreadContainers({
         dindImage: "docker:29-dind-rootless",
         runtimeImage: "companyhelm/runner:latest",
-        names: buildThreadContainerNames("thread-dind-logs"),
+        names: buildThreadContainerNames("thread-runtime-create-failure"),
         mounts: [],
         user: {
           uid: 501,
@@ -433,6 +282,8 @@ test("ThreadContainerService includes dind container logs when dind exits before
           agentHomeDirectory: "/home/agent",
         },
       }),
-    /dind failed to boot/,
+    /runtime create failed/,
   );
+
+  assert.deepEqual(removedContainerNames, ["companyhelm-dind-thread-thread-runtime-create-failure"]);
 });

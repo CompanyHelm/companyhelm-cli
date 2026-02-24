@@ -888,8 +888,8 @@ test(
     const previousHome = process.env.HOME;
 
     let createdThreadId: string | null = null;
-    let runtimeContainerRunningAtReady: boolean | null = null;
-    let dindContainerRunningAtReady: boolean | null = null;
+    let runtimeContainerStatusAtReady: string | null = null;
+    let dindContainerStatusAtReady: string | null = null;
     let runtimeContainerAbsentAfterDelete: boolean | null = null;
     let dindContainerAbsentAfterDelete: boolean | null = null;
     let workspacePathAtReady: string | null = null;
@@ -966,8 +966,8 @@ test(
                 const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
                 const runtimeInspect = await docker.getContainer(names.runtime).inspect();
                 const dindInspect = await docker.getContainer(names.dind).inspect();
-                runtimeContainerRunningAtReady = runtimeInspect.State?.Running ?? false;
-                dindContainerRunningAtReady = dindInspect.State?.Running ?? false;
+                runtimeContainerStatusAtReady = runtimeInspect.State?.Status ?? null;
+                dindContainerStatusAtReady = dindInspect.State?.Status ?? null;
 
                 const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
                 const { db, client } = await initDb(stateDbPath);
@@ -1048,8 +1048,8 @@ test(
       assert.equal(receivedRequestError, null, "did not expect requestError during real docker lifecycle");
       assert.ok(createdThreadId, "expected thread id from thread ready update");
       assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
-      assert.equal(runtimeContainerRunningAtReady, true, "expected runtime container to be running when thread is ready");
-      assert.equal(dindContainerRunningAtReady, true, "expected dind container to be running when thread is ready");
+      assert.equal(runtimeContainerStatusAtReady, "created", "expected runtime container to be created (not started) when thread is ready");
+      assert.equal(dindContainerStatusAtReady, "created", "expected dind container to be created (not started) when thread is ready");
       assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
       assert.equal(workspaceAbsentAfterThreadDelete, true, "expected thread workspace directory to be removed on deleteThreadRequest");
       assert.equal(
