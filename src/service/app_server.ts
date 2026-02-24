@@ -14,6 +14,12 @@ import { AsyncQueue } from "../utils/async_queue.js";
 
 type JsonObject = { [key: string]: unknown };
 
+interface PendingRequest {
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
 export interface AppServerResponseMessage {
   id: RequestId;
   result?: unknown;
@@ -122,6 +128,8 @@ export class AppServerService {
   private stream: AsyncGenerator<AppServerTransportEvent, void, void> | null = null;
   private pumpTask: Promise<void> | null = null;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
+  private readonly pendingRequests = new Map<RequestId, PendingRequest>();
+  private readonly pendingResponses = new Map<RequestId, AppServerResponseMessage>();
   private nextRequestId = 1;
   private stderrLines: string[] = [];
   private stdoutBuffer = Buffer.alloc(0);
@@ -143,6 +151,8 @@ export class AppServerService {
     const pump = this.pumpTask;
     this.pumpTask = null;
     this.stream = null;
+    this.rejectAllPendingRequests(new Error("app-server stopped"));
+    this.pendingResponses.clear();
     this.messageQueue.close();
     this.stdoutBuffer = Buffer.alloc(0);
     this.framing = "unknown";
@@ -304,6 +314,7 @@ export class AppServerService {
           continue;
         }
 
+        this.rejectAllPendingRequests(new Error(event.reason));
         this.messageQueue.push({
           type: "parse_error",
           payload: "",
@@ -419,6 +430,7 @@ export class AppServerService {
     }
 
     if (!hasMessageShape(parsed)) {
+      this.rejectAllPendingRequests(new Error("message does not match expected app-server envelope"));
       this.messageQueue.push({
         type: "parse_error",
         payload,
@@ -427,47 +439,86 @@ export class AppServerService {
       return;
     }
 
-    this.messageQueue.push(parsed as AppServerIncomingMessage);
+    const message = parsed as AppServerIncomingMessage;
+    if (isResponseMessage(message)) {
+      this.routeResponseMessage(message);
+      return;
+    }
+
+    this.messageQueue.push(message);
   }
 
   private async popMessageWithTimeout(timeoutMs: number): Promise<AppServerIncomingMessage | null> {
     return this.messageQueue.popWithTimeout(timeoutMs);
   }
 
-  private async waitForResponseResult(requestId: RequestId, timeoutMs: number): Promise<unknown> {
-    const deadline = Date.now() + timeoutMs;
-    while (Date.now() < deadline) {
-      const remaining = Math.max(1, deadline - Date.now());
-      const message = await this.popMessageWithTimeout(remaining);
-      if (!message) {
-        throw new AppServerTimeoutError(`Timed out waiting for response to request ${String(requestId)}`);
-      }
-
-      if (hasTag(message)) {
-        if (message.type === "parse_error") {
-          throw new Error(`Failed to parse app-server message: ${message.reason}`);
-        }
-
-        if (message.type === "stderr") {
-          const trimmed = message.payload.trim();
-          if (trimmed.length > 0) {
-            this.stderrLines.push(trimmed);
-          }
-        }
-        continue;
-      }
-
-      if (!isResponseMessage(message) || message.id !== requestId) {
-        continue;
-      }
-
-      if (message.error !== undefined) {
-        throw new Error(`app-server returned an error for request ${String(requestId)}: ${formatUnknownError(message.error)}`);
-      }
-
-      return message.result;
+  private routeResponseMessage(message: AppServerResponseMessage): void {
+    const pendingRequest = this.pendingRequests.get(message.id);
+    if (!pendingRequest) {
+      this.pendingResponses.set(message.id, message);
+      return;
     }
 
-    throw new AppServerTimeoutError(`Timed out waiting for response to request ${String(requestId)}`);
+    this.pendingRequests.delete(message.id);
+    clearTimeout(pendingRequest.timeout);
+    if (message.error !== undefined) {
+      pendingRequest.reject(
+        new Error(`app-server returned an error for request ${String(message.id)}: ${formatUnknownError(message.error)}`),
+      );
+      return;
+    }
+    pendingRequest.resolve(message.result);
+  }
+
+  private rejectAllPendingRequests(error: Error): void {
+    for (const [requestId, pendingRequest] of this.pendingRequests.entries()) {
+      this.pendingRequests.delete(requestId);
+      clearTimeout(pendingRequest.timeout);
+      pendingRequest.reject(new Error(`request ${String(requestId)} failed: ${error.message}`));
+    }
+  }
+
+  private async waitForResponseResult(requestId: RequestId, timeoutMs: number): Promise<unknown> {
+    const immediateResponse = this.pendingResponses.get(requestId);
+    if (immediateResponse) {
+      this.pendingResponses.delete(requestId);
+      if (immediateResponse.error !== undefined) {
+        throw new Error(`app-server returned an error for request ${String(requestId)}: ${formatUnknownError(immediateResponse.error)}`);
+      }
+      return immediateResponse.result;
+    }
+
+    return new Promise<unknown>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.pendingRequests.delete(requestId);
+        reject(new AppServerTimeoutError(`Timed out waiting for response to request ${String(requestId)}`));
+      }, timeoutMs);
+
+      const pendingRequest: PendingRequest = {
+        timeout,
+        resolve: (result: unknown) => {
+          resolve(result);
+        },
+        reject: (error: Error) => {
+          reject(error);
+        },
+      };
+
+      this.pendingRequests.set(requestId, pendingRequest);
+
+      const bufferedResponse = this.pendingResponses.get(requestId);
+      if (!bufferedResponse) {
+        return;
+      }
+
+      this.pendingResponses.delete(requestId);
+      this.pendingRequests.delete(requestId);
+      clearTimeout(timeout);
+      if (bufferedResponse.error !== undefined) {
+        reject(new Error(`app-server returned an error for request ${String(requestId)}: ${formatUnknownError(bufferedResponse.error)}`));
+        return;
+      }
+      resolve(bufferedResponse.result);
+    });
   }
 }
