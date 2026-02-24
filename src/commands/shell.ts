@@ -506,21 +506,26 @@ async function promptDbAction(): Promise<DbAction | null> {
   return p.isCancel(action) ? null : action;
 }
 
+function printDbRows(label: string, rows: Array<Record<string, unknown>>): void {
+  const replacer = (_key: string, value: unknown): unknown => (typeof value === "bigint" ? value.toString() : value);
+
+  console.log();
+  console.log(`${label} (db):`);
+  if (rows.length === 0) {
+    console.log("  - none");
+  } else {
+    for (const row of rows) {
+      console.log(JSON.stringify(row, replacer, 2));
+    }
+  }
+  console.log();
+}
+
 async function listSdkRows(cfg: Config): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
   try {
     const sdkRows = await db.select().from(agentSdks).orderBy(agentSdks.name).all();
-
-    console.log();
-    console.log("SDKs (db):");
-    if (sdkRows.length === 0) {
-      console.log("  - none");
-    } else {
-      for (const sdk of sdkRows) {
-        console.log(`  - ${sdk.name} (authentication: ${sdk.authentication})`);
-      }
-    }
-    console.log();
+    printDbRows("SDKs", sdkRows);
   } finally {
     client.close();
   }
@@ -530,17 +535,7 @@ async function listAgentRows(cfg: Config): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
   try {
     const agentRows = await db.select().from(agents).orderBy(agents.id).all();
-
-    console.log();
-    console.log("Agents (db):");
-    if (agentRows.length === 0) {
-      console.log("  - none");
-    } else {
-      for (const agent of agentRows) {
-        console.log(`  - ${agent.id} (name: ${agent.name}, sdk: ${agent.sdk})`);
-      }
-    }
-    console.log();
+    printDbRows("Agents", agentRows);
   } finally {
     client.close();
   }
@@ -549,30 +544,8 @@ async function listAgentRows(cfg: Config): Promise<void> {
 async function listThreadRows(cfg: Config): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
   try {
-    const threadRows = await db
-      .select({
-        id: threads.id,
-        agentId: threads.agentId,
-        status: threads.status,
-        model: threads.model,
-        reasoningLevel: threads.reasoningLevel,
-      })
-      .from(threads)
-      .orderBy(threads.id)
-      .all();
-
-    console.log();
-    console.log("Threads (db):");
-    if (threadRows.length === 0) {
-      console.log("  - none");
-    } else {
-      for (const thread of threadRows) {
-        console.log(
-          `  - ${thread.id} (agent: ${thread.agentId}, status: ${thread.status}, model: ${thread.model}, reasoning: ${thread.reasoningLevel})`,
-        );
-      }
-    }
-    console.log();
+    const threadRows = await db.select().from(threads).orderBy(threads.id).all();
+    printDbRows("Threads", threadRows);
   } finally {
     client.close();
   }
