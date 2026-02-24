@@ -28,6 +28,7 @@ const CONTROL_PLANE_PATH_PREFIX = "/grpc";
 const RUNNER_CONNECT_TIMEOUT_MS = 10_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 const USER_MESSAGE_START_TIMEOUT_MS = 120_000;
+const USER_MESSAGE_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
 type ShellMainAction = "grpc" | "db" | "show-state" | "show-daemon-logs" | "exit";
@@ -409,6 +410,20 @@ function formatItemType(itemType: ItemType): string {
   }
 }
 
+function compactText(value: string | undefined, limit = 160): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const oneLine = value.replace(/\s+/g, " ").trim();
+  if (!oneLine) {
+    return undefined;
+  }
+  if (oneLine.length <= limit) {
+    return oneLine;
+  }
+  return `${oneLine.slice(0, limit)}...`;
+}
+
 function describeGrpcUpdate(message: ClientMessage): string | null {
   switch (message.payload.case) {
     case "agentUpdate":
@@ -419,7 +434,22 @@ function describeGrpcUpdate(message: ClientMessage): string | null {
       return `grpc update: turn ${message.payload.value.sdkTurnId} status=${formatTurnStatus(message.payload.value.status)}`;
     case "itemUpdate": {
       const item = message.payload.value;
-      return `grpc update: item ${item.sdkItemId} status=${formatItemStatus(item.status)} type=${formatItemType(item.itemType)}`;
+      const details: string[] = [];
+      const itemText = compactText(item.text);
+      if (itemText) {
+        details.push(`text="${itemText}"`);
+      }
+      if (item.commandExecutionItem) {
+        details.push(`cmd="${compactText(item.commandExecutionItem.command, 120) ?? ""}"`);
+        details.push(`cwd="${item.commandExecutionItem.cwd}"`);
+        details.push(`pid=${item.commandExecutionItem.processId}`);
+        const output = compactText(item.commandExecutionItem.output);
+        if (output) {
+          details.push(`output="${output}"`);
+        }
+      }
+      const suffix = details.length > 0 ? ` ${details.join(" ")}` : "";
+      return `grpc update: item ${item.sdkItemId} status=${formatItemStatus(item.status)} type=${formatItemType(item.itemType)}${suffix}`;
     }
     case "skillMpUpdate":
       return `grpc update: skill package=${message.payload.value.packageName} agent=${message.payload.value.agentId}`;
@@ -1043,32 +1073,41 @@ async function handleCreateUserMessage(
   );
 
   p.log.info("createUserMessageRequest sent. Waiting for turn updates...");
+  const logGrpcUpdate = (message: ClientMessage): void => {
+    const update = describeGrpcUpdate(message);
+    if (update) {
+      p.log.info(update);
+    }
+  };
 
   const firstTurnUpdate = await controlPlane.waitFor(
     (message) => {
       if (message.payload.case !== "turnUpdate") {
         return false;
       }
-      return (
-        message.payload.value.status === TurnStatus.RUNNING ||
-        message.payload.value.status === TurnStatus.COMPLETED
-      );
+      return message.payload.value.status === TurnStatus.RUNNING;
     },
     USER_MESSAGE_START_TIMEOUT_MS,
-    (message) => {
-      const update = describeGrpcUpdate(message);
-      if (update) {
-        p.log.info(update);
-      }
-    },
+    logGrpcUpdate,
   );
 
   if (firstTurnUpdate.payload.case !== "turnUpdate") {
     throw new Error("Expected turn update after createUserMessageRequest.");
   }
 
-  const status = formatTurnStatus(firstTurnUpdate.payload.value.status);
-  p.log.success(`Turn '${firstTurnUpdate.payload.value.sdkTurnId}' is ${status}.`);
+  const sdkTurnId = firstTurnUpdate.payload.value.sdkTurnId;
+  p.log.info(`Tracking turn '${sdkTurnId}' until completion...`);
+
+  await controlPlane.waitFor(
+    (message) =>
+      message.payload.case === "turnUpdate" &&
+      message.payload.value.sdkTurnId === sdkTurnId &&
+      message.payload.value.status === TurnStatus.COMPLETED,
+    USER_MESSAGE_COMPLETION_TIMEOUT_MS,
+    logGrpcUpdate,
+  );
+
+  p.log.success(`Turn '${sdkTurnId}' completed.`);
 }
 
 function printState(state: ShellState): void {
