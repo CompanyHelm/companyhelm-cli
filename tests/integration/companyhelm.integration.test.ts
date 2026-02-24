@@ -22,12 +22,14 @@ const {
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
   ThreadStatus,
+  TurnStatus,
 } = require("@companyhelm/protos");
 const { runRootCommand } = require("../../dist/commands/root.js");
 const {
   CompanyhelmApiClient,
   createAgentRunnerControlServiceDefinition,
 } = require("../../dist/service/companyhelm_api_client.js");
+const { AppServerService } = require("../../dist/service/app_server.js");
 const threadLifecycle = require("../../dist/service/thread_lifecycle.js");
 const { initDb } = require("../../dist/state/db.js");
 const { agents, agentSdks, llmModels, threads } = require("../../dist/state/schema.js");
@@ -1071,6 +1073,204 @@ test(
         await forceRemoveContainerIfExists(docker, names.runtime);
         await forceRemoveContainerIfExists(docker, names.dind);
       }
+
+      if (server) {
+        await shutdownServer(server);
+      }
+
+      process.env.HOME = previousHome;
+      await rm(homeDirectory, { recursive: true, force: true });
+    }
+  },
+  180_000,
+);
+
+test(
+  "companyhelm root command resumes user-message threads using persisted rollout path after stop/start cycle",
+  async () => {
+    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-user-message-resume-"));
+    let server: grpc.Server | undefined;
+    const previousHome = process.env.HOME;
+
+    const rolloutPath = "/workspace/rollouts/saved-thread-rollout.json";
+    let createdThreadId: string | null = null;
+    let receivedRequestError: any = null;
+
+    const createThreadContainersSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+      .mockImplementation(async () => undefined);
+    const ensureContainerRunningSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+      .mockImplementation(async () => undefined);
+    const waitForContainerRunningSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
+      .mockImplementation(async () => undefined);
+    const stopContainerSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
+      .mockImplementation(async () => undefined);
+
+    const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+    const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
+      return { thread: { id: "sdk-thread-1", path: rolloutPath } };
+    });
+    const resumeThreadSpy = vi.spyOn(AppServerService.prototype, "resumeThread").mockImplementation(async () => {
+      return { thread: { id: "sdk-thread-1", path: rolloutPath } };
+    });
+    let turnCounter = 0;
+    const startTurnSpy = vi.spyOn(AppServerService.prototype, "startTurn").mockImplementation(async () => {
+      turnCounter += 1;
+      return { turn: { id: `sdk-turn-${turnCounter}` } };
+    });
+    const waitForTurnCompletionSpy = vi
+      .spyOn(AppServerService.prototype, "waitForTurnCompletion")
+      .mockImplementation(async () => "completed");
+
+    try {
+      process.env.HOME = homeDirectory;
+      await seedStateDatabase(homeDirectory);
+      await writeHostAuthFile(homeDirectory);
+
+      let sentCreateThreadRequest = false;
+      let sentFirstUserMessageRequest = false;
+      let sentSecondUserMessageRequest = false;
+      let completedTurns = 0;
+
+      const started = await startFakeServer("/grpc", {
+        registerRunner(call, callback) {
+          callback(null, create(RegisterRunnerResponseSchema, {}));
+        },
+        controlChannel(call) {
+          call.write(
+            create(ServerMessageSchema, {
+              request: {
+                case: "createAgentRequest",
+                value: {
+                  agentId: "agent-user-message",
+                  agentSdk: "codex",
+                },
+              },
+            }),
+          );
+
+          call.on("data", (message) => {
+            if (message.payload.case === "requestError") {
+              receivedRequestError = message;
+              call.end();
+              return;
+            }
+
+            if (
+              !sentCreateThreadRequest &&
+              message.payload.case === "agentUpdate" &&
+              message.payload.value.agentId === "agent-user-message" &&
+              message.payload.value.status === AgentStatus.READY
+            ) {
+              sentCreateThreadRequest = true;
+              call.write(
+                create(ServerMessageSchema, {
+                  request: {
+                    case: "createThreadRequest",
+                    value: {
+                      agentId: "agent-user-message",
+                      model: "gpt-5.3-codex",
+                    },
+                  },
+                }),
+              );
+              return;
+            }
+
+            if (
+              !sentFirstUserMessageRequest &&
+              message.payload.case === "threadUpdate" &&
+              message.payload.value.status === ThreadStatus.READY
+            ) {
+              createdThreadId = message.payload.value.threadId;
+              sentFirstUserMessageRequest = true;
+              call.write(
+                create(ServerMessageSchema, {
+                  request: {
+                    case: "createUserMessageRequest",
+                    value: {
+                      agentId: "agent-user-message",
+                      threadId: createdThreadId,
+                      text: "first message",
+                      allowSteer: false,
+                    },
+                  },
+                }),
+              );
+              return;
+            }
+
+            if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.COMPLETED) {
+              completedTurns += 1;
+              if (completedTurns === 1 && !sentSecondUserMessageRequest) {
+                sentSecondUserMessageRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "createUserMessageRequest",
+                      value: {
+                        agentId: "agent-user-message",
+                        threadId: createdThreadId!,
+                        text: "second message",
+                        allowSteer: false,
+                      },
+                    },
+                  }),
+                );
+                return;
+              }
+
+              if (completedTurns >= 2) {
+                call.end();
+              }
+            }
+          });
+        },
+      });
+
+      server = started.server;
+
+      await runRootCommand({
+        companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+      });
+
+      assert.equal(receivedRequestError, null, "did not expect requestError for repeated user messages");
+      assert.ok(createdThreadId, "expected thread id for user message flow");
+      assert.equal(createThreadContainersSpy.mock.calls.length, 1);
+      assert.equal(startThreadSpy.mock.calls.length, 1, "expected first user message to create sdk thread");
+      assert.equal(resumeThreadSpy.mock.calls.length, 1, "expected second user message to resume sdk thread");
+      assert.equal(resumeThreadSpy.mock.calls[0][0]?.path, rolloutPath, "expected resume to use persisted rollout path");
+      assert.equal(appServerStartSpy.mock.calls.length, 2, "expected app-server to start for each message");
+      assert.equal(appServerStopSpy.mock.calls.length, 2, "expected app-server to stop for each message");
+      assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
+      assert.equal(waitForTurnCompletionSpy.mock.calls.length, 2, "expected turn completion wait per user message");
+
+      const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
+      const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
+      const stoppedContainerNames = stopContainerSpy.mock.calls.map((call) => call[0]);
+      assert.deepEqual(stoppedContainerNames, [
+        expectedRuntimeContainer,
+        expectedDindContainer,
+        expectedRuntimeContainer,
+        expectedDindContainer,
+      ]);
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
+      assert.equal(waitForContainerRunningSpy.mock.calls.length, 2, "expected dind running wait on each message");
+    } finally {
+      createThreadContainersSpy.mockRestore();
+      ensureContainerRunningSpy.mockRestore();
+      waitForContainerRunningSpy.mockRestore();
+      stopContainerSpy.mockRestore();
+      appServerStartSpy.mockRestore();
+      appServerStopSpy.mockRestore();
+      startThreadSpy.mockRestore();
+      resumeThreadSpy.mockRestore();
+      startTurnSpy.mockRestore();
+      waitForTurnCompletionSpy.mockRestore();
 
       if (server) {
         await shutdownServer(server);

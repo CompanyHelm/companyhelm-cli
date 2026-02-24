@@ -60,10 +60,18 @@ interface ThreadAppServerSession {
   runtimeContainer: string;
   appServer: AppServerService;
   sdkThreadId: string | null;
+  rolloutPath: string | null;
   started: boolean;
 }
 
 const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
+const threadRolloutPaths = new Map<string, string>();
+
+function rememberThreadRolloutPath(threadId: string, rolloutPath: string | null | undefined): void {
+  if (rolloutPath && rolloutPath.trim().length > 0) {
+    threadRolloutPaths.set(threadId, rolloutPath);
+  }
+}
 
 async function getOrCreateThreadAppServerSession(
   threadId: string,
@@ -84,6 +92,7 @@ async function getOrCreateThreadAppServerSession(
     runtimeContainer,
     appServer,
     sdkThreadId: null,
+    rolloutPath: threadRolloutPaths.get(threadId) ?? null,
     started: false,
   };
 
@@ -570,6 +579,7 @@ async function handleDeleteAgentRequest(
   try {
     for (const threadResource of threadResources) {
       await stopThreadAppServerSession(threadResource.id);
+      threadRolloutPaths.delete(threadResource.id);
       await containerService.forceRemoveContainer(threadResource.runtimeContainer);
       await containerService.forceRemoveContainer(threadResource.dindContainer);
       removeWorkspaceDirectory(threadResource.workspace);
@@ -635,6 +645,7 @@ async function handleDeleteThreadRequest(
   const containerService = new ThreadContainerService();
   try {
     await stopThreadAppServerSession(request.threadId);
+    threadRolloutPaths.delete(request.threadId);
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
     await containerService.forceRemoveContainer(existingThread.dindContainer);
     removeWorkspaceDirectory(existingThread.workspace);
@@ -764,10 +775,13 @@ async function executeCreateUserMessageRequest(
       if (appServerSession.sdkThreadId !== sdkThreadId) {
         const resumeParams: ThreadResumeParams = {
           threadId: sdkThreadId,
+          path: appServerSession.rolloutPath,
           persistExtendedHistory: true,
         };
-        await appServer.resumeThread(resumeParams);
-        appServerSession.sdkThreadId = sdkThreadId;
+        const resumeResult = await appServer.resumeThread(resumeParams);
+        appServerSession.sdkThreadId = resumeResult.thread.id;
+        appServerSession.rolloutPath = resumeResult.thread.path;
+        rememberThreadRolloutPath(request.threadId, resumeResult.thread.path);
       }
     } else if (appServerSession.sdkThreadId) {
       sdkThreadId = appServerSession.sdkThreadId;
@@ -791,6 +805,8 @@ async function executeCreateUserMessageRequest(
       const threadStartResult = await appServer.startThread(threadStartParams);
       sdkThreadId = threadStartResult.thread.id;
       appServerSession.sdkThreadId = sdkThreadId;
+      appServerSession.rolloutPath = threadStartResult.thread.path;
+      rememberThreadRolloutPath(request.threadId, threadStartResult.thread.path);
       await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
     }
 

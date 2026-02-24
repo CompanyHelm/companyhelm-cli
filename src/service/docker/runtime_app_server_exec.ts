@@ -63,18 +63,34 @@ export class RuntimeContainerAppServerTransport implements AppServerTransport {
       return;
     }
 
+    const waitForExit = (timeoutMs: number): Promise<boolean> =>
+      Promise.race([
+        new Promise<boolean>((resolveExit) => {
+          child.once("exit", () => resolveExit(true));
+        }),
+        new Promise<boolean>((resolveExit) => {
+          setTimeout(() => resolveExit(false), timeoutMs);
+        }),
+      ]);
+
+    // Close stdin first so app-server can flush and exit cleanly.
+    if (child.stdin && !child.stdin.destroyed && child.stdin.writable) {
+      child.stdin.end();
+    }
+
+    let exited = await waitForExit(PROCESS_EXIT_TIMEOUT_MS);
+    if (exited) {
+      return;
+    }
+
     if (!child.killed) {
       child.kill("SIGTERM");
     }
 
-    const exited = await Promise.race([
-      new Promise<boolean>((resolveExit) => {
-        child.once("exit", () => resolveExit(true));
-      }),
-      new Promise<boolean>((resolveExit) => {
-        setTimeout(() => resolveExit(false), PROCESS_EXIT_TIMEOUT_MS);
-      }),
-    ]);
+    exited = await waitForExit(PROCESS_EXIT_TIMEOUT_MS);
+    if (exited) {
+      return;
+    }
 
     if (!exited && !child.killed) {
       child.kill("SIGKILL");
