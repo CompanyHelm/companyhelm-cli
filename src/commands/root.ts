@@ -12,8 +12,9 @@ import {
 } from "@companyhelm/protos";
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
 import { CompanyhelmApiClient, type CompanyhelmCommandChannel } from "../service/companyhelm_api_client.js";
@@ -22,6 +23,7 @@ import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
   resolveThreadDirectory,
+  resolveThreadsRootDirectory,
   ThreadContainerService,
   type ThreadAuthMode,
 } from "../service/thread_lifecycle.js";
@@ -60,6 +62,14 @@ function normalizeReasoningLevels(value: unknown): string[] {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function removeWorkspaceDirectory(workspacePath: string): void {
+  rmSync(workspacePath, { recursive: true, force: true });
+}
+
+function resolveAgentWorkspaceDirectory(cfg: Config, agentId: string): string {
+  return join(resolveThreadsRootDirectory(cfg.config_directory, cfg.workspaces_directory), `agent-${agentId}`);
 }
 
 async function sendRequestError(commandChannel: CompanyhelmCommandChannel, errorMessage: string): Promise<void> {
@@ -320,7 +330,7 @@ async function handleDeleteAgentRequest(
   const { db, client } = await initDb(cfg.state_db_path);
 
   let agentExists = false;
-  let threadContainers: Array<{ runtimeContainer: string; dindContainer: string }> = [];
+  let threadResources: Array<{ runtimeContainer: string; dindContainer: string; workspace: string }> = [];
 
   try {
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
@@ -330,10 +340,11 @@ async function handleDeleteAgentRequest(
       return;
     }
 
-    threadContainers = await db
+    threadResources = await db
       .select({
         runtimeContainer: threads.runtimeContainer,
         dindContainer: threads.dindContainer,
+        workspace: threads.workspace,
       })
       .from(threads)
       .where(eq(threads.agentId, request.agentId))
@@ -351,12 +362,14 @@ async function handleDeleteAgentRequest(
 
   const containerService = new ThreadContainerService();
   try {
-    for (const threadContainer of threadContainers) {
-      await containerService.forceRemoveContainer(threadContainer.runtimeContainer);
-      await containerService.forceRemoveContainer(threadContainer.dindContainer);
+    for (const threadResource of threadResources) {
+      await containerService.forceRemoveContainer(threadResource.runtimeContainer);
+      await containerService.forceRemoveContainer(threadResource.dindContainer);
+      removeWorkspaceDirectory(threadResource.workspace);
     }
+    removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete containers for agent '${request.agentId}': ${toErrorMessage(error)}`);
+    await sendRequestError(commandChannel, `Failed to delete resources for agent '${request.agentId}': ${toErrorMessage(error)}`);
     return;
   }
 
@@ -385,6 +398,7 @@ async function handleDeleteThreadRequest(
         id: string;
         runtimeContainer: string;
         dindContainer: string;
+        workspace: string;
       }
     | undefined;
 
@@ -394,6 +408,7 @@ async function handleDeleteThreadRequest(
         id: threads.id,
         runtimeContainer: threads.runtimeContainer,
         dindContainer: threads.dindContainer,
+        workspace: threads.workspace,
       })
       .from(threads)
       .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
@@ -414,8 +429,9 @@ async function handleDeleteThreadRequest(
   try {
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
     await containerService.forceRemoveContainer(existingThread.dindContainer);
+    removeWorkspaceDirectory(existingThread.workspace);
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete containers for thread '${request.threadId}': ${toErrorMessage(error)}`);
+    await sendRequestError(commandChannel, `Failed to delete resources for thread '${request.threadId}': ${toErrorMessage(error)}`);
     return;
   }
 

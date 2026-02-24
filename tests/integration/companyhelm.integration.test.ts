@@ -666,6 +666,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     let dindContainerPresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
     let expectedThreadWorkspacePath: string | null = null;
+    let expectedAgentWorkspacePath: string | null = null;
     let threadWorkspacePresentAtReady: boolean | null = null;
 
     const started = await startFakeServer("/grpc", {
@@ -733,6 +734,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
               "agent-for-lifecycle",
               createdThreadId,
             );
+            expectedAgentWorkspacePath = expectedThreadWorkspacePath ? path.dirname(expectedThreadWorkspacePath) : null;
             threadWorkspacePresentAtReady = threadWorkspacePath ? existsSync(threadWorkspacePath) : false;
 
             sentDeleteThreadRequest = true;
@@ -845,7 +847,12 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     assert.equal(createOptions.mounts[0]?.Target, "/workspace");
     assert.equal(createOptions.mounts[0]?.Source, threadWorkspacePath);
     assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include agent/thread segmentation");
-    assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, true, "expected thread workspace directory to remain on disk");
+    assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
+    assert.equal(
+      expectedAgentWorkspacePath ? existsSync(expectedAgentWorkspacePath) : false,
+      false,
+      "expected agent workspace directory to be removed",
+    );
 
     const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
     assert.deepEqual(removedContainerNames, [
@@ -887,6 +894,9 @@ test(
     let dindContainerAbsentAfterDelete: boolean | null = null;
     let workspacePathAtReady: string | null = null;
     let workspaceExistsAtReady: boolean | null = null;
+    let workspaceAbsentAfterThreadDelete: boolean | null = null;
+    let agentWorkspacePathAtReady: string | null = null;
+    let agentWorkspaceExistsAfterAgentDelete: boolean | null = null;
     let receivedRequestError: any = null;
     let receivedDeleteAgentUpdate = false;
     let channelHandlerError: Error | null = null;
@@ -994,6 +1004,8 @@ test(
                   runtimeContainerAbsentAfterDelete = !(await containerExists(docker, names.runtime));
                   dindContainerAbsentAfterDelete = !(await containerExists(docker, names.dind));
                 }
+                workspaceAbsentAfterThreadDelete = workspacePathAtReady ? !existsSync(workspacePathAtReady) : false;
+                agentWorkspacePathAtReady = workspacePathAtReady ? path.dirname(workspacePathAtReady) : null;
 
                 sentDeleteAgentRequest = true;
                 call.write(
@@ -1014,6 +1026,7 @@ test(
                 message.payload.value.agentId === "agent-real-docker" &&
                 message.payload.value.status === AgentStatus.DELETED
               ) {
+                agentWorkspaceExistsAfterAgentDelete = agentWorkspacePathAtReady ? existsSync(agentWorkspacePathAtReady) : false;
                 receivedDeleteAgentUpdate = true;
                 call.end();
               }
@@ -1038,6 +1051,7 @@ test(
       assert.equal(runtimeContainerRunningAtReady, true, "expected runtime container to be running when thread is ready");
       assert.equal(dindContainerRunningAtReady, true, "expected dind container to be running when thread is ready");
       assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
+      assert.equal(workspaceAbsentAfterThreadDelete, true, "expected thread workspace directory to be removed on deleteThreadRequest");
       assert.equal(
         workspacePathAtReady,
         threadLifecycle.resolveThreadDirectory(
@@ -1050,6 +1064,7 @@ test(
       );
       assert.equal(runtimeContainerAbsentAfterDelete, true, "expected runtime container to be removed after deleteThreadRequest");
       assert.equal(dindContainerAbsentAfterDelete, true, "expected dind container to be removed after deleteThreadRequest");
+      assert.equal(agentWorkspaceExistsAfterAgentDelete, false, "expected agent workspace directory to be removed on deleteAgentRequest");
     } finally {
       if (createdThreadId) {
         const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
