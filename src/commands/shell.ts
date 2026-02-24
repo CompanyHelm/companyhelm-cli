@@ -18,6 +18,7 @@ import * as grpc from "@grpc/grpc-js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { resolve } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
+import { runThreadDockerCommand } from "./thread/docker.js";
 import { createAgentRunnerControlServiceDefinition } from "../service/companyhelm_api_client.js";
 import { initDb } from "../state/db.js";
 import { agentSdks, agents, threads } from "../state/schema.js";
@@ -31,7 +32,7 @@ const USER_MESSAGE_START_TIMEOUT_MS = 120_000;
 const USER_MESSAGE_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
 
-type ShellMainAction = "grpc" | "db" | "show-state" | "show-daemon-logs" | "exit";
+type ShellMainAction = "grpc" | "db" | "thread-docker-shell" | "show-state" | "show-daemon-logs" | "exit";
 
 type GrpcAction =
   | "create-agent"
@@ -467,6 +468,7 @@ async function promptMainAction(): Promise<ShellMainAction | null> {
     options: [
       { value: "grpc", label: "(grpc) Commands" },
       { value: "db", label: "(db) Commands" },
+      { value: "thread-docker-shell", label: "Thread docker shell (bash)" },
       { value: "show-state", label: "Show state" },
       { value: "show-daemon-logs", label: "Show daemon logs" },
       { value: "exit", label: "Exit shell" },
@@ -637,6 +639,45 @@ async function promptAndRunGrpcAction(
   await handleGrpcAction(grpcAction, controlPlane, state, availableSdks, modelsBySdk);
 }
 
+async function handleThreadDockerShell(state: ShellState): Promise<void> {
+  const knownAgents = [...state.agentSdkById.keys()].sort();
+  if (knownAgents.length === 0) {
+    p.log.warn("No known agents. Create an agent first.");
+    return;
+  }
+
+  const selectedAgentId = await p.select<string>({
+    message: "Select agent",
+    options: knownAgents.map((agentId) => ({ value: agentId, label: agentId })),
+  });
+  if (p.isCancel(selectedAgentId)) {
+    return;
+  }
+
+  const knownThreadsForAgent = [...state.threadAgentById.entries()]
+    .filter(([, agentId]) => agentId === selectedAgentId)
+    .map(([threadId]) => threadId)
+    .sort((a, b) => a.localeCompare(b));
+
+  if (knownThreadsForAgent.length === 0) {
+    p.log.warn(`No known threads for agent '${selectedAgentId}'. Create a thread first.`);
+    return;
+  }
+
+  const selectedThreadId = await p.select<string>({
+    message: "Select thread",
+    options: knownThreadsForAgent.map((threadId) => ({ value: threadId, label: threadId })),
+  });
+  if (p.isCancel(selectedThreadId)) {
+    return;
+  }
+
+  await runThreadDockerCommand({
+    agentId: selectedAgentId,
+    threadId: selectedThreadId,
+  });
+}
+
 async function runShellLoop(
   cfg: Config,
   controlPlane: ProtoShellControlPlane,
@@ -663,6 +704,11 @@ async function runShellLoop(
 
       if (mainAction === "db") {
         await promptAndRunDbAction(cfg);
+        continue;
+      }
+
+      if (mainAction === "thread-docker-shell") {
+        await handleThreadDockerShell(state);
         continue;
       }
 
