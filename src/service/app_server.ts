@@ -11,8 +11,11 @@ import type { TurnStartResponse } from "../generated/codex-app-server/v2/TurnSta
 import type { TurnSteerParams } from "../generated/codex-app-server/v2/TurnSteerParams.js";
 import type { TurnSteerResponse } from "../generated/codex-app-server/v2/TurnSteerResponse.js";
 import { AsyncQueue } from "../utils/async_queue.js";
+import type { Logger } from "../utils/logger.js";
 
 type JsonObject = { [key: string]: unknown };
+type AppServerLogger = Pick<Logger, "debug">;
+const NOOP_APP_SERVER_LOGGER: AppServerLogger = { debug: () => undefined };
 
 interface PendingRequest {
   resolve: (result: unknown) => void;
@@ -125,6 +128,7 @@ function hasMessageShape(value: unknown): value is JsonObject {
 export class AppServerService {
   private readonly transport: AppServerTransport;
   private readonly clientName: string;
+  private readonly logger: AppServerLogger;
   private stream: AsyncGenerator<AppServerTransportEvent, void, void> | null = null;
   private pumpTask: Promise<void> | null = null;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
@@ -135,9 +139,10 @@ export class AppServerService {
   private stdoutBuffer = Buffer.alloc(0);
   private framing: "unknown" | "content-length" | "newline" = "unknown";
 
-  constructor(transport: AppServerTransport, clientName: string) {
+  constructor(transport: AppServerTransport, clientName: string, logger?: AppServerLogger) {
     this.transport = transport;
     this.clientName = clientName;
+    this.logger = logger ?? NOOP_APP_SERVER_LOGGER;
   }
 
   async start(): Promise<void> {
@@ -294,7 +299,9 @@ export class AppServerService {
   }
 
   private async sendMessage(message: AppServerOutgoingMessage): Promise<void> {
-    await this.transport.sendRaw(`${JSON.stringify(message)}\n`);
+    const payload = JSON.stringify(message);
+    this.logger.debug(`[app-server][outgoing] ${payload}`);
+    await this.transport.sendRaw(`${payload}\n`);
   }
 
   private async pumpMessages(): Promise<void> {
@@ -419,6 +426,7 @@ export class AppServerService {
     if (!payload.trim()) {
       return;
     }
+    this.logger.debug(`[app-server][incoming] ${payload}`);
 
     let parsed: unknown;
     try {

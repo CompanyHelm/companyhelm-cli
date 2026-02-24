@@ -3,11 +3,13 @@ import { config as configSchema, type Config } from "../../config.js";
 import type { Model as AppServerModel } from "../../generated/codex-app-server/v2/Model.js";
 import { initDb } from "../../state/db.js";
 import { agentSdks, llmModels } from "../../state/schema.js";
+import type { Logger } from "../../utils/logger.js";
 import { AppServerService } from "../app_server.js";
 import { AppServerContainerService } from "../docker/app_server_container.js";
 
 export interface RefreshModelsOptions {
   sdk?: string;
+  logger?: Pick<Logger, "debug">;
 }
 
 export interface RefreshModelsResult {
@@ -15,9 +17,9 @@ export interface RefreshModelsResult {
   modelCount: number;
 }
 
-async function fetchCodexModelsFromAppServer(clientName: string): Promise<AppServerModel[]> {
+async function fetchCodexModelsFromAppServer(clientName: string, logger?: Pick<Logger, "debug">): Promise<AppServerModel[]> {
   const transport = new AppServerContainerService();
-  const appServer = new AppServerService(transport, clientName);
+  const appServer = new AppServerService(transport, clientName, logger);
   await appServer.start();
 
   const models: AppServerModel[] = [];
@@ -40,8 +42,8 @@ async function fetchCodexModelsFromAppServer(clientName: string): Promise<AppSer
   return models;
 }
 
-async function refreshCodexModels(cfg: Config): Promise<number> {
-  const models = await fetchCodexModelsFromAppServer(cfg.codex.app_server_client_name);
+async function refreshCodexModels(cfg: Config, logger?: Pick<Logger, "debug">): Promise<number> {
+  const models = await fetchCodexModelsFromAppServer(cfg.codex.app_server_client_name, logger);
   const { db, client } = await initDb(cfg.state_db_path);
 
   try {
@@ -96,7 +98,7 @@ export async function refreshSdkModels(options?: RefreshModelsOptions): Promise<
       throw new Error(`SDK '${sdk.name}' is not supported by model refresh yet.`);
     }
 
-    const modelCount = await refreshCodexModels(cfg);
+    const modelCount = await refreshCodexModels(cfg, options?.logger);
     results.push({ sdk: sdk.name, modelCount });
   }
 

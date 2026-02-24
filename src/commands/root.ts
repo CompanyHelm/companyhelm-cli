@@ -98,6 +98,7 @@ async function getOrCreateThreadAppServerSession(
   threadId: string,
   runtimeContainer: string,
   clientName: string,
+  logger: Logger,
 ): Promise<ThreadAppServerSession> {
   const existingSession = threadAppServerSessions.get(threadId);
   if (existingSession && existingSession.runtimeContainer === runtimeContainer) {
@@ -108,7 +109,7 @@ async function getOrCreateThreadAppServerSession(
     await stopThreadAppServerSession(threadId);
   }
 
-  const appServer = new AppServerService(new RuntimeContainerAppServerTransport(runtimeContainer), clientName);
+  const appServer = new AppServerService(new RuntimeContainerAppServerTransport(runtimeContainer), clientName, logger);
   const newSession: ThreadAppServerSession = {
     runtimeContainer,
     appServer,
@@ -493,7 +494,7 @@ async function clearSdkModels(cfg: Config, sdkName: string): Promise<void> {
 
 async function refreshCodexModelsForRegistration(cfg: Config, logger: Logger): Promise<void> {
   try {
-    const results = await refreshSdkModels({ sdk: "codex" });
+    const results = await refreshSdkModels({ sdk: "codex", logger });
     const modelCount = results[0]?.modelCount ?? 0;
     logger.info(`Refreshed Codex models from container app-server (${modelCount} models).`);
   } catch (error: unknown) {
@@ -839,6 +840,7 @@ async function handleInterruptTurnRequest(
     request.threadId,
     threadState.runtimeContainer,
     cfg.codex.app_server_client_name,
+    logger,
   );
 
   try {
@@ -944,6 +946,7 @@ async function executeCreateUserMessageRequest(
     request.threadId,
     threadState.runtimeContainer,
     cfg.codex.app_server_client_name,
+    logger,
   );
   const appServer = appServerSession.appServer;
 
