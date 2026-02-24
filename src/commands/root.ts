@@ -29,6 +29,7 @@ import {
   type CompanyhelmCommandChannel,
 } from "../service/companyhelm_api_client.js";
 import { getHostInfo } from "../service/host.js";
+import { refreshSdkModels } from "../service/sdk/refresh_models.js";
 import { AppServerService } from "../service/app_server.js";
 import { RuntimeContainerAppServerTransport } from "../service/docker/runtime_app_server_exec.js";
 import { ensureThreadRuntimeReady } from "../service/thread_runtime.js";
@@ -469,6 +470,29 @@ async function hasConfiguredSdks(cfg: Config): Promise<boolean> {
     return configuredSdks.length > 0;
   } finally {
     client.close();
+  }
+}
+
+async function clearSdkModels(cfg: Config, sdkName: string): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    await db.delete(llmModels).where(eq(llmModels.sdkName, sdkName));
+  } finally {
+    client.close();
+  }
+}
+
+async function refreshCodexModelsForRegistration(cfg: Config, logger: Logger): Promise<void> {
+  try {
+    const results = await refreshSdkModels({ sdk: "codex" });
+    const modelCount = results[0]?.modelCount ?? 0;
+    logger.info(`Refreshed Codex models from container app-server (${modelCount} models).`);
+  } catch (error: unknown) {
+    logger.warn(
+      `Failed to refresh Codex models from container app-server: ${toErrorMessage(error)}. ` +
+        "Registering runner with an empty Codex model list.",
+    );
+    await clearSdkModels(cfg, "codex");
   }
 }
 
@@ -1190,6 +1214,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     await startup();
   }
 
+  await refreshCodexModelsForRegistration(cfg, logger);
   const registerRequest = await buildRegisterRunnerRequest(cfg);
   const apiCallOptions = buildGrpcAuthCallOptions(options.secret);
   let lastError: Error | null = null;

@@ -123,7 +123,12 @@ function reserveFreePort(): Promise<number> {
   });
 }
 
-async function seedStateDatabase(homeDirectory: string): Promise<void> {
+interface SeedStateDatabaseOptions {
+  modelName?: string;
+  reasoningLevels?: string[];
+}
+
+async function seedStateDatabase(homeDirectory: string, options?: SeedStateDatabaseOptions): Promise<void> {
   const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
   const { db, client } = await initDb(stateDbPath);
 
@@ -134,9 +139,9 @@ async function seedStateDatabase(homeDirectory: string): Promise<void> {
     });
 
     await db.insert(llmModels).values({
-      name: "gpt-5.3-codex",
+      name: options?.modelName ?? "gpt-5.3-codex",
       sdkName: "codex",
-      reasoningLevels: ["high"],
+      reasoningLevels: options?.reasoningLevels ?? ["high"],
     });
   } finally {
     client.close();
@@ -440,9 +445,10 @@ test("initDb reconciles legacy threads.sdk_id column to sdk_thread_id", async ()
 test("companyhelm root command connects to API and triggers registration flow", async () => {
   const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
   let server: grpc.Server | undefined;
+  const staleModelName = "hardcoded-stale-model";
 
   try {
-    await seedStateDatabase(homeDirectory);
+    await seedStateDatabase(homeDirectory, { modelName: staleModelName, reasoningLevels: ["high"] });
 
     let registerRequest: any = null;
     let controlChannelOpened = false;
@@ -480,8 +486,13 @@ test("companyhelm root command connects to API and triggers registration flow", 
     assert.equal(controlChannelOpened, true);
     assert.equal(channelOpenedBeforeRegister, false);
     assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
-    assert.equal(registerRequest?.agentSdks?.[0]?.models?.[0]?.name, "gpt-5.3-codex");
-    assert.deepEqual(registerRequest?.agentSdks?.[0]?.models?.[0]?.reasoning, ["high"]);
+    const codexModels = registerRequest?.agentSdks?.[0]?.models ?? [];
+    assert.ok(Array.isArray(codexModels));
+    assert.equal(
+      codexModels.some((model: { name: string }) => model.name === staleModelName),
+      false,
+      "runner registration should not reuse stale hardcoded models from local state",
+    );
   } finally {
     if (server) {
       await shutdownServer(server);
