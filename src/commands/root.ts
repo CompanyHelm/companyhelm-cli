@@ -1,10 +1,14 @@
 import { create } from "@bufbuild/protobuf";
 import {
   AgentStatus,
+  ItemStatus,
+  ItemType,
   ClientMessageSchema,
   ThreadStatus,
+  TurnStatus,
   type CreateAgentRequest,
   type CreateThreadRequest,
+  type CreateUserMessageRequest,
   type DeleteAgentRequest,
   type DeleteThreadRequest,
   type RegisterRunnerRequest,
@@ -19,6 +23,8 @@ import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
 import { CompanyhelmApiClient, type CompanyhelmCommandChannel } from "../service/companyhelm_api_client.js";
 import { getHostInfo } from "../service/host.js";
+import { AppServerService } from "../service/app_server.js";
+import { RuntimeContainerAppServerTransport } from "../service/docker/runtime_app_server_exec.js";
 import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
@@ -27,6 +33,14 @@ import {
   ThreadContainerService,
   type ThreadAuthMode,
 } from "../service/thread_lifecycle.js";
+import type { ReasoningEffort } from "../generated/codex-app-server/ReasoningEffort.js";
+import type { ServerNotification } from "../generated/codex-app-server/ServerNotification.js";
+import type { ThreadItem } from "../generated/codex-app-server/v2/ThreadItem.js";
+import type { ThreadResumeParams } from "../generated/codex-app-server/v2/ThreadResumeParams.js";
+import type { ThreadStartParams } from "../generated/codex-app-server/v2/ThreadStartParams.js";
+import type { TurnStartParams } from "../generated/codex-app-server/v2/TurnStartParams.js";
+import type { TurnSteerParams } from "../generated/codex-app-server/v2/TurnSteerParams.js";
+import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
@@ -40,6 +54,16 @@ interface RootCommandOptions {
 const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
+const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
+
+const SUPPORTED_REASONING_EFFORTS = new Set<ReasoningEffort>([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+]);
 
 function normalizeReasoningLevels(value: unknown): string[] {
   if (Array.isArray(value)) {
@@ -62,6 +86,81 @@ function normalizeReasoningLevels(value: unknown): string[] {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeReasoningEffort(value: string | undefined): ReasoningEffort | null {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase() as ReasoningEffort;
+  if (!SUPPORTED_REASONING_EFFORTS.has(normalized)) {
+    return null;
+  }
+  return normalized;
+}
+
+function buildUserTextInput(text: string): UserInput[] {
+  return [
+    {
+      type: "text",
+      text,
+      text_elements: [],
+    },
+  ];
+}
+
+function mapThreadItemType(item: ThreadItem): ItemType {
+  switch (item.type) {
+    case "userMessage":
+      return ItemType.USER_MESSAGE;
+    case "agentMessage":
+      return ItemType.AGENT_MESSAGE;
+    case "reasoning":
+      return ItemType.REASONING;
+    case "commandExecution":
+      return ItemType.COMMAND_EXECUTION;
+    default:
+      return ItemType.ITEM_TYPE_UNKNOWN;
+  }
+}
+
+function summarizeThreadItemText(item: ThreadItem): string | undefined {
+  switch (item.type) {
+    case "userMessage":
+      return item.content
+        .filter((input): input is Extract<UserInput, { type: "text" }> => input.type === "text")
+        .map((input) => input.text)
+        .join("\n");
+    case "agentMessage":
+      return item.text;
+    case "reasoning":
+      return item.summary.join("\n");
+    case "commandExecution":
+      return item.aggregatedOutput ?? undefined;
+    default:
+      return undefined;
+  }
+}
+
+function buildCommandExecutionItem(item: ThreadItem):
+  | {
+      command: string;
+      cwd: string;
+      processId: string;
+      output?: string;
+    }
+  | undefined {
+  if (item.type !== "commandExecution") {
+    return undefined;
+  }
+
+  return {
+    command: item.command,
+    cwd: item.cwd,
+    processId: item.processId ?? "unknown",
+    output: item.aggregatedOutput ?? undefined,
+  };
 }
 
 function removeWorkspaceDirectory(workspacePath: string): void {
@@ -115,6 +214,46 @@ async function sendThreadUpdate(
         value: {
           threadId,
           status,
+        },
+      },
+    }),
+  );
+}
+
+async function sendTurnExecutionUpdate(
+  commandChannel: CompanyhelmCommandChannel,
+  sdkTurnId: string,
+  status: TurnStatus,
+): Promise<void> {
+  await commandChannel.send(
+    create(ClientMessageSchema, {
+      payload: {
+        case: "turnUpdate",
+        value: {
+          sdkTurnId,
+          status,
+        },
+      },
+    }),
+  );
+}
+
+async function sendItemExecutionUpdate(
+  commandChannel: CompanyhelmCommandChannel,
+  sdkItemId: string,
+  status: ItemStatus,
+  item: ThreadItem,
+): Promise<void> {
+  await commandChannel.send(
+    create(ClientMessageSchema, {
+      payload: {
+        case: "itemUpdate",
+        value: {
+          sdkItemId,
+          status,
+          itemType: mapThreadItemType(item),
+          text: summarizeThreadItemText(item),
+          commandExecutionItem: buildCommandExecutionItem(item),
         },
       },
     }),
@@ -254,8 +393,8 @@ async function handleCreateThreadRequest(
       model: request.model,
       reasoningLevel: request.reasoningLevel ?? "",
       status: "pending",
-      current_sdk_turn_id: null,
-      is_current_turn_running: false,
+      currentSdkTurnId: null,
+      isCurrentTurnRunning: false,
       workspace: threadDirectory,
       runtimeContainer: containerNames.runtime,
       dindContainer: containerNames.dind,
@@ -450,6 +589,287 @@ async function handleDeleteThreadRequest(
   await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
 }
 
+interface ThreadMessageExecutionState {
+  id: string;
+  agentId: string;
+  sdkThreadId: string | null;
+  model: string;
+  reasoningLevel: string;
+  currentSdkTurnId: string | null;
+  isCurrentTurnRunning: boolean;
+  runtimeContainer: string;
+  dindContainer: string;
+}
+
+interface ThreadTurnStateUpdate {
+  sdkThreadId?: string | null;
+  currentSdkTurnId?: string | null;
+  isCurrentTurnRunning?: boolean;
+}
+
+async function updateThreadTurnState(
+  cfg: Config,
+  agentId: string,
+  threadId: string,
+  update: ThreadTurnStateUpdate,
+): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    await db
+      .update(threads)
+      .set(update)
+      .where(and(eq(threads.id, threadId), eq(threads.agentId, agentId)));
+  } finally {
+    client.close();
+  }
+}
+
+async function waitForThreadTurnCompletion(
+  appServer: AppServerService,
+  commandChannel: CompanyhelmCommandChannel,
+  sdkThreadId: string,
+  sdkTurnId: string,
+): Promise<"completed" | "interrupted" | "failed"> {
+  return appServer.waitForTurnCompletion(
+    sdkThreadId,
+    sdkTurnId,
+    async (notification: ServerNotification) => {
+      if (
+        notification.method === "item/started" &&
+        notification.params.threadId === sdkThreadId &&
+        notification.params.turnId === sdkTurnId
+      ) {
+        await sendItemExecutionUpdate(
+          commandChannel,
+          notification.params.item.id,
+          ItemStatus.RUNNING,
+          notification.params.item,
+        );
+      }
+
+      if (
+        notification.method === "item/completed" &&
+        notification.params.threadId === sdkThreadId &&
+        notification.params.turnId === sdkTurnId
+      ) {
+        await sendItemExecutionUpdate(
+          commandChannel,
+          notification.params.item.id,
+          ItemStatus.COMPLETED,
+          notification.params.item,
+        );
+      }
+    },
+    TURN_COMPLETION_TIMEOUT_MS,
+  );
+}
+
+async function executeCreateUserMessageRequest(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  request: CreateUserMessageRequest,
+  threadState: ThreadMessageExecutionState,
+  startedFromIdle: boolean,
+  logger: Logger,
+): Promise<void> {
+  const containerService = new ThreadContainerService();
+  const transport = new RuntimeContainerAppServerTransport(threadState.runtimeContainer);
+  const appServer = new AppServerService(transport, cfg.codex.app_server_client_name);
+
+  let sdkThreadId = threadState.sdkThreadId;
+  let sdkTurnId = threadState.currentSdkTurnId;
+  let turnAccepted = false;
+
+  try {
+    await containerService.ensureContainerRunning(threadState.dindContainer);
+    await containerService.waitForContainerRunning(threadState.dindContainer);
+    await containerService.ensureContainerRunning(threadState.runtimeContainer);
+
+    await appServer.start();
+
+    if (sdkThreadId) {
+      const resumeParams: ThreadResumeParams = {
+        threadId: sdkThreadId,
+        persistExtendedHistory: true,
+      };
+      await appServer.resumeThread(resumeParams);
+    } else {
+      const threadStartParams: ThreadStartParams = {
+        model: request.model ?? threadState.model,
+        modelProvider: null,
+        cwd: "/workspace",
+        approvalPolicy: null,
+        sandbox: null,
+        config: null,
+        baseInstructions: null,
+        developerInstructions: null,
+        personality: null,
+        ephemeral: null,
+        experimentalRawEvents: false,
+        persistExtendedHistory: true,
+      };
+
+      const threadStartResult = await appServer.startThread(threadStartParams);
+      sdkThreadId = threadStartResult.thread.id;
+      await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
+    }
+
+    if (!sdkThreadId) {
+      throw new Error(`Failed to resolve SDK thread id for thread '${request.threadId}'.`);
+    }
+
+    const input = buildUserTextInput(request.text);
+    if (threadState.isCurrentTurnRunning && request.allowSteer) {
+      if (!threadState.currentSdkTurnId) {
+        throw new Error(`Thread '${request.threadId}' is marked running but has no current SDK turn id.`);
+      }
+
+      const steerParams: TurnSteerParams = {
+        threadId: sdkThreadId,
+        input,
+        expectedTurnId: threadState.currentSdkTurnId,
+      };
+      const turnSteerResult = await appServer.steerTurn(steerParams);
+      sdkTurnId = turnSteerResult.turnId;
+    } else {
+      const turnStartParams: TurnStartParams = {
+        threadId: sdkThreadId,
+        input,
+        model: request.model ?? null,
+        effort: normalizeReasoningEffort(request.modelReasoningLevel ?? threadState.reasoningLevel),
+        summary: null,
+        personality: null,
+        cwd: null,
+        approvalPolicy: null,
+        sandboxPolicy: null,
+        outputSchema: null,
+        collaborationMode: null,
+      };
+      const turnStartResult = await appServer.startTurn(turnStartParams);
+      sdkTurnId = turnStartResult.turn.id;
+    }
+
+    if (!sdkTurnId) {
+      throw new Error(`Failed to create SDK turn for thread '${request.threadId}'.`);
+    }
+
+    turnAccepted = true;
+    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+      sdkThreadId,
+      currentSdkTurnId: sdkTurnId,
+      isCurrentTurnRunning: true,
+    });
+    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.RUNNING);
+
+    const terminalStatus = await waitForThreadTurnCompletion(appServer, commandChannel, sdkThreadId, sdkTurnId);
+    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+      currentSdkTurnId: sdkTurnId,
+      isCurrentTurnRunning: false,
+    });
+    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.COMPLETED);
+
+    if (terminalStatus !== "completed") {
+      await sendRequestError(
+        commandChannel,
+        `Turn '${sdkTurnId}' finished with status '${terminalStatus}' for thread '${request.threadId}'.`,
+      );
+    }
+  } catch (error: unknown) {
+    if (startedFromIdle && !turnAccepted) {
+      await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+        isCurrentTurnRunning: false,
+      }).catch(() => undefined);
+    }
+
+    logger.warn(
+      `Failed to create user message turn for thread '${request.threadId}' (agent '${request.agentId}'): ${toErrorMessage(error)}`,
+    );
+    await sendRequestError(commandChannel, toErrorMessage(error));
+  } finally {
+    await appServer.stop().catch(() => undefined);
+  }
+}
+
+async function handleCreateUserMessageRequest(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  request: CreateUserMessageRequest,
+  logger: Logger,
+): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  let threadState: ThreadMessageExecutionState | undefined;
+
+  try {
+    threadState = await db
+      .select({
+        id: threads.id,
+        agentId: threads.agentId,
+        sdkThreadId: threads.sdkThreadId,
+        model: threads.model,
+        reasoningLevel: threads.reasoningLevel,
+        currentSdkTurnId: threads.currentSdkTurnId,
+        isCurrentTurnRunning: threads.isCurrentTurnRunning,
+        runtimeContainer: threads.runtimeContainer,
+        dindContainer: threads.dindContainer,
+      })
+      .from(threads)
+      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
+      .get();
+
+    if (!threadState) {
+      await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+      return;
+    }
+
+    if (!request.allowSteer && threadState.isCurrentTurnRunning) {
+      await sendRequestError(
+        commandChannel,
+        `Thread '${request.threadId}' already has a running turn and allowSteer=false.`,
+      );
+      return;
+    }
+
+    if (threadState.isCurrentTurnRunning && request.allowSteer && !threadState.currentSdkTurnId) {
+      await sendRequestError(
+        commandChannel,
+        `Thread '${request.threadId}' is in an inconsistent state: running turn id is missing.`,
+      );
+      return;
+    }
+  } catch (error: unknown) {
+    await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
+    return;
+  } finally {
+    client.close();
+  }
+
+  if (!threadState) {
+    return;
+  }
+
+  const startedFromIdle = !threadState.isCurrentTurnRunning;
+  if (startedFromIdle) {
+    try {
+      await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+        isCurrentTurnRunning: true,
+      });
+      threadState.isCurrentTurnRunning = true;
+    } catch (error: unknown) {
+      await sendRequestError(commandChannel, `Failed to reserve thread '${request.threadId}' for execution: ${toErrorMessage(error)}`);
+      return;
+    }
+  }
+
+  void executeCreateUserMessageRequest(
+    cfg,
+    commandChannel,
+    request,
+    threadState,
+    startedFromIdle,
+    logger,
+  );
+}
+
 async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandChannel, logger: Logger): Promise<void> {
   for await (const serverMessage of commandChannel) {
     switch (serverMessage.request.case) {
@@ -464,6 +884,11 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
         break;
       case "deleteThreadRequest":
         await handleDeleteThreadRequest(cfg, commandChannel, serverMessage.request.value);
+        break;
+      case "createUserMessageRequest":
+        void handleCreateUserMessageRequest(cfg, commandChannel, serverMessage.request.value, logger).catch((error: unknown) => {
+          logger.warn(`Unhandled createUserMessageRequest error: ${toErrorMessage(error)}`);
+        });
         break;
       default:
         break;

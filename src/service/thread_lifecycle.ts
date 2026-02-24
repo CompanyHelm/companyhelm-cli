@@ -33,6 +33,9 @@ export interface ThreadContainerCreateOptions {
   mounts: MountSettings[];
 }
 
+const CONTAINER_START_TIMEOUT_MS = 30_000;
+const CONTAINER_START_POLL_MS = 500;
+
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
     return containerHome;
@@ -154,6 +157,20 @@ function isContainerNotFound(error: unknown): boolean {
   return /No such container/i.test(message);
 }
 
+function isContainerAlreadyStarted(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+  if (statusCode === 304) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /already started/i.test(message);
+}
+
 function isImageNotFound(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
@@ -240,6 +257,46 @@ export class ThreadContainerService {
       await this.forceRemoveContainer(options.names.dind);
       throw new Error(toErrorMessage(error));
     }
+  }
+
+  async startContainer(name: string): Promise<void> {
+    const container = this.docker.getContainer(name);
+    try {
+      await container.start();
+    } catch (error: unknown) {
+      if (isContainerAlreadyStarted(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async waitForContainerRunning(name: string, timeoutMs = CONTAINER_START_TIMEOUT_MS): Promise<void> {
+    const container = this.docker.getContainer(name);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const details = await container.inspect();
+      const state = details.State;
+      if (state?.Running) {
+        return;
+      }
+
+      if (state?.Status === "exited" || state?.Status === "dead") {
+        throw new Error(
+          `Container '${name}' is not running (status=${state.Status}, exitCode=${state.ExitCode ?? "unknown"}).`,
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, CONTAINER_START_POLL_MS));
+    }
+
+    throw new Error(`Container '${name}' did not reach running state within ${timeoutMs}ms.`);
+  }
+
+  async ensureContainerRunning(name: string, timeoutMs = CONTAINER_START_TIMEOUT_MS): Promise<void> {
+    await this.startContainer(name);
+    await this.waitForContainerRunning(name, timeoutMs);
   }
 
   async forceRemoveContainer(name: string): Promise<void> {

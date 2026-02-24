@@ -1,5 +1,13 @@
 import type { ClientRequest, RequestId, ServerNotification, ServerRequest } from "../generated/codex-app-server/index.js";
 import type { ModelListResponse } from "../generated/codex-app-server/v2/ModelListResponse.js";
+import type { ThreadResumeParams } from "../generated/codex-app-server/v2/ThreadResumeParams.js";
+import type { ThreadResumeResponse } from "../generated/codex-app-server/v2/ThreadResumeResponse.js";
+import type { ThreadStartParams } from "../generated/codex-app-server/v2/ThreadStartParams.js";
+import type { ThreadStartResponse } from "../generated/codex-app-server/v2/ThreadStartResponse.js";
+import type { TurnStartParams } from "../generated/codex-app-server/v2/TurnStartParams.js";
+import type { TurnStartResponse } from "../generated/codex-app-server/v2/TurnStartResponse.js";
+import type { TurnSteerParams } from "../generated/codex-app-server/v2/TurnSteerParams.js";
+import type { TurnSteerResponse } from "../generated/codex-app-server/v2/TurnSteerResponse.js";
 import { AsyncQueue } from "../utils/async_queue.js";
 
 type JsonObject = { [key: string]: unknown };
@@ -65,6 +73,15 @@ function isResponseMessage(message: AppServerIncomingMessage): message is AppSer
     "id" in message &&
     !("method" in message) &&
     !("type" in message)
+  );
+}
+
+function isServerNotificationMessage(message: AppServerIncomingMessage): message is ServerNotification {
+  return (
+    typeof message === "object" &&
+    message !== null &&
+    "method" in message &&
+    "params" in message
   );
 }
 
@@ -139,6 +156,87 @@ export class AppServerService {
       throw new Error("app-server returned an invalid model/list payload");
     }
     return result;
+  }
+
+  async startThread(params: ThreadStartParams): Promise<ThreadStartResponse> {
+    return this.request("thread/start", params, 15_000) as Promise<ThreadStartResponse>;
+  }
+
+  async resumeThread(params: ThreadResumeParams): Promise<ThreadResumeResponse> {
+    return this.request("thread/resume", params, 15_000) as Promise<ThreadResumeResponse>;
+  }
+
+  async startTurn(params: TurnStartParams): Promise<TurnStartResponse> {
+    return this.request("turn/start", params, 15_000) as Promise<TurnStartResponse>;
+  }
+
+  async steerTurn(params: TurnSteerParams): Promise<TurnSteerResponse> {
+    return this.request("turn/steer", params, 15_000) as Promise<TurnSteerResponse>;
+  }
+
+  async waitForTurnCompletion(
+    threadId: string,
+    turnId: string,
+    onNotification?: (notification: ServerNotification) => Promise<void> | void,
+    timeoutMs = 2 * 60 * 60_000,
+  ): Promise<"completed" | "interrupted" | "failed"> {
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const remaining = Math.max(1, deadline - Date.now());
+      const message = await this.popMessageWithTimeout(remaining);
+
+      if (!message) {
+        break;
+      }
+
+      if (hasTag(message)) {
+        if (message.type === "parse_error") {
+          throw new Error(`Failed to parse app-server message: ${message.reason}`);
+        }
+
+        if (message.type === "stderr") {
+          const trimmed = message.payload.trim();
+          if (trimmed.length > 0) {
+            this.stderrLines.push(trimmed);
+          }
+        }
+        continue;
+      }
+
+      if (isResponseMessage(message)) {
+        continue;
+      }
+
+      if (!isServerNotificationMessage(message)) {
+        continue;
+      }
+
+      if (onNotification) {
+        await onNotification(message);
+      }
+
+      if (
+        message.method === "error" &&
+        message.params.threadId === threadId &&
+        message.params.turnId === turnId
+      ) {
+        throw new Error(message.params.error.message);
+      }
+
+      if (
+        message.method === "turn/completed" &&
+        message.params.threadId === threadId &&
+        message.params.turn.id === turnId
+      ) {
+        const status = message.params.turn.status;
+        if (status === "completed" || status === "interrupted" || status === "failed") {
+          return status;
+        }
+      }
+    }
+
+    throw new AppServerTimeoutError(`Timed out waiting for completion of turn '${turnId}' in thread '${threadId}'.`);
   }
 
   private async initialize(): Promise<void> {
