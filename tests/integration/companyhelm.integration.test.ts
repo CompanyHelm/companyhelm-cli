@@ -1107,6 +1107,9 @@ test(
     const waitForContainerRunningSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerIdentitySpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+      .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
       .mockImplementation(async () => undefined);
@@ -1282,10 +1285,9 @@ test(
       assert.ok(createdThreadId, "expected thread id for user message flow");
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
       assert.equal(startThreadSpy.mock.calls.length, 1, "expected first user message to create sdk thread");
-      assert.equal(resumeThreadSpy.mock.calls.length, 1, "expected second user message to resume sdk thread");
-      assert.equal(resumeThreadSpy.mock.calls[0][0]?.path, rolloutPath, "expected resume to use persisted rollout path");
-      assert.equal(appServerStartSpy.mock.calls.length, 2, "expected app-server to start for each message");
-      assert.equal(appServerStopSpy.mock.calls.length, 2, "expected app-server to stop for each message");
+      assert.equal(resumeThreadSpy.mock.calls.length, 0, "expected warm app-server session to avoid resume calls");
+      assert.equal(appServerStartSpy.mock.calls.length, 1, "expected app-server to stay warm across both messages");
+      assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server to stop during daemon shutdown");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
       assert.equal(waitForTurnCompletionSpy.mock.calls.length, 2, "expected turn completion wait per user message");
       assert.equal(completedAgentResponses.length, 2, "expected one completed agent response item per user message");
@@ -1303,18 +1305,15 @@ test(
       const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
       const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
       const stoppedContainerNames = stopContainerSpy.mock.calls.map((call) => call[0]);
-      assert.deepEqual(stoppedContainerNames, [
-        expectedRuntimeContainer,
-        expectedDindContainer,
-        expectedRuntimeContainer,
-        expectedDindContainer,
-      ]);
+      assert.deepEqual(stoppedContainerNames, [expectedRuntimeContainer, expectedDindContainer]);
       assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
       assert.equal(waitForContainerRunningSpy.mock.calls.length, 2, "expected dind running wait on each message");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
     } finally {
       createThreadContainersSpy.mockRestore();
       ensureContainerRunningSpy.mockRestore();
       waitForContainerRunningSpy.mockRestore();
+      ensureRuntimeContainerIdentitySpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();

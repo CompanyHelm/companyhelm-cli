@@ -131,6 +131,32 @@ async function stopAllThreadAppServerSessions(): Promise<void> {
   }
 }
 
+async function stopAllThreadContainers(cfg: Config, logger: Logger): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  let containers: Array<{ runtimeContainer: string; dindContainer: string }> = [];
+  try {
+    containers = await db
+      .select({
+        runtimeContainer: threads.runtimeContainer,
+        dindContainer: threads.dindContainer,
+      })
+      .from(threads)
+      .all();
+  } finally {
+    client.close();
+  }
+
+  const containerService = new ThreadContainerService();
+  for (const container of containers) {
+    await containerService.stopContainer(container.runtimeContainer).catch((error: unknown) => {
+      logger.warn(`Failed to stop runtime container '${container.runtimeContainer}': ${toErrorMessage(error)}`);
+    });
+    await containerService.stopContainer(container.dindContainer).catch((error: unknown) => {
+      logger.warn(`Failed to stop DinD container '${container.dindContainer}': ${toErrorMessage(error)}`);
+    });
+  }
+}
+
 const SUPPORTED_REASONING_EFFORTS = new Set<ReasoningEffort>([
   "none",
   "minimal",
@@ -766,6 +792,7 @@ async function executeCreateUserMessageRequest(
   let sdkThreadId = threadState.sdkThreadId;
   let sdkTurnId = threadState.currentSdkTurnId;
   let turnAccepted = false;
+  let keepRuntimeWarm = false;
 
   try {
     await containerService.ensureContainerRunning(threadState.dindContainer);
@@ -784,7 +811,6 @@ async function executeCreateUserMessageRequest(
       if (appServerSession.sdkThreadId !== sdkThreadId) {
         const resumeParams: ThreadResumeParams = {
           threadId: sdkThreadId,
-          path: appServerSession.rolloutPath,
           persistExtendedHistory: true,
         };
         const resumeResult = await appServer.resumeThread(resumeParams);
@@ -878,6 +904,9 @@ async function executeCreateUserMessageRequest(
         commandChannel,
         `Turn '${sdkTurnId}' finished with status '${terminalStatus}' for thread '${request.threadId}'.`,
       );
+    } else {
+      // Keep app-server + containers warm for fast follow-up user messages on the same thread.
+      keepRuntimeWarm = true;
     }
   } catch (error: unknown) {
     if (startedFromIdle && !turnAccepted) {
@@ -891,13 +920,15 @@ async function executeCreateUserMessageRequest(
     );
     await sendRequestError(commandChannel, toErrorMessage(error));
   } finally {
-    await stopThreadAppServerSession(request.threadId);
-    await containerService.stopContainer(threadState.runtimeContainer).catch((error: unknown) => {
-      logger.warn(`Failed to stop runtime container '${threadState.runtimeContainer}': ${toErrorMessage(error)}`);
-    });
-    await containerService.stopContainer(threadState.dindContainer).catch((error: unknown) => {
-      logger.warn(`Failed to stop DinD container '${threadState.dindContainer}': ${toErrorMessage(error)}`);
-    });
+    if (!keepRuntimeWarm) {
+      await stopThreadAppServerSession(request.threadId);
+      await containerService.stopContainer(threadState.runtimeContainer).catch((error: unknown) => {
+        logger.warn(`Failed to stop runtime container '${threadState.runtimeContainer}': ${toErrorMessage(error)}`);
+      });
+      await containerService.stopContainer(threadState.dindContainer).catch((error: unknown) => {
+        logger.warn(`Failed to stop DinD container '${threadState.dindContainer}': ${toErrorMessage(error)}`);
+      });
+    }
   }
 }
 
@@ -1054,6 +1085,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     );
   } finally {
     await stopAllThreadAppServerSessions();
+    await stopAllThreadContainers(cfg, logger);
   }
 }
 

@@ -29,9 +29,8 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
   - Starts DinD, waits until running.
   - Starts runtime.
   - Starts app-server in runtime and executes turn.
-- Turn completion:
-  - Stops app-server gracefully.
-  - Stops runtime and DinD containers.
+  - On successful completion, keeps app-server and containers warm so the next message on the same thread can continue without rehydration.
+  - On failure, stops app-server/runtime/DinD for recovery.
 - `deleteThreadRequest`:
   - Stops/cleans session state.
   - Removes both containers.
@@ -39,6 +38,8 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
 - `deleteAgentRequest`:
   - Deletes all thread containers/workspaces for that agent.
   - Removes the agent workspace directory.
+- Daemon shutdown:
+  - Stops all active app-server sessions and running thread containers.
 
 ## Identity
 
