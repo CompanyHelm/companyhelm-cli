@@ -865,6 +865,14 @@ async function executeCreateUserMessageRequest(
       `Failed to create user message turn for thread '${request.threadId}' (agent '${request.agentId}'): ${toErrorMessage(error)}`,
     );
     await sendRequestError(commandChannel, toErrorMessage(error));
+  } finally {
+    await stopThreadAppServerSession(request.threadId);
+    await containerService.stopContainer(threadState.runtimeContainer).catch((error: unknown) => {
+      logger.warn(`Failed to stop runtime container '${threadState.runtimeContainer}': ${toErrorMessage(error)}`);
+    });
+    await containerService.stopContainer(threadState.dindContainer).catch((error: unknown) => {
+      logger.warn(`Failed to stop DinD container '${threadState.dindContainer}': ${toErrorMessage(error)}`);
+    });
   }
 }
 

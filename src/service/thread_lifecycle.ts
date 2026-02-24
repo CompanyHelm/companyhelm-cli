@@ -171,6 +171,20 @@ function isContainerAlreadyStarted(error: unknown): boolean {
   return /already started/i.test(message);
 }
 
+function isContainerNotRunning(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+  if (statusCode === 304) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /is not running/i.test(message);
+}
+
 function isImageNotFound(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
@@ -297,6 +311,17 @@ export class ThreadContainerService {
   async ensureContainerRunning(name: string, timeoutMs = CONTAINER_START_TIMEOUT_MS): Promise<void> {
     await this.startContainer(name);
     await this.waitForContainerRunning(name, timeoutMs);
+  }
+
+  async stopContainer(name: string): Promise<void> {
+    try {
+      await this.docker.getContainer(name).stop({ t: 10 });
+    } catch (error: unknown) {
+      if (isContainerNotFound(error) || isContainerNotRunning(error)) {
+        return;
+      }
+      throw error;
+    }
   }
 
   async forceRemoveContainer(name: string): Promise<void> {
