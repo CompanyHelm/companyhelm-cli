@@ -1,0 +1,12 @@
+# Agent Instructions
+
+## Workspace Structure
+
+- `/workspace` is a thread-specific bind mount from the host.
+- Host path layout: `<config_directory>/<workspaces_directory>/agent-<agent-id>/thread-<thread-id>`.
+- This workspace is not initialized as a Git repository by default.
+- Clone a repository into `/workspace` or run `git init` manually when version history is required.
+
+## Available CLI Tools
+
+- There are currently no additional CompanyHelm helper CLI tools installed in this runtime.

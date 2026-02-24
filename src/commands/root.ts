@@ -45,6 +45,7 @@ import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
+import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
   serverUrl?: string;
@@ -514,6 +515,7 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
+  ensureWorkspaceAgentsMd(threadDirectory);
   logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();
