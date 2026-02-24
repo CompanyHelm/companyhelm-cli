@@ -2,6 +2,9 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+const CODEX_APP_SERVER_STDIN_LISTEN_FLAG = "--listen stdio://";
+const CODEX_YOLO_FLAG = "--dangerously-bypass-approvals-and-sandbox";
+
 export function buildNvmCodexBootstrapScript(homeDirectory?: string): string {
   const lines = [
     "set -euo pipefail",
@@ -33,4 +36,9 @@ export function buildNvmCodexBootstrapScript(homeDirectory?: string): string {
   );
 
   return lines.join("\n");
+}
+
+export function buildCodexAppServerCommand(homeDirectory?: string): string {
+  const bootstrap = buildNvmCodexBootstrapScript(homeDirectory);
+  return `${bootstrap}\ncodex ${CODEX_YOLO_FLAG} app-server ${CODEX_APP_SERVER_STDIN_LISTEN_FLAG}`;
 }
