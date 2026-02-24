@@ -7,11 +7,11 @@ import { initDb } from "../../state/db.js";
 import { agentSdks } from "../../state/schema.js";
 import { AsyncQueue } from "../../utils/async_queue.js";
 import { expandHome } from "../../utils/path.js";
+import { buildNvmCodexBootstrapScript } from "../runtime_shell.js";
 import type { AppServerTransport, AppServerTransportEvent } from "../app_server.js";
 import { getHostInfo } from "../host.js";
 
-const DEFAULT_APP_SERVER_COMMAND =
-  'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; source "$NVM_DIR/nvm.sh"; command -v codex >/dev/null 2>&1; codex app-server --listen stdio://';
+const DEFAULT_APP_SERVER_COMMAND = `${buildNvmCodexBootstrapScript()}\ncodex app-server --listen stdio://`;
 const BOOTSTRAP_TEMPLATE_PATH = "templates/app_server_bootstrap.sh.j2";
 
 function resolveContainerPath(path: string, containerHome: string): string {

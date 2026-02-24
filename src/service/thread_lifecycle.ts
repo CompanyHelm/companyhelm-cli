@@ -2,6 +2,7 @@ import Dockerode, { type ContainerCreateOptions, type MountSettings } from "dock
 import { spawnSync } from "node:child_process";
 import { isAbsolute, join } from "node:path";
 import { expandHome } from "../utils/path.js";
+import { buildNvmCodexBootstrapScript } from "./runtime_shell.js";
 
 export type ThreadAuthMode = "host" | "dedicated";
 
@@ -108,7 +109,6 @@ function buildCommonContainerEnv(user: ThreadContainerUser): string[] {
   return [
     `HOME=${user.agentHomeDirectory}`,
     `USER=${user.agentUser}`,
-    `NVM_DIR=${join(user.agentHomeDirectory, ".nvm")}`,
   ];
 }
 
@@ -147,21 +147,7 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
 }
 
 function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string {
-  return [
-    "set -euo pipefail",
-    `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
-    'export HOME="$AGENT_HOME"',
-    'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"',
-    'if [ ! -s "$NVM_DIR/nvm.sh" ]; then',
-    '  echo "nvm is not configured: expected $NVM_DIR/nvm.sh" >&2',
-    "  exit 1",
-    "fi",
-    '. "$NVM_DIR/nvm.sh"',
-    'if ! command -v codex >/dev/null 2>&1; then',
-    '  echo "codex command is not available after sourcing nvm." >&2',
-    "  exit 1",
-    "fi",
-  ].join("\n");
+  return buildNvmCodexBootstrapScript(user.agentHomeDirectory);
 }
 
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
+import { buildNvmCodexBootstrapScript } from "../../service/runtime_shell.js";
 import { ensureThreadRuntimeReady } from "../../service/thread_runtime.js";
 import { initDb } from "../../state/db.js";
 import { threads } from "../../state/schema.js";
@@ -26,6 +27,10 @@ function resolveExecStatus(result: ReturnType<typeof spawnSync>): never {
   }
 
   throw new Error("docker exec exited unexpectedly.");
+}
+
+function buildDockerShellCommand(homeDirectory: string): string {
+  return `${buildNvmCodexBootstrapScript(homeDirectory)}\nexec bash`;
 }
 
 export async function runThreadDockerCommand(options: ThreadDockerCommandOptions): Promise<void> {
@@ -66,7 +71,7 @@ export async function runThreadDockerCommand(options: ThreadDockerCommandOptions
       threadState.runtimeContainer,
       "bash",
       "-lc",
-      'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; . "$NVM_DIR/nvm.sh"; exec bash',
+      buildDockerShellCommand(threadState.homeDirectory),
     ],
     {
       stdio: "inherit",

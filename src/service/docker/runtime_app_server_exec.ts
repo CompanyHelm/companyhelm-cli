@@ -1,9 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { AsyncQueue } from "../../utils/async_queue.js";
 import type { AppServerTransport, AppServerTransportEvent } from "../app_server.js";
+import { buildNvmCodexBootstrapScript } from "../runtime_shell.js";
 
-const DEFAULT_APP_SERVER_COMMAND =
-  'export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"; source "$NVM_DIR/nvm.sh"; command -v codex >/dev/null 2>&1; codex app-server --listen stdio://';
+const DEFAULT_APP_SERVER_COMMAND = `${buildNvmCodexBootstrapScript()}\ncodex app-server --listen stdio://`;
 const PROCESS_EXIT_TIMEOUT_MS = 5_000;
 
 export class RuntimeContainerAppServerTransport implements AppServerTransport {

@@ -115,7 +115,6 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share mounts an
 
   assert.ok(runtimeOptions.Env.includes("HOME=/home/agent"));
   assert.ok(runtimeOptions.Env.includes("USER=agent"));
-  assert.ok(runtimeOptions.Env.includes("NVM_DIR=/home/agent/.nvm"));
   assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=tcp://localhost:2375"));
   assert.deepEqual(runtimeOptions.Cmd, ["sleep", "infinity"]);
   assert.equal(runtimeOptions.HostConfig.NetworkMode, `container:${names.dind}`);
