@@ -665,6 +665,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
     let dindContainerPresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
+    let expectedThreadWorkspacePath: string | null = null;
     let threadWorkspacePresentAtReady: boolean | null = null;
 
     const started = await startFakeServer("/grpc", {
@@ -726,6 +727,12 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
             const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
             threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
+            expectedThreadWorkspacePath = threadLifecycle.resolveThreadDirectory(
+              path.join(homeDirectory, ".config", "companyhelm"),
+              "workspaces",
+              "agent-for-lifecycle",
+              createdThreadId,
+            );
             threadWorkspacePresentAtReady = threadWorkspacePath ? existsSync(threadWorkspacePath) : false;
 
             sentDeleteThreadRequest = true;
@@ -837,6 +844,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${createdThreadId}`);
     assert.equal(createOptions.mounts[0]?.Target, "/workspace");
     assert.equal(createOptions.mounts[0]?.Source, threadWorkspacePath);
+    assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include agent/thread segmentation");
     assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, true, "expected thread workspace directory to remain on disk");
 
     const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
@@ -877,6 +885,7 @@ test(
     let dindContainerRunningAtReady: boolean | null = null;
     let runtimeContainerAbsentAfterDelete: boolean | null = null;
     let dindContainerAbsentAfterDelete: boolean | null = null;
+    let workspacePathAtReady: string | null = null;
     let workspaceExistsAtReady: boolean | null = null;
     let receivedRequestError: any = null;
     let receivedDeleteAgentUpdate = false;
@@ -954,6 +963,7 @@ test(
                 const { db, client } = await initDb(stateDbPath);
                 try {
                   const threadRow = await db.select().from(threads).where(eq(threads.id, createdThreadId)).get();
+                  workspacePathAtReady = threadRow?.workspace ?? null;
                   workspaceExistsAtReady = threadRow ? existsSync(threadRow.workspace) : false;
                 } finally {
                   client.close();
@@ -1028,6 +1038,16 @@ test(
       assert.equal(runtimeContainerRunningAtReady, true, "expected runtime container to be running when thread is ready");
       assert.equal(dindContainerRunningAtReady, true, "expected dind container to be running when thread is ready");
       assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
+      assert.equal(
+        workspacePathAtReady,
+        threadLifecycle.resolveThreadDirectory(
+          path.join(homeDirectory, ".config", "companyhelm"),
+          "workspaces",
+          "agent-real-docker",
+          createdThreadId!,
+        ),
+        "expected db workspace path to include agent/thread segmentation",
+      );
       assert.equal(runtimeContainerAbsentAfterDelete, true, "expected runtime container to be removed after deleteThreadRequest");
       assert.equal(dindContainerAbsentAfterDelete, true, "expected dind container to be removed after deleteThreadRequest");
     } finally {

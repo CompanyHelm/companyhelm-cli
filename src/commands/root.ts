@@ -218,7 +218,7 @@ async function handleCreateThreadRequest(
   const { db, client } = await initDb(cfg.state_db_path);
 
   const threadId = randomUUID();
-  const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, threadId);
+  const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, request.agentId, threadId);
   const containerNames = buildThreadContainerNames(threadId);
   const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
   logger.debug(

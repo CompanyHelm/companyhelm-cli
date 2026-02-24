@@ -72,8 +72,17 @@ export function resolveThreadsRootDirectory(configDirectory: string, threadsDire
   return join(expandHome(configDirectory), expandedThreadsDirectory);
 }
 
-export function resolveThreadDirectory(configDirectory: string, threadsDirectory: string, threadId: string): string {
-  return join(resolveThreadsRootDirectory(configDirectory, threadsDirectory), threadId);
+export function resolveThreadDirectory(
+  configDirectory: string,
+  threadsDirectory: string,
+  agentId: string,
+  threadId: string,
+): string {
+  return join(
+    resolveThreadsRootDirectory(configDirectory, threadsDirectory),
+    `agent-${agentId}`,
+    `thread-${threadId}`,
+  );
 }
 
 export function buildSharedThreadMounts(options: ThreadMountOptions): MountSettings[] {

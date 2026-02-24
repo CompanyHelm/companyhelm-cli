@@ -6,6 +6,7 @@ import {
   buildRuntimeContainerOptions,
   buildSharedThreadMounts,
   buildThreadContainerNames,
+  resolveThreadDirectory,
   resolveThreadsRootDirectory,
   ThreadContainerService,
 } from "../../dist/service/thread_lifecycle.js";
@@ -25,6 +26,11 @@ test("resolveThreadsRootDirectory keeps absolute threads directory", () => {
 test("resolveThreadsRootDirectory resolves relative threads directory under config_directory", () => {
   const resolved = resolveThreadsRootDirectory("/config/companyhelm", "threads");
   assert.equal(resolved, "/config/companyhelm/threads");
+});
+
+test("resolveThreadDirectory stores threads under agent and thread segmented path", () => {
+  const resolved = resolveThreadDirectory("/config/companyhelm", "workspaces", "123", "456");
+  assert.equal(resolved, "/config/companyhelm/workspaces/agent-123/thread-456");
 });
 
 test("buildSharedThreadMounts reuses shared workspace and dedicated auth mount", () => {
