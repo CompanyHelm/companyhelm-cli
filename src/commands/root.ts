@@ -342,9 +342,14 @@ function resolveAgentWorkspaceDirectory(cfg: Config, agentId: string): string {
   return join(resolveThreadsRootDirectory(cfg.config_directory, cfg.workspaces_directory), `agent-${agentId}`);
 }
 
-async function sendRequestError(commandChannel: CompanyhelmCommandChannel, errorMessage: string): Promise<void> {
+async function sendRequestError(
+  commandChannel: CompanyhelmCommandChannel,
+  errorMessage: string,
+  requestId?: string,
+): Promise<void> {
   await commandChannel.send(
     create(ClientMessageSchema, {
+      requestId,
       payload: {
         case: "requestError",
         value: {
@@ -395,9 +400,11 @@ async function sendTurnExecutionUpdate(
   commandChannel: CompanyhelmCommandChannel,
   sdkTurnId: string,
   status: TurnStatus,
+  requestId?: string,
 ): Promise<void> {
   await commandChannel.send(
     create(ClientMessageSchema, {
+      requestId,
       payload: {
         case: "turnUpdate",
         value: {
@@ -414,9 +421,11 @@ async function sendItemExecutionUpdate(
   sdkItemId: string,
   status: ItemStatus,
   item: ThreadItem,
+  requestId?: string,
 ): Promise<void> {
   await commandChannel.send(
     create(ClientMessageSchema, {
+      requestId,
       payload: {
         case: "itemUpdate",
         value: {
@@ -882,6 +891,7 @@ async function waitForThreadTurnCompletion(
   commandChannel: CompanyhelmCommandChannel,
   sdkThreadId: string,
   sdkTurnId: string,
+  requestId?: string,
 ): Promise<"completed" | "interrupted" | "failed"> {
   return appServer.waitForTurnCompletion(
     sdkThreadId,
@@ -897,6 +907,7 @@ async function waitForThreadTurnCompletion(
           notification.params.item.id,
           ItemStatus.RUNNING,
           notification.params.item,
+          requestId,
         );
       }
 
@@ -910,6 +921,7 @@ async function waitForThreadTurnCompletion(
           notification.params.item.id,
           ItemStatus.COMPLETED,
           notification.params.item,
+          requestId,
         );
       }
     },
@@ -921,6 +933,7 @@ async function executeCreateUserMessageRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
   request: CreateUserMessageRequest,
+  requestId: string | undefined,
   threadState: ThreadMessageExecutionState,
   startedFromIdle: boolean,
   trackTurnCompletion: boolean,
@@ -1039,24 +1052,31 @@ async function executeCreateUserMessageRequest(
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: true,
     });
-    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.RUNNING);
+    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.RUNNING, requestId);
 
     if (!trackTurnCompletion) {
       keepRuntimeWarm = true;
       return;
     }
 
-    const terminalStatus = await waitForThreadTurnCompletion(appServer, commandChannel, sdkThreadId, sdkTurnId);
+    const terminalStatus = await waitForThreadTurnCompletion(
+      appServer,
+      commandChannel,
+      sdkThreadId,
+      sdkTurnId,
+      requestId,
+    );
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: false,
     });
-    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.COMPLETED);
+    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.COMPLETED, requestId);
 
     if (terminalStatus === "failed") {
       await sendRequestError(
         commandChannel,
         `Turn '${sdkTurnId}' finished with status '${terminalStatus}' for thread '${request.threadId}'.`,
+        requestId,
       );
     } else if (terminalStatus === "interrupted") {
       logger.info(`Turn '${sdkTurnId}' for thread '${request.threadId}' was interrupted.`);
@@ -1075,7 +1095,7 @@ async function executeCreateUserMessageRequest(
     logger.warn(
       `Failed to create user message turn for thread '${request.threadId}' (agent '${request.agentId}'): ${toErrorMessage(error)}`,
     );
-    await sendRequestError(commandChannel, toErrorMessage(error));
+    await sendRequestError(commandChannel, toErrorMessage(error), requestId);
   } finally {
     if (!keepRuntimeWarm) {
       await stopThreadAppServerSession(request.threadId);
@@ -1093,6 +1113,7 @@ async function handleCreateUserMessageRequest(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
   request: CreateUserMessageRequest,
+  requestId: string | undefined,
   logger: Logger,
 ): Promise<void> {
   let threadState: ThreadMessageExecutionState | undefined;
@@ -1101,7 +1122,7 @@ async function handleCreateUserMessageRequest(
     threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.agentId, request.threadId);
 
     if (!threadState) {
-      await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+      await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`, requestId);
       return;
     }
 
@@ -1109,6 +1130,7 @@ async function handleCreateUserMessageRequest(
       await sendRequestError(
         commandChannel,
         `Thread '${request.threadId}' already has a running turn and allowSteer=false.`,
+        requestId,
       );
       return;
     }
@@ -1117,11 +1139,16 @@ async function handleCreateUserMessageRequest(
       await sendRequestError(
         commandChannel,
         `Thread '${request.threadId}' is in an inconsistent state: running turn id is missing.`,
+        requestId,
       );
       return;
     }
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`,
+      requestId,
+    );
     return;
   }
 
@@ -1137,7 +1164,11 @@ async function handleCreateUserMessageRequest(
       });
       threadState.isCurrentTurnRunning = true;
     } catch (error: unknown) {
-      await sendRequestError(commandChannel, `Failed to reserve thread '${request.threadId}' for execution: ${toErrorMessage(error)}`);
+      await sendRequestError(
+        commandChannel,
+        `Failed to reserve thread '${request.threadId}' for execution: ${toErrorMessage(error)}`,
+        requestId,
+      );
       return;
     }
   }
@@ -1147,6 +1178,7 @@ async function handleCreateUserMessageRequest(
     cfg,
     commandChannel,
     request,
+    requestId,
     threadState,
     startedFromIdle,
     trackTurnCompletion,
@@ -1162,6 +1194,7 @@ async function runCommandLoop(
   logger: Logger,
 ): Promise<void> {
   for await (const serverMessage of commandChannel) {
+    const requestId = (serverMessage as typeof serverMessage & { requestId?: string }).requestId;
     switch (serverMessage.request.case) {
       case "createAgentRequest":
         await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value, logger);
@@ -1176,7 +1209,13 @@ async function runCommandLoop(
         await handleDeleteThreadRequest(cfg, commandChannel, serverMessage.request.value);
         break;
       case "createUserMessageRequest":
-        void handleCreateUserMessageRequest(cfg, commandChannel, serverMessage.request.value, logger).catch((error: unknown) => {
+        void handleCreateUserMessageRequest(
+          cfg,
+          commandChannel,
+          serverMessage.request.value,
+          requestId,
+          logger,
+        ).catch((error: unknown) => {
           logger.warn(`Unhandled createUserMessageRequest error: ${toErrorMessage(error)}`);
         });
         break;
