@@ -517,7 +517,7 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
-  ensureWorkspaceAgentsMd(threadDirectory);
+  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
   logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();

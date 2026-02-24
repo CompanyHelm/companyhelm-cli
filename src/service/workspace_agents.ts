@@ -15,6 +15,7 @@ export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 `;
 
 const RUNTIME_AGENTS_TEMPLATE_PATH = "templates/runtime_agents.md.j2";
+const DEFAULT_HOME_DIRECTORY = "/home/agent";
 
 function resolveTemplatePath(): string {
   const distRelativePath = join(__dirname, "..", RUNTIME_AGENTS_TEMPLATE_PATH);
@@ -30,7 +31,7 @@ function resolveTemplatePath(): string {
   throw new Error(`Runtime AGENTS template was not found at ${distRelativePath} or ${sourceRelativePath}`);
 }
 
-export function renderRuntimeAgentsMd(): string {
+export function renderRuntimeAgentsMd(homeDirectory = DEFAULT_HOME_DIRECTORY): string {
   const defaultTemplate = `# Agent Instructions
 
 ${AGENTS_MD_WORKSPACE_SECTION}
@@ -38,13 +39,14 @@ ${AGENTS_MD_CLI_TOOLS_SECTION}`;
 
   try {
     const template = readFileSync(resolveTemplatePath(), "utf8");
-    return template.trim() + "\n";
+    const renderedTemplate = template.replace(/{{\s*home_directory\s*}}/g, homeDirectory);
+    return renderedTemplate.trim() + "\n";
   } catch {
     return defaultTemplate.trim() + "\n";
   }
 }
 
-export function ensureWorkspaceAgentsMd(workspaceDirectory: string): void {
+export function ensureWorkspaceAgentsMd(workspaceDirectory: string, homeDirectory = DEFAULT_HOME_DIRECTORY): void {
   mkdirSync(workspaceDirectory, { recursive: true });
   const agentsPath = join(workspaceDirectory, "AGENTS.md");
   const sections = [
@@ -69,7 +71,7 @@ export function ensureWorkspaceAgentsMd(workspaceDirectory: string): void {
 
   const updated = existing.trim()
     ? `${existing.trimEnd()}\n\n${pendingSections.join("\n\n")}`
-    : renderRuntimeAgentsMd();
+    : renderRuntimeAgentsMd(homeDirectory);
 
   try {
     writeFileSync(agentsPath, updated, "utf8");
