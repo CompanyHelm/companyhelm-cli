@@ -47,7 +47,7 @@ import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
 
 interface RootCommandOptions {
-  companyhelmApiUrl?: string;
+  serverUrl?: string;
   daemon?: boolean;
   logLevel?: string;
 }
@@ -1140,7 +1140,7 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const logger = createLogger(options.logLevel ?? "INFO");
   const cfg: Config = configSchema.parse({
-    companyhelm_api_url: options.companyhelmApiUrl,
+    companyhelm_api_url: options.serverUrl,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -1187,7 +1187,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 
 export function registerRootCommand(program: Command): void {
   program
-    .option("--companyhelm-api-url <url>", "CompanyHelm gRPC API URL override.")
+    .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
     .action(async () => {
