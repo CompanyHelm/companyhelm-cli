@@ -2,10 +2,14 @@
 
 ## Workspace Structure
 
-- `/workspace` is a thread-specific bind mount from the host.
-- Host path layout: `<config_directory>/<workspaces_directory>/agent-<agent-id>/thread-<thread-id>`.
-- This workspace is not initialized as a Git repository by default.
-- Clone a repository into `/workspace` or run `git init` manually when version history is required.
+- You are running in a thread-specific container and workspace
+- This workspace is not initialized as a Git repository by default. Repositories should live in a subdirectory of the workspace.
+
+## Docker
+
+Docker is available, the docker host runs in a separate container. The network is shared with container.
+- only the `/workspace` is shared with the docker host
+- `{{home_directory}}/.codex/auth.json` is also shared with the docker host
 
 ## Available CLI Tools
 
