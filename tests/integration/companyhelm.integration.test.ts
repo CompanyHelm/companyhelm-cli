@@ -317,7 +317,7 @@ test("companyhelm root command in daemon mode fails when no sdk is configured", 
     const repositoryRoot = path.resolve(__dirname, "../..");
     const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
     const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "-d", "--companyhelm-api-url", "127.0.0.1:65535/grpc"], {
+      spawn(process.execPath, [cliEntryPoint, "-d", "--server-url", "127.0.0.1:65535/grpc"], {
         cwd: repositoryRoot,
         env: { ...process.env, HOME: homeDirectory },
         stdio: ["ignore", "pipe", "pipe"],
@@ -421,7 +421,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
     const repositoryRoot = path.resolve(__dirname, "../..");
     const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
     const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
         cwd: repositoryRoot,
         env: { ...process.env, HOME: homeDirectory },
         stdio: ["ignore", "pipe", "pipe"],
@@ -483,7 +483,7 @@ test("companyhelm root command retries until server becomes available", async ()
 
     const repositoryRoot = path.resolve(__dirname, "../..");
     const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const cliProcess = spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${port}/grpc`], {
+    const cliProcess = spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${port}/grpc`], {
       cwd: repositoryRoot,
       env: { ...process.env, HOME: homeDirectory },
       stdio: ["ignore", "pipe", "pipe"],
@@ -544,7 +544,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
     const repositoryRoot = path.resolve(__dirname, "../..");
     const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
     const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
         cwd: repositoryRoot,
         env: { ...process.env, HOME: homeDirectory },
         stdio: ["ignore", "pipe", "pipe"],
@@ -601,7 +601,7 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
     const repositoryRoot = path.resolve(__dirname, "../..");
     const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
     const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--companyhelm-api-url", `127.0.0.1:${started.port}/grpc`], {
+      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
         cwd: repositoryRoot,
         env: { ...process.env, HOME: homeDirectory },
         stdio: ["ignore", "pipe", "pipe"],
@@ -799,7 +799,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     server = started.server;
 
     await runRootCommand({
-      companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+      serverUrl: `127.0.0.1:${started.port}/grpc`,
     });
 
     assert.equal(receivedRequestError, null, "did not expect requestError during lifecycle flow");
@@ -1045,7 +1045,7 @@ test(
       server = started.server;
 
       await runRootCommand({
-        companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       });
 
       assert.equal(channelHandlerError, null, channelHandlerError?.message ?? "unexpected channel handler error");
@@ -1278,7 +1278,7 @@ test(
       server = started.server;
 
       await runRootCommand({
-        companyhelmApiUrl: `127.0.0.1:${started.port}/grpc`,
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       });
 
       assert.equal(receivedRequestError, null, "did not expect requestError for repeated user messages");

@@ -11,6 +11,7 @@ import {
   type CreateUserMessageRequest,
   type DeleteAgentRequest,
   type DeleteThreadRequest,
+  type InterruptTurnRequest,
   type RegisterRunnerRequest,
   RegisterRunnerRequestSchema,
 } from "@companyhelm/protos";
@@ -46,7 +47,7 @@ import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
 
 interface RootCommandOptions {
-  companyhelmApiUrl?: string;
+  serverUrl?: string;
   daemon?: boolean;
   logLevel?: string;
 }
@@ -695,6 +696,98 @@ async function handleDeleteThreadRequest(
   await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
 }
 
+async function handleInterruptTurnRequest(
+  cfg: Config,
+  commandChannel: CompanyhelmCommandChannel,
+  request: InterruptTurnRequest,
+  logger: Logger,
+): Promise<void> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  let threadState: ThreadMessageExecutionState | undefined;
+  try {
+    threadState = await db
+      .select({
+        id: threads.id,
+        agentId: threads.agentId,
+        sdkThreadId: threads.sdkThreadId,
+        model: threads.model,
+        reasoningLevel: threads.reasoningLevel,
+        currentSdkTurnId: threads.currentSdkTurnId,
+        isCurrentTurnRunning: threads.isCurrentTurnRunning,
+        runtimeContainer: threads.runtimeContainer,
+        dindContainer: threads.dindContainer,
+        homeDirectory: threads.homeDirectory,
+        uid: threads.uid,
+        gid: threads.gid,
+      })
+      .from(threads)
+      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
+      .get();
+  } catch (error: unknown) {
+    await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
+    return;
+  } finally {
+    client.close();
+  }
+
+  if (!threadState) {
+    await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+    return;
+  }
+
+  if (!threadState.isCurrentTurnRunning) {
+    await sendRequestError(commandChannel, `Thread '${request.threadId}' has no running turn to interrupt.`);
+    return;
+  }
+
+  if (!threadState.currentSdkTurnId) {
+    await sendRequestError(commandChannel, `Thread '${request.threadId}' is running but current SDK turn id is missing.`);
+    return;
+  }
+
+  if (!threadState.sdkThreadId) {
+    await sendRequestError(commandChannel, `Thread '${request.threadId}' is running but SDK thread id is missing.`);
+    return;
+  }
+
+  const appServerSession = await getOrCreateThreadAppServerSession(
+    request.threadId,
+    threadState.runtimeContainer,
+    cfg.codex.app_server_client_name,
+  );
+
+  try {
+    await ensureThreadAppServerSessionStarted(appServerSession);
+  } catch (error: unknown) {
+    const message = toErrorMessage(error);
+    logger.warn(`Failed to start app-server session for interrupt: ${message}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to connect to app-server for thread '${request.threadId}': ${message}`,
+    );
+    return;
+  }
+
+  const interruptParams = {
+    threadId: threadState.sdkThreadId,
+    turnId: threadState.currentSdkTurnId,
+  };
+
+  try {
+    await appServerSession.appServer.interruptTurn(interruptParams);
+  } catch (error: unknown) {
+    const message = toErrorMessage(error);
+    logger.warn(`Failed to interrupt turn '${threadState.currentSdkTurnId}': ${message}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to interrupt turn '${threadState.currentSdkTurnId}' for thread '${request.threadId}': ${message}`,
+    );
+    return;
+  }
+
+  logger.info(`Requested interrupt of turn '${threadState.currentSdkTurnId}' for thread '${request.threadId}'.`);
+}
+
 interface ThreadMessageExecutionState {
   id: string;
   agentId: string;
@@ -1035,6 +1128,9 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
           logger.warn(`Unhandled createUserMessageRequest error: ${toErrorMessage(error)}`);
         });
         break;
+      case "interruptTurnRequest":
+        await handleInterruptTurnRequest(cfg, commandChannel, serverMessage.request.value, logger);
+        break;
       default:
         break;
     }
@@ -1044,7 +1140,7 @@ async function runCommandLoop(cfg: Config, commandChannel: CompanyhelmCommandCha
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const logger = createLogger(options.logLevel ?? "INFO");
   const cfg: Config = configSchema.parse({
-    companyhelm_api_url: options.companyhelmApiUrl,
+    companyhelm_api_url: options.serverUrl,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -1091,7 +1187,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 
 export function registerRootCommand(program: Command): void {
   program
-    .option("--companyhelm-api-url <url>", "CompanyHelm gRPC API URL override.")
+    .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
     .action(async () => {

@@ -83,7 +83,7 @@ function startDaemonProcess(apiUrl: string): DaemonHandle {
   const cliEntryPoint = resolve(__dirname, "..", "cli.js");
   const child = spawn(
     process.execPath,
-    [cliEntryPoint, "--daemon", "--companyhelm-api-url", apiUrl],
+    [cliEntryPoint, "--daemon", "--server-url", apiUrl],
     {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },

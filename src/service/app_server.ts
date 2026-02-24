@@ -4,6 +4,8 @@ import type { ThreadResumeParams } from "../generated/codex-app-server/v2/Thread
 import type { ThreadResumeResponse } from "../generated/codex-app-server/v2/ThreadResumeResponse.js";
 import type { ThreadStartParams } from "../generated/codex-app-server/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex-app-server/v2/ThreadStartResponse.js";
+import type { TurnInterruptParams } from "../generated/codex-app-server/v2/TurnInterruptParams.js";
+import type { TurnInterruptResponse } from "../generated/codex-app-server/v2/TurnInterruptResponse.js";
 import type { TurnStartParams } from "../generated/codex-app-server/v2/TurnStartParams.js";
 import type { TurnStartResponse } from "../generated/codex-app-server/v2/TurnStartResponse.js";
 import type { TurnSteerParams } from "../generated/codex-app-server/v2/TurnSteerParams.js";
@@ -172,6 +174,10 @@ export class AppServerService {
 
   async steerTurn(params: TurnSteerParams): Promise<TurnSteerResponse> {
     return this.request("turn/steer", params, 15_000) as Promise<TurnSteerResponse>;
+  }
+
+  async interruptTurn(params: TurnInterruptParams): Promise<TurnInterruptResponse> {
+    return this.request("turn/interrupt", params, 15_000) as Promise<TurnInterruptResponse>;
   }
 
   async waitForTurnCompletion(
