@@ -521,6 +521,46 @@ test("ThreadContainerService provisions runtime user identity with docker exec a
   assert.match(invocation.args[6], /chown -R "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME"/);
 });
 
+test("ThreadContainerService configures default git author values in runtime repos", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerGitConfig(
+    "companyhelm-runtime-thread-git",
+    {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+    "agent",
+    "agent@companyhelm.com",
+  );
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "agent", "companyhelm-runtime-thread-git", "bash", "-lc"]);
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /DEFAULT_GIT_USER_NAME='agent'/);
+  assert.match(invocation.args[6], /DEFAULT_GIT_USER_EMAIL='agent@companyhelm\.com'/);
+  assert.match(invocation.args[6], /git config --global --get user\.name/);
+  assert.match(invocation.args[6], /git config --global --get user\.email/);
+  assert.match(invocation.args[6], /git -C "\$repo_root" config --local user\.name "\$DEFAULT_GIT_USER_NAME"/);
+  assert.match(invocation.args[6], /git -C "\$repo_root" config --local user\.email "\$DEFAULT_GIT_USER_EMAIL"/);
+  assert.match(invocation.args[6], /find \/workspace -type d -name \.git -print0/);
+});
+
 test("ThreadContainerService surfaces runtime identity bootstrap failures", async () => {
   const runCommand = () =>
     ({
@@ -542,5 +582,34 @@ test("ThreadContainerService surfaces runtime identity bootstrap failures", asyn
         agentHomeDirectory: "/home/agent",
       }),
     /Failed to provision runtime user 'agent' in container 'companyhelm-runtime-thread-def' \(exit 7\): permission denied/,
+  );
+});
+
+test("ThreadContainerService surfaces runtime git config failures", async () => {
+  const runCommand = () =>
+    ({
+      pid: 1,
+      output: [null, "", "git missing"],
+      stdout: "",
+      stderr: "git missing",
+      status: 9,
+      signal: null,
+    }) as any;
+  const service = new ThreadContainerService({} as any, runCommand as any);
+
+  await assert.rejects(
+    () =>
+      service.ensureRuntimeContainerGitConfig(
+        "companyhelm-runtime-thread-git-error",
+        {
+          uid: 501,
+          gid: 20,
+          agentUser: "agent",
+          agentHomeDirectory: "/home/agent",
+        },
+        "agent",
+        "agent@companyhelm.com",
+      ),
+    /Failed to configure git author defaults in runtime container 'companyhelm-runtime-thread-git-error' \(exit 9\): git missing/,
   );
 });

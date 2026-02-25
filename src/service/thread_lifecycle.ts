@@ -175,6 +175,39 @@ function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string 
   return buildNvmCodexBootstrapScript(user.agentHomeDirectory);
 }
 
+function buildRuntimeGitConfigScript(gitUserName: string, gitUserEmail: string): string {
+  return [
+    "set -euo pipefail",
+    `DEFAULT_GIT_USER_NAME=${shellQuote(gitUserName)}`,
+    `DEFAULT_GIT_USER_EMAIL=${shellQuote(gitUserEmail)}`,
+    "",
+    "if ! command -v git >/dev/null 2>&1; then",
+    "  exit 0",
+    "fi",
+    "",
+    "if ! git config --global --get user.name >/dev/null 2>&1; then",
+    '  git config --global user.name "$DEFAULT_GIT_USER_NAME"',
+    "fi",
+    "if ! git config --global --get user.email >/dev/null 2>&1; then",
+    '  git config --global user.email "$DEFAULT_GIT_USER_EMAIL"',
+    "fi",
+    "",
+    "if [ ! -d /workspace ]; then",
+    "  exit 0",
+    "fi",
+    "",
+    "while IFS= read -r -d '' git_dir; do",
+    '  repo_root="$(dirname "$git_dir")"',
+    '  if ! git -C "$repo_root" config --local --get user.name >/dev/null 2>&1; then',
+    '    git -C "$repo_root" config --local user.name "$DEFAULT_GIT_USER_NAME"',
+    "  fi",
+    '  if ! git -C "$repo_root" config --local --get user.email >/dev/null 2>&1; then',
+    '    git -C "$repo_root" config --local user.email "$DEFAULT_GIT_USER_EMAIL"',
+    "  fi",
+    "done < <(find /workspace -type d -name .git -print0 2>/dev/null || true)",
+  ].join("\n");
+}
+
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
   return {
     name: options.names.dind,
@@ -458,6 +491,19 @@ export class ThreadContainerService {
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to validate nvm/codex in runtime container '${name}'`,
+    );
+  }
+
+  async ensureRuntimeContainerGitConfig(
+    name: string,
+    user: ThreadContainerUser,
+    gitUserName: string,
+    gitUserEmail: string,
+  ): Promise<void> {
+    const script = buildRuntimeGitConfigScript(gitUserName, gitUserEmail);
+    this.runDockerExecScript(
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
+      `Failed to configure git author defaults in runtime container '${name}'`,
     );
   }
 

@@ -4,6 +4,8 @@ export interface ThreadRuntimeReadyOptions {
   dindContainer: string | null;
   runtimeContainer: string;
   user: ThreadContainerUser;
+  gitUserName: string;
+  gitUserEmail: string;
   containerService?: ThreadContainerService;
 }
 
@@ -14,5 +16,11 @@ export async function ensureThreadRuntimeReady(options: ThreadRuntimeReadyOption
   }
   await containerService.ensureContainerRunning(options.runtimeContainer);
   await containerService.ensureRuntimeContainerIdentity(options.runtimeContainer, options.user);
+  await containerService.ensureRuntimeContainerGitConfig(
+    options.runtimeContainer,
+    options.user,
+    options.gitUserName,
+    options.gitUserEmail,
+  );
   await containerService.ensureRuntimeContainerTooling(options.runtimeContainer, options.user);
 }

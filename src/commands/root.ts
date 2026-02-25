@@ -1179,6 +1179,8 @@ async function executeCreateUserMessageRequest(
       dindContainer: threadState.dindContainer,
       runtimeContainer: threadState.runtimeContainer,
       containerService,
+      gitUserName: cfg.git_user_name,
+      gitUserEmail: cfg.git_user_email,
       user: {
         uid: threadState.uid,
         gid: threadState.gid,

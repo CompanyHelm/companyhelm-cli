@@ -1875,6 +1875,9 @@ test(
     const ensureRuntimeContainerIdentitySpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerGitConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+      .mockImplementation(async () => undefined);
     const ensureRuntimeContainerToolingSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
       .mockImplementation(async () => undefined);
@@ -2113,6 +2116,7 @@ test(
       assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
       assert.equal(waitForContainerRunningSpy.mock.calls.length, 0, "expected no explicit dind wait in runtime ready helper");
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected runtime git config bootstrap on each message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
     } finally {
       reconnectDelaySpy.mockRestore();
@@ -2120,6 +2124,7 @@ test(
       ensureContainerRunningSpy.mockRestore();
       waitForContainerRunningSpy.mockRestore();
       ensureRuntimeContainerIdentitySpy.mockRestore();
+      ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
@@ -2158,6 +2163,9 @@ test(
       .mockImplementation(async () => undefined);
     const ensureRuntimeContainerIdentitySpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerGitConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
       .mockImplementation(async () => undefined);
     const ensureRuntimeContainerToolingSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
@@ -2351,12 +2359,14 @@ test(
       assert.equal(runningUpdateCount, 2, "expected running updates for initial turn start and steer");
       assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected runtime readiness for both messages");
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
       assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
     } finally {
       createThreadContainersSpy.mockRestore();
       ensureContainerRunningSpy.mockRestore();
       ensureRuntimeContainerIdentitySpy.mockRestore();
+      ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
