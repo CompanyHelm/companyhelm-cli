@@ -140,3 +140,48 @@ test("AppServerService preserves request responses while waiting for turn comple
 
   await service.stop();
 });
+
+test("AppServerService includes thread context in app-server debug logs", async () => {
+  const transport = new FakeTransport();
+  const debugLogs: string[] = [];
+  let sdkThreadId: string | null = null;
+  const service = new AppServerService(
+    transport as any,
+    "test-client",
+    {
+      debug(message: string): void {
+        debugLogs.push(message);
+      },
+    },
+    () => ({
+      threadId: "thread-local-1",
+      sdkThreadId,
+    }),
+  );
+
+  await service.start();
+  sdkThreadId = "sdk-thread-1";
+
+  const listPromise = service.listModels(null, 1);
+  const listRequestId = await waitForRequestId(transport, "model/list");
+  transport.emitJson({
+    id: listRequestId,
+    result: {
+      data: [],
+      nextCursor: null,
+    },
+  });
+
+  await listPromise;
+
+  assert.equal(
+    debugLogs.some((line) => line.includes("[app-server][outgoing][thread: thread-local-1][sdkThread: sdk-thread-1]")),
+    true,
+  );
+  assert.equal(
+    debugLogs.some((line) => line.includes("[app-server][incoming][thread: thread-local-1][sdkThread: sdk-thread-1]")),
+    true,
+  );
+
+  await service.stop();
+});

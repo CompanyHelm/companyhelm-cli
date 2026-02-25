@@ -113,7 +113,15 @@ async function getOrCreateThreadAppServerSession(
     await stopThreadAppServerSession(threadId);
   }
 
-  const appServer = new AppServerService(new RuntimeContainerAppServerTransport(runtimeContainer), clientName, logger);
+  const appServer = new AppServerService(
+    new RuntimeContainerAppServerTransport(runtimeContainer),
+    clientName,
+    logger,
+    () => ({
+      threadId,
+      sdkThreadId: threadAppServerSessions.get(threadId)?.sdkThreadId ?? null,
+    }),
+  );
   const newSession: ThreadAppServerSession = {
     runtimeContainer,
     appServer,
