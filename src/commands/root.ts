@@ -1406,7 +1406,7 @@ function buildGrpcAuthCallOptions(secret: string | undefined): { metadata: grpc.
 }
 
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
-  const logger = createLogger(options.logLevel ?? "INFO");
+  const logger = createLogger(options.logLevel ?? "INFO", { daemonMode: options.daemon ?? false });
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.serverUrl,
   });
