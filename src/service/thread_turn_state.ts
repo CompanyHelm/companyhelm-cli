@@ -11,7 +11,7 @@ export interface ThreadMessageExecutionState {
   currentSdkTurnId: string | null;
   isCurrentTurnRunning: boolean;
   runtimeContainer: string;
-  dindContainer: string;
+  dindContainer: string | null;
   homeDirectory: string;
   uid: number;
   gid: number;

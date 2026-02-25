@@ -27,9 +27,10 @@ export async function runThreadListCommand(options: ThreadListCommandOptions): P
 
     console.log(`Threads for agent '${options.agentId}':`);
     for (const row of rows) {
+      const dindLabel = row.dindContainer && row.dindContainer.trim().length > 0 ? row.dindContainer : "(none)";
       console.log(
         `- id: ${row.id}, status: ${row.status}, model: ${row.model}, ` +
-        `reasoning: ${row.reasoningLevel}, runtime: ${row.runtimeContainer}, dind: ${row.dindContainer}`,
+        `reasoning: ${row.reasoningLevel}, runtime: ${row.runtimeContainer}, dind: ${dindLabel}`,
       );
     }
   } finally {

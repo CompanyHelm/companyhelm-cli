@@ -151,6 +151,74 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share mounts an
   assert.equal(path.posix.normalize(runtimeOptions.WorkingDir), "/workspace");
 });
 
+test("buildRuntimeContainerOptions mounts host docker socket when host runtime mode is enabled", () => {
+  const names = buildThreadContainerNames("thread-host-socket");
+  const baseMount = {
+    Type: "bind" as const,
+    Source: "/tmp/threads/thread-host-socket",
+    Target: "/workspace",
+  };
+
+  const runtimeOptions = buildRuntimeContainerOptions({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names,
+    mounts: [baseMount],
+    useHostDockerRuntime: true,
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=unix:///var/run/docker.sock"));
+  assert.equal(runtimeOptions.HostConfig.NetworkMode, undefined);
+  assert.deepEqual(runtimeOptions.HostConfig.Mounts, [
+    baseMount,
+    {
+      Type: "bind",
+      Source: "/var/run/docker.sock",
+      Target: "/var/run/docker.sock",
+    },
+  ]);
+});
+
+test("buildRuntimeContainerOptions honors custom host docker socket path in host runtime mode", () => {
+  const names = buildThreadContainerNames("thread-host-custom-socket");
+  const baseMount = {
+    Type: "bind" as const,
+    Source: "/tmp/threads/thread-host-custom-socket",
+    Target: "/workspace",
+  };
+
+  const runtimeOptions = buildRuntimeContainerOptions({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names,
+    mounts: [baseMount],
+    useHostDockerRuntime: true,
+    hostDockerSocketPath: "/tmp/companyhelm-docker.sock",
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=unix:///tmp/companyhelm-docker.sock"));
+  assert.deepEqual(runtimeOptions.HostConfig.Mounts, [
+    baseMount,
+    {
+      Type: "bind",
+      Source: "/tmp/companyhelm-docker.sock",
+      Target: "/tmp/companyhelm-docker.sock",
+    },
+  ]);
+});
+
 test("ThreadContainerService pulls missing images before creating containers", async () => {
   const pulledImages: string[] = [];
   const createdImages: string[] = [];
@@ -205,6 +273,98 @@ test("ThreadContainerService pulls missing images before creating containers", a
 
   assert.deepEqual(pulledImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
   assert.deepEqual(createdImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
+});
+
+test("ThreadContainerService host docker runtime mode skips dind image/container", async () => {
+  const inspectedImages: string[] = [];
+  const createdImages: string[] = [];
+
+  const fakeDocker = {
+    getImage(image: string) {
+      return {
+        async inspect() {
+          inspectedImages.push(image);
+          return {};
+        },
+      };
+    },
+    pull(_image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
+      callback(null, {} as NodeJS.ReadableStream);
+    },
+    modem: {
+      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+        callback(null);
+      },
+    },
+    async createContainer(options: { Image: string }) {
+      createdImages.push(options.Image);
+      return {};
+    },
+  };
+
+  const service = new ThreadContainerService(fakeDocker as any);
+
+  await service.createThreadContainers({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names: buildThreadContainerNames("thread-host-runtime"),
+    mounts: [],
+    useHostDockerRuntime: true,
+    hostDockerSocketPath: "/tmp",
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.deepEqual(inspectedImages, ["companyhelm/runner:latest"]);
+  assert.deepEqual(createdImages, ["companyhelm/runner:latest"]);
+});
+
+test("ThreadContainerService host runtime mode fails when socket path is missing", async () => {
+  const fakeDocker = {
+    getImage() {
+      return {
+        async inspect() {
+          return {};
+        },
+      };
+    },
+    pull(_image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
+      callback(null, {} as NodeJS.ReadableStream);
+    },
+    modem: {
+      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+        callback(null);
+      },
+    },
+    async createContainer() {
+      return {};
+    },
+  };
+
+  const service = new ThreadContainerService(fakeDocker as any);
+
+  await assert.rejects(
+    () =>
+      service.createThreadContainers({
+        dindImage: "docker:29-dind-rootless",
+        runtimeImage: "companyhelm/runner:latest",
+        names: buildThreadContainerNames("thread-host-runtime-missing-socket"),
+        mounts: [],
+        useHostDockerRuntime: true,
+        hostDockerSocketPath: "/__companyhelm_missing_socket__.sock",
+        user: {
+          uid: 501,
+          gid: 20,
+          agentUser: "agent",
+          agentHomeDirectory: "/home/agent",
+        },
+      }),
+    /Host Docker socket path '\/__companyhelm_missing_socket__\.sock' does not exist\./,
+  );
 });
 
 test("ThreadContainerService creates dind container before runtime container", async () => {

@@ -1,5 +1,6 @@
 import Dockerode, { type ContainerCreateOptions, type MountSettings } from "dockerode";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { expandHome } from "../utils/path.js";
 import { buildNvmCodexBootstrapScript } from "./runtime_shell.js";
@@ -37,10 +38,13 @@ export interface ThreadContainerCreateOptions {
   names: ThreadContainerNames;
   user: ThreadContainerUser;
   mounts: MountSettings[];
+  useHostDockerRuntime?: boolean;
+  hostDockerSocketPath?: string;
 }
 
 const CONTAINER_START_TIMEOUT_MS = 30_000;
 const CONTAINER_START_POLL_MS = 500;
+const DEFAULT_HOST_DOCKER_SOCKET_PATH = "/var/run/docker.sock";
 
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
@@ -187,19 +191,35 @@ export function buildDindContainerOptions(options: ThreadContainerCreateOptions)
 }
 
 export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
+  const hostDockerSocketPath = options.hostDockerSocketPath || DEFAULT_HOST_DOCKER_SOCKET_PATH;
+  const runtimeMounts = options.useHostDockerRuntime
+    ? [
+        ...options.mounts,
+        {
+          Type: "bind",
+          Source: hostDockerSocketPath,
+          Target: hostDockerSocketPath,
+        } as MountSettings,
+      ]
+    : options.mounts;
+
+  const runtimeEnv = [
+    ...buildCommonContainerEnv(options.user),
+    options.useHostDockerRuntime
+      ? `DOCKER_HOST=unix://${hostDockerSocketPath}`
+      : "DOCKER_HOST=tcp://localhost:2375",
+  ];
+
   return {
     name: options.names.runtime,
     Image: options.runtimeImage,
     User: `${options.user.uid}:${options.user.gid}`,
     WorkingDir: "/workspace",
-    Env: [
-      ...buildCommonContainerEnv(options.user),
-      "DOCKER_HOST=tcp://localhost:2375",
-    ],
+    Env: runtimeEnv,
     Cmd: ["sleep", "infinity"],
     HostConfig: {
-      NetworkMode: `container:${options.names.dind}`,
-      Mounts: options.mounts,
+      NetworkMode: options.useHostDockerRuntime ? undefined : `container:${options.names.dind}`,
+      Mounts: runtimeMounts,
     },
   };
 }
@@ -353,6 +373,22 @@ export class ThreadContainerService {
   }
 
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
+    if (options.useHostDockerRuntime) {
+      const hostDockerSocketPath = options.hostDockerSocketPath || DEFAULT_HOST_DOCKER_SOCKET_PATH;
+      if (!existsSync(hostDockerSocketPath)) {
+        throw new Error(`Host Docker socket path '${hostDockerSocketPath}' does not exist.`);
+      }
+      await this.ensureImageAvailable(options.runtimeImage);
+      try {
+        await this.docker.createContainer(buildRuntimeContainerOptions(options));
+      } catch (error) {
+        await this.forceRemoveVolume(options.names.home).catch(() => undefined);
+        await this.forceRemoveVolume(options.names.tmp).catch(() => undefined);
+        throw new Error(toErrorMessage(error));
+      }
+      return;
+    }
+
     await this.ensureImageAvailable(options.dindImage);
     if (options.runtimeImage !== options.dindImage) {
       await this.ensureImageAvailable(options.runtimeImage);

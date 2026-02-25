@@ -44,7 +44,7 @@ export const threads = sqliteTable("threads", {
   isCurrentTurnRunning: integer("is_current_turn_running", { mode: "boolean" }).notNull(),
   workspace: text("workspace").notNull(),
   runtimeContainer: text("runtime_container").notNull(),
-  dindContainer: text("dind_container").notNull(),
+  dindContainer: text("dind_container"),
   // home directory within the container
   homeDirectory: text("home_directory").notNull(),
   // uid of the user within the container

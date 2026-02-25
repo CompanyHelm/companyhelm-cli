@@ -10,6 +10,8 @@
 Docker is available, the docker host runs in a separate container. The network is shared with container.
 - only the `/workspace` is shared with the docker host
 - `{{home_directory}}/.codex/auth.json` is also shared with the docker host
+- Nested DinD is not supported in this environment because the outer runtime already uses rootless DinD.
+- If you need Docker access from thread runtimes, run `companyhelm --use-host-docker-runtime` (optionally with `--host-docker-socket-path <path>`) so the host socket is mounted instead of starting DinD sidecars.
 
 {{github_installations_section}}
 
