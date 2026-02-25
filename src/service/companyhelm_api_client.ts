@@ -2,14 +2,14 @@ import { create, fromBinary, toBinary } from "@bufbuild/protobuf";
 import {
   AgentRunnerControlService,
   ClientMessageSchema,
-  GetGithubInstallationAccessTokenForRunnerRequestSchema,
-  type GetGithubInstallationAccessTokenForRunnerRequest,
-  GetGithubInstallationAccessTokenForRunnerResponseSchema,
-  type GetGithubInstallationAccessTokenForRunnerResponse,
-  ListGithubInstallationsForRunnerRequestSchema,
-  type ListGithubInstallationsForRunnerRequest,
-  ListGithubInstallationsForRunnerResponseSchema,
-  type ListGithubInstallationsForRunnerResponse,
+  GithubInstallationAccessTokenRequestSchema as GetGithubInstallationAccessTokenForRunnerRequestSchema,
+  type GithubInstallationAccessTokenRequest as GetGithubInstallationAccessTokenForRunnerRequest,
+  GithubInstallationAccessTokenResponseSchema as GetGithubInstallationAccessTokenForRunnerResponseSchema,
+  type GithubInstallationAccessTokenResponse as GetGithubInstallationAccessTokenForRunnerResponse,
+  ListGithubInstallationsRequestSchema as ListGithubInstallationsForRunnerRequestSchema,
+  type ListGithubInstallationsRequest as ListGithubInstallationsForRunnerRequest,
+  ListGithubInstallationsResponseSchema as ListGithubInstallationsForRunnerResponseSchema,
+  type ListGithubInstallationsResponse as ListGithubInstallationsForRunnerResponse,
   type ClientMessage,
   RegisterRunnerRequestSchema,
   type RegisterRunnerRequest,
@@ -123,7 +123,7 @@ export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc
       responseDeserialize: (bytes: Buffer): ServerMessage => fromBinary(ServerMessageSchema, bytes),
     },
     listGithubInstallationsForRunner: {
-      path: buildRpcPath(methods.listGithubInstallationsForRunner.name, pathPrefix),
+      path: buildRpcPath(methods.listGithubInstallations.name, pathPrefix),
       requestStream: false,
       responseStream: false,
       requestSerialize: (request: ListGithubInstallationsForRunnerRequest): Buffer =>
@@ -136,7 +136,7 @@ export function createAgentRunnerControlServiceDefinition(pathPrefix = ""): grpc
         fromBinary(ListGithubInstallationsForRunnerResponseSchema, bytes),
     },
     getGithubInstallationAccessTokenForRunner: {
-      path: buildRpcPath(methods.getGithubInstallationAccessTokenForRunner.name, pathPrefix),
+      path: buildRpcPath(methods.githubInstallationAccessToken.name, pathPrefix),
       requestStream: false,
       responseStream: false,
       requestSerialize: (request: GetGithubInstallationAccessTokenForRunnerRequest): Buffer =>

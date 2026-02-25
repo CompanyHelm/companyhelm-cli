@@ -513,6 +513,7 @@ async function sendThreadUpdate(
 
 async function sendTurnExecutionUpdate(
   commandChannel: ClientMessageSink,
+  threadId: string,
   sdkTurnId: string,
   status: TurnStatus,
   requestId?: string,
@@ -522,6 +523,7 @@ async function sendTurnExecutionUpdate(
     payload: {
       case: "turnUpdate",
       value: {
+        threadId,
         sdkTurnId,
         status,
       },
@@ -532,6 +534,8 @@ async function sendTurnExecutionUpdate(
 
 async function sendItemExecutionUpdate(
   commandChannel: ClientMessageSink,
+  threadId: string,
+  sdkTurnId: string,
   sdkItemId: string,
   status: ItemStatus,
   item: ThreadItem,
@@ -547,6 +551,8 @@ async function sendItemExecutionUpdate(
         itemType: mapThreadItemType(item),
         text: summarizeThreadItemText(item),
         commandExecutionItem: buildCommandExecutionItem(item),
+        threadId,
+        sdkTurnId,
       },
     },
   }) as ClientMessage;
@@ -1042,6 +1048,7 @@ async function updateThreadTurnState(
 async function waitForThreadTurnCompletion(
   appServer: AppServerService,
   commandChannel: ClientMessageSink,
+  threadId: string,
   sdkThreadId: string,
   sdkTurnId: string,
   requestId?: string,
@@ -1057,6 +1064,8 @@ async function waitForThreadTurnCompletion(
       ) {
         await sendItemExecutionUpdate(
           commandChannel,
+          threadId,
+          sdkTurnId,
           notification.params.item.id,
           ItemStatus.RUNNING,
           notification.params.item,
@@ -1071,6 +1080,8 @@ async function waitForThreadTurnCompletion(
       ) {
         await sendItemExecutionUpdate(
           commandChannel,
+          threadId,
+          sdkTurnId,
           notification.params.item.id,
           ItemStatus.COMPLETED,
           notification.params.item,
@@ -1206,7 +1217,7 @@ async function executeCreateUserMessageRequest(
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: true,
     });
-    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.RUNNING, requestId);
+    await sendTurnExecutionUpdate(commandChannel, request.threadId, sdkTurnId, TurnStatus.RUNNING, requestId);
 
     if (!trackTurnCompletion) {
       keepRuntimeWarm = true;
@@ -1216,6 +1227,7 @@ async function executeCreateUserMessageRequest(
     const terminalStatus = await waitForThreadTurnCompletion(
       appServer,
       commandChannel,
+      request.threadId,
       sdkThreadId,
       sdkTurnId,
       requestId,
@@ -1224,7 +1236,7 @@ async function executeCreateUserMessageRequest(
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: false,
     });
-    await sendTurnExecutionUpdate(commandChannel, sdkTurnId, TurnStatus.COMPLETED, requestId);
+    await sendTurnExecutionUpdate(commandChannel, request.threadId, sdkTurnId, TurnStatus.COMPLETED, requestId);
 
     if (terminalStatus === "failed") {
       await sendRequestError(
