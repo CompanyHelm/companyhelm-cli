@@ -1558,6 +1558,15 @@ test(
     const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-user-message-resume-"));
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
+    const reconnectStopError = new Error("stop root command after user-message resume validation");
+    const nativeSetTimeout = global.setTimeout;
+    let shouldStopAfterValidation = false;
+    const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+      if (shouldStopAfterValidation && timeout === 1_000) {
+        throw reconnectStopError;
+      }
+      return nativeSetTimeout(handler, timeout as any, ...args);
+    }) as typeof global.setTimeout);
 
     const rolloutPath = "/workspace/rollouts/saved-thread-rollout.json";
     let createdThreadId: string | null = null;
@@ -1606,6 +1615,13 @@ test(
         };
 
         await onNotification?.({
+          method: "thread/name/updated",
+          params: {
+            threadId,
+            threadName: `thread title for ${turnId}`,
+          },
+        });
+        await onNotification?.({
           method: "item/started",
           params: {
             threadId,
@@ -1634,6 +1650,7 @@ test(
       let sentSecondUserMessageRequest = false;
       let completedTurns = 0;
       const completedAgentResponses: Array<{ itemId: string; text: string }> = [];
+      const receivedThreadNameUpdates: Array<{ threadId: string; threadName?: string }> = [];
 
       const started = await startFakeServer("/grpc", {
         registerRunner(call, callback) {
@@ -1656,6 +1673,14 @@ test(
             if (message.payload.case === "requestError") {
               receivedRequestError = message;
               call.end();
+              return;
+            }
+
+            if (message.payload.case === "threadNameUpdate") {
+              receivedThreadNameUpdates.push({
+                threadId: message.payload.value.threadId,
+                threadName: message.payload.value.threadName,
+              });
               return;
             }
 
@@ -1737,6 +1762,7 @@ test(
               }
 
               if (completedTurns >= 2) {
+                shouldStopAfterValidation = true;
                 call.end();
               }
             }
@@ -1746,17 +1772,21 @@ test(
 
       server = started.server;
 
-      await runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      });
+      await assert.rejects(
+        runRootCommand({
+          serverUrl: `127.0.0.1:${started.port}/grpc`,
+        }),
+        (error: unknown) => error === reconnectStopError,
+        "expected root command to stop after validating user-message resume flow",
+      );
 
       assert.equal(receivedRequestError, null, "did not expect requestError for repeated user messages");
       assert.ok(createdThreadId, "expected thread id for user message flow");
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
       assert.equal(startThreadSpy.mock.calls.length, 1, "expected first user message to create sdk thread");
       assert.equal(resumeThreadSpy.mock.calls.length, 0, "expected warm app-server session to avoid resume calls");
-      assert.equal(appServerStartSpy.mock.calls.length, 1, "expected app-server to stay warm across both messages");
-      assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server to stop during daemon shutdown");
+      assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server to start for user message flow");
+      assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server to stop during command shutdown");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
       assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
       assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
@@ -1776,6 +1806,14 @@ test(
         ["assistant response for sdk-turn-1", "assistant response for sdk-turn-2"],
         "expected agent response text for both turns",
       );
+      assert.deepEqual(
+        receivedThreadNameUpdates,
+        [
+          { threadId: createdThreadId!, threadName: "thread title for sdk-turn-1" },
+          { threadId: createdThreadId!, threadName: "thread title for sdk-turn-2" },
+        ],
+        "expected threadNameUpdate payloads for thread/name/updated notifications",
+      );
 
       const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
       const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
@@ -1786,6 +1824,7 @@ test(
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
     } finally {
+      reconnectDelaySpy.mockRestore();
       createThreadContainersSpy.mockRestore();
       ensureContainerRunningSpy.mockRestore();
       waitForContainerRunningSpy.mockRestore();

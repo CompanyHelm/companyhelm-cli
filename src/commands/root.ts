@@ -518,6 +518,26 @@ async function sendThreadUpdate(
   await commandChannel.send(message);
 }
 
+async function sendThreadNameUpdate(
+  commandChannel: ClientMessageSink,
+  threadId: string,
+  threadName?: string,
+): Promise<void> {
+  const normalizedThreadName = typeof threadName === "string"
+    ? threadName.trim() || undefined
+    : undefined;
+  const message = create(ClientMessageSchema, {
+    payload: {
+      case: "threadNameUpdate",
+      value: {
+        threadId,
+        threadName: normalizedThreadName,
+      },
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
+}
+
 async function sendTurnExecutionUpdate(
   commandChannel: ClientMessageSink,
   threadId: string,
@@ -1069,6 +1089,10 @@ async function waitForThreadTurnCompletion(
     sdkThreadId,
     sdkTurnId,
     async (notification: ServerNotification) => {
+      if (notification.method === "thread/name/updated" && notification.params.threadId === sdkThreadId) {
+        await sendThreadNameUpdate(commandChannel, threadId, notification.params.threadName);
+      }
+
       if (
         notification.method === "item/started" &&
         notification.params.threadId === sdkThreadId &&
