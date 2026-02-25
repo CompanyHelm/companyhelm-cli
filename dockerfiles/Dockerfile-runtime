@@ -12,7 +12,8 @@ ENV TZ=Etc/UTC \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     NVM_DIR=/usr/local/nvm \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+    PATH=/usr/local/nvm/current/bin:${PATH}
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
