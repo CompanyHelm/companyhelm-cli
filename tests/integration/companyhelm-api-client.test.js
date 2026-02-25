@@ -1,6 +1,5 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
-const { existsSync } = require("node:fs");
 const { mkdir, mkdtemp, rm } = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
@@ -22,9 +21,7 @@ const { initDb } = require("../../dist/state/db.js");
 const { agents, agentSdks, llmModels } = require("../../dist/state/schema.js");
 const TEST_HOME_ROOT = process.env.COMPANYHELM_TEST_HOME_ROOT
   ? path.resolve(process.env.COMPANYHELM_TEST_HOME_ROOT)
-  : existsSync("/workspace")
-    ? "/workspace"
-    : tmpdir();
+  : tmpdir();
 
 async function makeTemporaryHomeDirectory(prefix) {
   const tempRoot = path.join(TEST_HOME_ROOT, ".tmp-companyhelm-tests");

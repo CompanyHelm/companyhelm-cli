@@ -776,6 +776,7 @@ async function handleCreateThreadRequest(
   const mounts = buildSharedThreadMounts({
     threadDirectory,
     homeVolumeName: containerNames.home,
+    tmpVolumeName: containerNames.tmp,
     codexAuthMode: authMode,
     codexAuthPath: cfg.codex.codex_auth_path,
     codexAuthFilePath: cfg.codex.codex_auth_file_path,
@@ -811,6 +812,7 @@ async function handleCreateThreadRequest(
     await containerService.forceRemoveContainer(containerNames.runtime);
     await containerService.forceRemoveContainer(containerNames.dind);
     await containerService.forceRemoveVolume(containerNames.home);
+    await containerService.forceRemoveVolume(containerNames.tmp);
     await sendRequestError(commandChannel, `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     return;
   } finally {
@@ -948,6 +950,7 @@ async function deleteThreadWithCleanup(
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
     await containerService.forceRemoveContainer(existingThread.dindContainer);
     await containerService.forceRemoveVolume(containerNames.home);
+    await containerService.forceRemoveVolume(containerNames.tmp);
     removeWorkspaceDirectory(existingThread.workspace);
   } catch (error: unknown) {
     return {

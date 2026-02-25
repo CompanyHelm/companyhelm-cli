@@ -10,6 +10,7 @@ export interface ThreadContainerNames {
   dind: string;
   runtime: string;
   home: string;
+  tmp: string;
 }
 
 export interface ThreadContainerUser {
@@ -22,6 +23,7 @@ export interface ThreadContainerUser {
 export interface ThreadMountOptions {
   threadDirectory: string;
   homeVolumeName: string;
+  tmpVolumeName: string;
   codexAuthMode: ThreadAuthMode;
   codexAuthPath: string;
   codexAuthFilePath: string;
@@ -55,6 +57,7 @@ export function buildThreadContainerNames(threadId: string): ThreadContainerName
     dind: `companyhelm-dind-thread-${threadId}`,
     runtime: `companyhelm-runtime-thread-${threadId}`,
     home: `companyhelm-home-thread-${threadId}`,
+    tmp: `companyhelm-tmp-thread-${threadId}`,
   };
 }
 
@@ -91,6 +94,11 @@ export function buildSharedThreadMounts(options: ThreadMountOptions): MountSetti
       Type: "volume",
       Source: options.homeVolumeName,
       Target: options.containerHomeDirectory,
+    },
+    {
+      Type: "volume",
+      Source: options.tmpVolumeName,
+      Target: "/tmp",
     },
   ];
 
@@ -356,6 +364,7 @@ export class ThreadContainerService {
     } catch (error) {
       await this.forceRemoveContainer(options.names.dind);
       await this.forceRemoveVolume(options.names.home).catch(() => undefined);
+      await this.forceRemoveVolume(options.names.tmp).catch(() => undefined);
       throw new Error(toErrorMessage(error));
     }
   }

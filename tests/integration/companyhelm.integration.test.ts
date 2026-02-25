@@ -43,12 +43,10 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const TEST_HOME_ROOT = process.env.COMPANYHELM_TEST_HOME_ROOT
   ? path.resolve(process.env.COMPANYHELM_TEST_HOME_ROOT)
-  : existsSync("/workspace")
-    ? "/workspace"
-    : tmpdir();
+  : tmpdir();
 
-async function makeTemporaryHomeDirectory(prefix: string): Promise<string> {
-  const tempRoot = path.join(TEST_HOME_ROOT, ".tmp-companyhelm-tests");
+async function makeTemporaryHomeDirectory(prefix: string, homeRoot: string = TEST_HOME_ROOT): Promise<string> {
+  const tempRoot = path.join(homeRoot, ".tmp-companyhelm-tests");
   await mkdir(tempRoot, { recursive: true });
   return mkdtemp(path.join(tempRoot, prefix));
 }
@@ -201,9 +199,32 @@ async function containerExists(docker: Dockerode, name: string): Promise<boolean
   }
 }
 
+async function volumeExists(docker: Dockerode, name: string): Promise<boolean> {
+  try {
+    await docker.getVolume(name).inspect();
+    return true;
+  } catch (error: unknown) {
+    if (isDockerNotFoundError(error)) {
+      return false;
+    }
+    throw error;
+  }
+}
+
 async function forceRemoveContainerIfExists(docker: Dockerode, name: string): Promise<void> {
   try {
     await docker.getContainer(name).remove({ force: true });
+  } catch (error: unknown) {
+    if (isDockerNotFoundError(error)) {
+      return;
+    }
+    throw error;
+  }
+}
+
+async function forceRemoveVolumeIfExists(docker: Dockerode, name: string): Promise<void> {
+  try {
+    await docker.getVolume(name).remove();
   } catch (error: unknown) {
     if (isDockerNotFoundError(error)) {
       return;
@@ -849,6 +870,15 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-lifecycle-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after lifecycle validation");
+  const nativeSetTimeout = global.setTimeout;
+  let shouldStopAfterValidation = false;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
   const activeContainerNames = new Set<string>();
   const activeVolumeNames = new Set<string>();
 
@@ -858,6 +888,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
       activeContainerNames.add(options.names.runtime);
       activeContainerNames.add(options.names.dind);
       activeVolumeNames.add(options.names.home);
+      activeVolumeNames.add(options.names.tmp);
     });
   const forceRemoveContainerSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
@@ -885,9 +916,11 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     let runtimeContainerPresentAtReady: boolean | null = null;
     let dindContainerPresentAtReady: boolean | null = null;
     let homeVolumePresentAtReady: boolean | null = null;
+    let tmpVolumePresentAtReady: boolean | null = null;
     let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
     let dindContainerPresentAfterThreadDelete: boolean | null = null;
     let homeVolumePresentAfterThreadDelete: boolean | null = null;
+    let tmpVolumePresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
     let expectedThreadWorkspacePath: string | null = null;
     let expectedAgentWorkspacePath: string | null = null;
@@ -949,9 +982,11 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
             const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
             const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
             const expectedHomeVolume = `companyhelm-home-thread-${createdThreadId}`;
+            const expectedTmpVolume = `companyhelm-tmp-thread-${createdThreadId}`;
             runtimeContainerPresentAtReady = activeContainerNames.has(expectedRuntimeContainer);
             dindContainerPresentAtReady = activeContainerNames.has(expectedDindContainer);
             homeVolumePresentAtReady = activeVolumeNames.has(expectedHomeVolume);
+            tmpVolumePresentAtReady = activeVolumeNames.has(expectedTmpVolume);
 
             const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
             threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
@@ -994,6 +1029,9 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
               homeVolumePresentAfterThreadDelete = activeVolumeNames.has(
                 `companyhelm-home-thread-${createdThreadId}`,
               );
+              tmpVolumePresentAfterThreadDelete = activeVolumeNames.has(
+                `companyhelm-tmp-thread-${createdThreadId}`,
+              );
             }
 
             sentDeleteAgentRequest = true;
@@ -1016,6 +1054,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
             message.payload.value.status === AgentStatus.DELETED
           ) {
             receivedDeleteAgentUpdate = true;
+            shouldStopAfterValidation = true;
             call.end();
           }
         });
@@ -1024,9 +1063,13 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
     server = started.server;
 
-    await runRootCommand({
-      serverUrl: `127.0.0.1:${started.port}/grpc`,
-    });
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after first validated lifecycle flow",
+    );
 
     assert.equal(receivedRequestError, null, "did not expect requestError during lifecycle flow");
     assert.ok(createdThreadId, "expected thread id from thread ready update");
@@ -1034,6 +1077,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     assert.equal(runtimeContainerPresentAtReady, true, "expected runtime container to exist when thread is ready");
     assert.equal(dindContainerPresentAtReady, true, "expected dind container to exist when thread is ready");
     assert.equal(homeVolumePresentAtReady, true, "expected thread home volume to exist when thread is ready");
+    assert.equal(tmpVolumePresentAtReady, true, "expected thread tmp volume to exist when thread is ready");
     assert.equal(
       runtimeContainerPresentAfterThreadDelete,
       false,
@@ -1049,9 +1093,14 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
       false,
       "expected thread home volume to be removed after deleteThreadRequest",
     );
+    assert.equal(
+      tmpVolumePresentAfterThreadDelete,
+      false,
+      "expected thread tmp volume to be removed after deleteThreadRequest",
+    );
     assert.equal(threadWorkspacePresentAtReady, true, "expected thread workspace directory to exist when thread is ready");
     assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of lifecycle flow");
-    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home volumes at end of lifecycle flow");
+    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home/tmp volumes at end of lifecycle flow");
 
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
     const { db, client } = await initDb(stateDbPath);
@@ -1082,6 +1131,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${createdThreadId}`);
     assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${createdThreadId}`);
     assert.equal(createOptions.names.home, `companyhelm-home-thread-${createdThreadId}`);
+    assert.equal(createOptions.names.tmp, `companyhelm-tmp-thread-${createdThreadId}`);
     assert.equal(createOptions.mounts[0]?.Target, "/workspace");
     assert.equal(createOptions.mounts[0]?.Source, threadWorkspacePath);
     const homeVolumeMount = createOptions.mounts.find(
@@ -1089,6 +1139,11 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
         mount.Type === "volume" && mount.Source === `companyhelm-home-thread-${createdThreadId}`,
     );
     assert.equal(homeVolumeMount?.Target, "/home/agent");
+    const tmpVolumeMount = createOptions.mounts.find(
+      (mount: { Type?: string; Source?: string; Target?: string }) =>
+        mount.Type === "volume" && mount.Source === `companyhelm-tmp-thread-${createdThreadId}`,
+    );
+    assert.equal(tmpVolumeMount?.Target, "/tmp");
     assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include agent/thread segmentation");
     assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
     assert.equal(
@@ -1103,8 +1158,12 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
       `companyhelm-dind-thread-${createdThreadId}`,
     ]);
     const removedVolumeNames = forceRemoveVolumeSpy.mock.calls.map((call) => call[0]);
-    assert.deepEqual(removedVolumeNames, [`companyhelm-home-thread-${createdThreadId}`]);
+    assert.deepEqual(removedVolumeNames, [
+      `companyhelm-home-thread-${createdThreadId}`,
+      `companyhelm-tmp-thread-${createdThreadId}`,
+    ]);
   } finally {
+    reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
     forceRemoveContainerSpy.mockRestore();
     forceRemoveVolumeSpy.mockRestore();
@@ -1140,6 +1199,7 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
       activeContainerNames.add(options.names.runtime);
       activeContainerNames.add(options.names.dind);
       activeVolumeNames.add(options.names.home);
+      activeVolumeNames.add(options.names.tmp);
     });
   const forceRemoveContainerSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
@@ -1166,6 +1226,7 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
     let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
     let dindContainerPresentAfterThreadDelete: boolean | null = null;
     let homeVolumePresentAfterThreadDelete: boolean | null = null;
+    let tmpVolumePresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
     let agentWorkspacePath: string | null = null;
     const deleteSequence: string[] = [];
@@ -1253,6 +1314,7 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
               runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-runtime-thread-${createdThreadId}`);
               dindContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-dind-thread-${createdThreadId}`);
               homeVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-home-thread-${createdThreadId}`);
+              tmpVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-tmp-thread-${createdThreadId}`);
             }
             return;
           }
@@ -1301,8 +1363,13 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
       false,
       "expected thread home volume to be removed during deleteAgentRequest thread cleanup",
     );
+    assert.equal(
+      tmpVolumePresentAfterThreadDelete,
+      false,
+      "expected thread tmp volume to be removed during deleteAgentRequest thread cleanup",
+    );
     assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of delete-agent cascade flow");
-    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home volumes at end of delete-agent cascade flow");
+    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home/tmp volumes at end of delete-agent cascade flow");
     assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
     assert.equal(agentWorkspacePath ? existsSync(agentWorkspacePath) : false, false, "expected agent workspace directory to be removed");
 
@@ -1335,7 +1402,10 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
       `companyhelm-dind-thread-${createdThreadId}`,
     ]);
     const removedVolumeNames = forceRemoveVolumeSpy.mock.calls.map((call) => call[0]);
-    assert.deepEqual(removedVolumeNames, [`companyhelm-home-thread-${createdThreadId}`]);
+    assert.deepEqual(removedVolumeNames, [
+      `companyhelm-home-thread-${createdThreadId}`,
+      `companyhelm-tmp-thread-${createdThreadId}`,
+    ]);
   } finally {
     reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
@@ -1362,7 +1432,8 @@ test(
     }
 
     const docker = new Dockerode();
-    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-real-docker-lifecycle-");
+    const dockerSharedHomeRoot = existsSync("/workspace") ? "/workspace" : TEST_HOME_ROOT;
+    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-real-docker-lifecycle-", dockerSharedHomeRoot);
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
     const reconnectStopError = new Error("stop root command after real docker lifecycle validation");
@@ -1378,8 +1449,12 @@ test(
     let createdThreadId: string | null = null;
     let runtimeContainerStatusAtReady: string | null = null;
     let dindContainerStatusAtReady: string | null = null;
+    let homeVolumePresentAtReady: boolean | null = null;
+    let tmpVolumePresentAtReady: boolean | null = null;
     let runtimeContainerAbsentAfterDelete: boolean | null = null;
     let dindContainerAbsentAfterDelete: boolean | null = null;
+    let homeVolumeAbsentAfterDelete: boolean | null = null;
+    let tmpVolumeAbsentAfterDelete: boolean | null = null;
     let workspacePathAtReady: string | null = null;
     let workspaceExistsAtReady: boolean | null = null;
     let workspaceAbsentAfterThreadDelete: boolean | null = null;
@@ -1457,6 +1532,8 @@ test(
                 const dindInspect = await docker.getContainer(names.dind).inspect();
                 runtimeContainerStatusAtReady = runtimeInspect.State?.Status ?? null;
                 dindContainerStatusAtReady = dindInspect.State?.Status ?? null;
+                homeVolumePresentAtReady = await volumeExists(docker, names.home);
+                tmpVolumePresentAtReady = await volumeExists(docker, names.tmp);
 
                 const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
                 const { db, client } = await initDb(stateDbPath);
@@ -1492,6 +1569,8 @@ test(
                   const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
                   runtimeContainerAbsentAfterDelete = !(await containerExists(docker, names.runtime));
                   dindContainerAbsentAfterDelete = !(await containerExists(docker, names.dind));
+                  homeVolumeAbsentAfterDelete = !(await volumeExists(docker, names.home));
+                  tmpVolumeAbsentAfterDelete = !(await volumeExists(docker, names.tmp));
                 }
                 workspaceAbsentAfterThreadDelete = workspacePathAtReady ? !existsSync(workspacePathAtReady) : false;
                 agentWorkspacePathAtReady = workspacePathAtReady ? path.dirname(workspacePathAtReady) : null;
@@ -1544,6 +1623,8 @@ test(
       assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
       assert.equal(runtimeContainerStatusAtReady, "created", "expected runtime container to be created (not started) when thread is ready");
       assert.equal(dindContainerStatusAtReady, "created", "expected dind container to be created (not started) when thread is ready");
+      assert.equal(homeVolumePresentAtReady, true, "expected thread home volume to be created when thread is ready");
+      assert.equal(tmpVolumePresentAtReady, true, "expected thread tmp volume to be created when thread is ready");
       assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
       assert.equal(workspaceAbsentAfterThreadDelete, true, "expected thread workspace directory to be removed on deleteThreadRequest");
       assert.equal(
@@ -1558,12 +1639,16 @@ test(
       );
       assert.equal(runtimeContainerAbsentAfterDelete, true, "expected runtime container to be removed after deleteThreadRequest");
       assert.equal(dindContainerAbsentAfterDelete, true, "expected dind container to be removed after deleteThreadRequest");
+      assert.equal(homeVolumeAbsentAfterDelete, true, "expected thread home volume to be removed after deleteThreadRequest");
+      assert.equal(tmpVolumeAbsentAfterDelete, true, "expected thread tmp volume to be removed after deleteThreadRequest");
       assert.equal(agentWorkspaceExistsAfterAgentDelete, false, "expected agent workspace directory to be removed on deleteAgentRequest");
     } finally {
       if (createdThreadId) {
         const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
         await forceRemoveContainerIfExists(docker, names.runtime);
         await forceRemoveContainerIfExists(docker, names.dind);
+        await forceRemoveVolumeIfExists(docker, names.home);
+        await forceRemoveVolumeIfExists(docker, names.tmp);
       }
 
       reconnectDelaySpy.mockRestore();
