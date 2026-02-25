@@ -1267,7 +1267,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 
   try {
     while (true) {
-      const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
+      const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url, logger });
       let commandChannel: CompanyhelmCommandChannel | null = null;
 
       try {

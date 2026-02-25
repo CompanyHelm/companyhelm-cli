@@ -20,6 +20,7 @@ import {
 } from "@companyhelm/protos";
 import * as grpc from "@grpc/grpc-js";
 import { AsyncQueue } from "../utils/async_queue.js";
+import type { Logger } from "../utils/logger.js";
 
 function normalizePathPrefix(value: string): string {
   if (!value || value === "/") {
@@ -194,6 +195,27 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
+type CompanyhelmApiClientLogger = Pick<Logger, "debug">;
+const NOOP_COMPANYHELM_API_CLIENT_LOGGER: CompanyhelmApiClientLogger = {
+  debug: () => undefined,
+};
+
+function stringifyMessageForLog(message: unknown): string {
+  try {
+    return JSON.stringify(message, (_, value: unknown) => (typeof value === "bigint" ? value.toString() : value));
+  } catch {
+    return String(message);
+  }
+}
+
+function describeServerMessage(message: ServerMessage): string {
+  return message.request.case ?? "unknown";
+}
+
+function describeClientMessage(message: ClientMessage): string {
+  return message.payload.case ?? "unknown";
+}
+
 export interface CompanyhelmApiCallOptions {
   metadata?: grpc.Metadata;
   callOptions?: grpc.CallOptions;
@@ -203,18 +225,21 @@ export interface CompanyhelmApiClientOptions {
   apiUrl: string;
   credentials?: grpc.ChannelCredentials;
   channelOptions?: grpc.ClientOptions;
+  logger?: CompanyhelmApiClientLogger;
 }
 
 export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
   private readonly messages = new AsyncQueue<ServerMessage>();
   private readonly call: grpc.ClientDuplexStream<ClientMessage, ServerMessage>;
+  private readonly logger: CompanyhelmApiClientLogger;
   private readonly opened: Promise<void>;
   private resolveOpened: (() => void) | null = null;
   private rejectOpened: ((reason?: unknown) => void) | null = null;
   private openState: "pending" | "opened" | "failed" = "pending";
 
-  constructor(call: grpc.ClientDuplexStream<ClientMessage, ServerMessage>) {
+  constructor(call: grpc.ClientDuplexStream<ClientMessage, ServerMessage>, logger?: CompanyhelmApiClientLogger) {
     this.call = call;
+    this.logger = logger ?? NOOP_COMPANYHELM_API_CLIENT_LOGGER;
     this.opened = new Promise<void>((resolve, reject) => {
       this.resolveOpened = resolve;
       this.rejectOpened = reject;
@@ -222,6 +247,9 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
 
     call.on("data", (message: ServerMessage) => {
       this.setOpened();
+      this.logger.debug(
+        `[companyhelm-api][incoming][server-message:${describeServerMessage(message)}] ${stringifyMessageForLog(message)}`,
+      );
       this.messages.push(message);
     });
     call.on("metadata", () => {
@@ -273,6 +301,9 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
   }
 
   send(message: ClientMessage): Promise<void> {
+    this.logger.debug(
+      `[companyhelm-api][outgoing][client-message:${describeClientMessage(message)}] ${stringifyMessageForLog(message)}`,
+    );
     return new Promise<void>((resolve, reject) => {
       this.call.write(message, (error?: Error | null) => {
         if (error) {
@@ -328,9 +359,11 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
 export class CompanyhelmApiClient {
   readonly endpoint: CompanyhelmApiEndpoint;
   private readonly client: AgentRunnerControlClient;
+  private readonly logger: CompanyhelmApiClientLogger;
 
   constructor(options: CompanyhelmApiClientOptions) {
     this.endpoint = parseCompanyhelmApiUrl(options.apiUrl);
+    this.logger = options.logger ?? NOOP_COMPANYHELM_API_CLIENT_LOGGER;
     this.client = createAgentRunnerControlClient(
       this.endpoint,
       options.credentials ?? defaultCredentials(this.endpoint),
@@ -367,7 +400,7 @@ export class CompanyhelmApiClient {
   ): Promise<CompanyhelmCommandChannel> {
     await this.registerRunner(registerRequest, options);
     const stream = this.client.controlChannel(options?.metadata, options?.callOptions);
-    return new CompanyhelmCommandChannel(stream);
+    return new CompanyhelmCommandChannel(stream, this.logger);
   }
 
   listGithubInstallationsForRunner(
