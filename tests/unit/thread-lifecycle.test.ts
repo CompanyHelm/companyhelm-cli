@@ -11,12 +11,13 @@ import {
   ThreadContainerService,
 } from "../../dist/service/thread_lifecycle.js";
 
-test("buildThreadContainerNames returns deterministic runtime, dind, and home volume names", () => {
+test("buildThreadContainerNames returns deterministic runtime, dind, home, and tmp volume names", () => {
   const names = buildThreadContainerNames("thread-123");
 
   assert.equal(names.dind, "companyhelm-dind-thread-thread-123");
   assert.equal(names.runtime, "companyhelm-runtime-thread-thread-123");
   assert.equal(names.home, "companyhelm-home-thread-thread-123");
+  assert.equal(names.tmp, "companyhelm-tmp-thread-thread-123");
 });
 
 test("resolveThreadsRootDirectory keeps absolute threads directory", () => {
@@ -38,6 +39,7 @@ test("buildSharedThreadMounts reuses shared workspace and dedicated auth mount",
   const mounts = buildSharedThreadMounts({
     threadDirectory: "/tmp/threads/thread-1",
     homeVolumeName: "companyhelm-home-thread-thread-1",
+    tmpVolumeName: "companyhelm-tmp-thread-thread-1",
     codexAuthMode: "dedicated",
     codexAuthPath: "/home/agent/.codex/auth.json",
     codexAuthFilePath: "codex-auth.json",
@@ -57,6 +59,11 @@ test("buildSharedThreadMounts reuses shared workspace and dedicated auth mount",
       Target: "/home/agent",
     },
     {
+      Type: "volume",
+      Source: "companyhelm-tmp-thread-thread-1",
+      Target: "/tmp",
+    },
+    {
       Type: "bind",
       Source: "/config/companyhelm/codex-auth.json",
       Target: "/home/agent/.codex/auth.json",
@@ -68,6 +75,7 @@ test("buildSharedThreadMounts uses codex_auth_path as both source and target in 
   const mounts = buildSharedThreadMounts({
     threadDirectory: "/tmp/threads/thread-2",
     homeVolumeName: "companyhelm-home-thread-thread-2",
+    tmpVolumeName: "companyhelm-tmp-thread-thread-2",
     codexAuthMode: "host",
     codexAuthPath: "/Users/alice/.codex/auth.json",
     codexAuthFilePath: "ignored.json",
@@ -85,6 +93,11 @@ test("buildSharedThreadMounts uses codex_auth_path as both source and target in 
       Type: "volume",
       Source: "companyhelm-home-thread-thread-2",
       Target: "/home/agent",
+    },
+    {
+      Type: "volume",
+      Source: "companyhelm-tmp-thread-thread-2",
+      Target: "/tmp",
     },
     {
       Type: "bind",
@@ -308,7 +321,10 @@ test("ThreadContainerService removes dind container when runtime container creat
   );
 
   assert.deepEqual(removedContainerNames, ["companyhelm-dind-thread-thread-runtime-create-failure"]);
-  assert.deepEqual(removedVolumeNames, ["companyhelm-home-thread-thread-runtime-create-failure"]);
+  assert.deepEqual(removedVolumeNames, [
+    "companyhelm-home-thread-thread-runtime-create-failure",
+    "companyhelm-tmp-thread-thread-runtime-create-failure",
+  ]);
 });
 
 test("ThreadContainerService provisions runtime user identity with docker exec as root", async () => {

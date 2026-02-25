@@ -1,6 +1,6 @@
 const assert = require("node:assert/strict");
 const { spawn } = require("node:child_process");
-const { mkdtemp, rm } = require("node:fs/promises");
+const { mkdir, mkdtemp, rm } = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
 const { tmpdir } = require("node:os");
@@ -19,6 +19,15 @@ const {
 } = require("../../dist/service/companyhelm_api_client.js");
 const { initDb } = require("../../dist/state/db.js");
 const { agents, agentSdks, llmModels } = require("../../dist/state/schema.js");
+const TEST_HOME_ROOT = process.env.COMPANYHELM_TEST_HOME_ROOT
+  ? path.resolve(process.env.COMPANYHELM_TEST_HOME_ROOT)
+  : tmpdir();
+
+async function makeTemporaryHomeDirectory(prefix) {
+  const tempRoot = path.join(TEST_HOME_ROOT, ".tmp-companyhelm-tests");
+  await mkdir(tempRoot, { recursive: true });
+  return mkdtemp(path.join(tempRoot, prefix));
+}
 
 function waitForExit(child, timeoutMs = 15_000) {
   return new Promise((resolve, reject) => {
@@ -198,7 +207,7 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
 });
 
 test("companyhelm root command connects to API and triggers registration flow", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-integration-");
   t.after(async () => {
     await rm(homeDirectory, { recursive: true, force: true });
   });
@@ -251,7 +260,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
 });
 
 test("companyhelm root command retries until server becomes available", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-retry-");
   t.after(async () => {
     await rm(homeDirectory, { recursive: true, force: true });
   });
@@ -316,7 +325,7 @@ test("companyhelm root command retries until server becomes available", async (t
 });
 
 test("companyhelm root command handles createAgentCommand by storing agent and sending update", async (t) => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-agent-");
   t.after(async () => {
     await rm(homeDirectory, { recursive: true, force: true });
   });
