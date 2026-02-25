@@ -839,17 +839,17 @@ async function handleDeleteAgentRequest(
   cfg: Config,
   commandChannel: ClientMessageSink,
   request: DeleteAgentRequest,
+  logger: Logger,
 ): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
 
-  let agentExists = false;
   let threadIds: string[] = [];
 
   try {
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
-    agentExists = Boolean(existingAgent);
-    if (!agentExists) {
-      await sendRequestError(commandChannel, `Agent '${request.agentId}' does not exist.`);
+    if (!existingAgent) {
+      logger.warn(`Delete requested for missing agent '${request.agentId}'. Treating as deleted.`);
+      await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.DELETED);
       return;
     }
 
@@ -870,10 +870,6 @@ async function handleDeleteAgentRequest(
     client.close();
   }
 
-  if (!agentExists) {
-    return;
-  }
-
   for (const threadId of threadIds) {
     const deleteResult = await deleteThreadWithCleanup(cfg, {
       agentId: request.agentId,
@@ -886,9 +882,12 @@ async function handleDeleteAgentRequest(
       );
       return;
     }
-    if (deleteResult.kind === "deleted") {
-      await sendThreadUpdate(commandChannel, threadId, ThreadStatus.DELETED);
+    if (deleteResult.kind === "not_found") {
+      logger.warn(
+        `Thread '${threadId}' was already missing while deleting agent '${request.agentId}'. Treating as deleted.`,
+      );
     }
+    await sendThreadUpdate(commandChannel, threadId, ThreadStatus.DELETED);
   }
 
   removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
@@ -994,10 +993,14 @@ async function handleDeleteThreadRequest(
   cfg: Config,
   commandChannel: ClientMessageSink,
   request: DeleteThreadRequest,
+  logger: Logger,
 ): Promise<void> {
   const deleteResult = await deleteThreadWithCleanup(cfg, request);
   if (deleteResult.kind === "not_found") {
-    await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+    logger.warn(
+      `Delete requested for missing thread '${request.threadId}' for agent '${request.agentId}'. Treating as deleted.`,
+    );
+    await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
     return;
   }
   if (deleteResult.kind === "error") {
@@ -1443,10 +1446,10 @@ async function runCommandLoop(
         await handleCreateThreadRequest(cfg, commandMessageSink, serverMessage.request.value, apiClient, apiCallOptions, logger);
         break;
       case "deleteAgentRequest":
-        await handleDeleteAgentRequest(cfg, commandMessageSink, serverMessage.request.value);
+        await handleDeleteAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       case "deleteThreadRequest":
-        await handleDeleteThreadRequest(cfg, commandMessageSink, serverMessage.request.value);
+        await handleDeleteThreadRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       case "createUserMessageRequest":
         void handleCreateUserMessageRequest(

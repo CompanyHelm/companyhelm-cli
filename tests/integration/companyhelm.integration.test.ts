@@ -654,6 +654,185 @@ test("companyhelm root command returns requestError for createThreadRequest when
   }
 });
 
+test("companyhelm root command returns threadUpdate deleted for deleteThreadRequest when thread does not exist", async () => {
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-delete-thread-missing-thread-");
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after missing-thread delete validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout, ...args);
+  }) as typeof global.setTimeout);
+  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+
+    let receivedRequestError: any = null;
+    let receivedDeletedThreadUpdate = false;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "deleteThreadRequest",
+              value: {
+                agentId: "missing-agent",
+                threadId: "thread-missing-delete",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.threadId === "thread-missing-delete" &&
+            message.payload.value.status === ThreadStatus.DELETED
+          ) {
+            receivedDeletedThreadUpdate = true;
+            shouldStopAfterValidation = true;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after missing-thread delete validation",
+    );
+
+    assert.equal(receivedRequestError, null, "did not expect requestError for missing thread delete");
+    assert.equal(receivedDeletedThreadUpdate, true, "expected deleted update for missing thread delete");
+    assert.equal(
+      warnSpy.mock.calls.some((call) =>
+        String(call[0]).includes(
+          "Delete requested for missing thread 'thread-missing-delete' for agent 'missing-agent'. Treating as deleted.",
+        ),
+      ),
+      true,
+      "expected warning log for missing thread delete",
+    );
+  } finally {
+    reconnectDelaySpy.mockRestore();
+    warnSpy.mockRestore();
+    if (server) {
+      await shutdownServer(server);
+    }
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command returns agentUpdate deleted for deleteAgentRequest when agent does not exist", async () => {
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-delete-agent-missing-agent-");
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after missing-agent delete validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout, ...args);
+  }) as typeof global.setTimeout);
+  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+
+    let receivedRequestError: any = null;
+    let receivedDeletedAgentUpdate = false;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "deleteAgentRequest",
+              value: {
+                agentId: "missing-agent-delete",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "missing-agent-delete" &&
+            message.payload.value.status === AgentStatus.DELETED
+          ) {
+            receivedDeletedAgentUpdate = true;
+            shouldStopAfterValidation = true;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after missing-agent delete validation",
+    );
+
+    assert.equal(receivedRequestError, null, "did not expect requestError for missing agent delete");
+    assert.equal(receivedDeletedAgentUpdate, true, "expected deleted update for missing agent delete");
+    assert.equal(
+      warnSpy.mock.calls.some((call) =>
+        String(call[0]).includes("Delete requested for missing agent 'missing-agent-delete'. Treating as deleted."),
+      ),
+      true,
+      "expected warning log for missing agent delete",
+    );
+  } finally {
+    reconnectDelaySpy.mockRestore();
+    warnSpy.mockRestore();
+    if (server) {
+      await shutdownServer(server);
+    }
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test("companyhelm root command writes GitHub installations into thread AGENTS.md", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-github-installations-");
   let server: grpc.Server | undefined;
