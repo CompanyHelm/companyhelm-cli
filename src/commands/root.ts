@@ -222,6 +222,14 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+export function shouldUseTurnSteer(allowSteer: boolean, startedFromIdle: boolean): boolean {
+  return allowSteer && !startedFromIdle;
+}
+
+export function isNoActiveTurnSteerError(error: unknown): boolean {
+  return /no active turn to steer/i.test(toErrorMessage(error));
+}
+
 interface UnknownWireField {
   no?: number;
   wireType?: number;
@@ -1120,6 +1128,7 @@ async function executeCreateUserMessageRequest(
   let sdkTurnId = threadState.currentSdkTurnId;
   let turnAccepted = false;
   let keepRuntimeWarm = false;
+  let shouldTrackTurnCompletion = trackTurnCompletion;
 
   try {
     await ensureThreadRuntimeReady({
@@ -1179,23 +1188,12 @@ async function executeCreateUserMessageRequest(
     if (!sdkThreadId) {
       throw new Error(`Failed to resolve SDK thread id for thread '${request.threadId}'.`);
     }
+    const resolvedSdkThreadId = sdkThreadId;
 
     const input = buildUserTextInput(request.text);
-    if (threadState.isCurrentTurnRunning && request.allowSteer) {
-      if (!threadState.currentSdkTurnId) {
-        throw new Error(`Thread '${request.threadId}' is marked running but has no current SDK turn id.`);
-      }
-
-      const steerParams: TurnSteerParams = {
-        threadId: sdkThreadId,
-        input,
-        expectedTurnId: threadState.currentSdkTurnId,
-      };
-      const turnSteerResult = await appServer.steerTurn(steerParams);
-      sdkTurnId = turnSteerResult.turnId;
-    } else {
+    const startNewTurn = async (): Promise<string> => {
       const turnStartParams: TurnStartParams = {
-        threadId: sdkThreadId,
+        threadId: resolvedSdkThreadId,
         input,
         model: request.model ?? null,
         effort: normalizeReasoningEffort(request.modelReasoningLevel ?? threadState.reasoningLevel),
@@ -1208,7 +1206,35 @@ async function executeCreateUserMessageRequest(
         collaborationMode: null,
       };
       const turnStartResult = await appServer.startTurn(turnStartParams);
-      sdkTurnId = turnStartResult.turn.id;
+      return turnStartResult.turn.id;
+    };
+
+    if (shouldUseTurnSteer(request.allowSteer, startedFromIdle)) {
+      if (!threadState.currentSdkTurnId) {
+        throw new Error(`Thread '${request.threadId}' is marked running but has no current SDK turn id.`);
+      }
+
+      const steerParams: TurnSteerParams = {
+        threadId: resolvedSdkThreadId,
+        input,
+        expectedTurnId: threadState.currentSdkTurnId,
+      };
+      try {
+        const turnSteerResult = await appServer.steerTurn(steerParams);
+        sdkTurnId = turnSteerResult.turnId;
+      } catch (error: unknown) {
+        if (!isNoActiveTurnSteerError(error)) {
+          throw error;
+        }
+
+        logger.warn(
+          `No active turn to steer for thread '${request.threadId}'. Starting a new turn for queued steer request.`,
+        );
+        shouldTrackTurnCompletion = true;
+        sdkTurnId = await startNewTurn();
+      }
+    } else {
+      sdkTurnId = await startNewTurn();
     }
 
     if (!sdkTurnId) {
@@ -1223,7 +1249,7 @@ async function executeCreateUserMessageRequest(
     });
     await sendTurnExecutionUpdate(commandChannel, request.threadId, sdkTurnId, TurnStatus.RUNNING, requestId);
 
-    if (!trackTurnCompletion) {
+    if (!shouldTrackTurnCompletion) {
       keepRuntimeWarm = true;
       return;
     }
