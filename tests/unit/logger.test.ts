@@ -19,9 +19,12 @@ test("createLogger uses console logger by default", () => {
     logger.error("error message");
 
     assert.equal(debugSpy.mock.calls.length, 0);
-    assert.deepEqual(infoSpy.mock.calls[0], ["info message"]);
-    assert.deepEqual(warnSpy.mock.calls[0], ["warn message"]);
-    assert.deepEqual(errorSpy.mock.calls[0], ["error message"]);
+    assert.equal(infoSpy.mock.calls.length, 1);
+    assert.equal(warnSpy.mock.calls.length, 1);
+    assert.equal(errorSpy.mock.calls.length, 1);
+    assert.match(infoSpy.mock.calls[0][0], /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] INFO: info message$/);
+    assert.match(warnSpy.mock.calls[0][0], /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] WARN: warn message$/);
+    assert.match(errorSpy.mock.calls[0][0], /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] ERROR: error message$/);
   } finally {
     debugSpy.mockRestore();
     infoSpy.mockRestore();
@@ -43,8 +46,8 @@ test("createLogger uses pretty pino output in daemon mode", () => {
   });
 
   assert.equal(result.status, 0, `Logger script failed. stderr:\n${result.stderr}`);
-  assert.match(result.stdout, /\bWARN\b/);
-  assert.match(result.stdout, /visible daemon warning/);
+  assert.match(result.stdout, /^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}\] WARN: visible daemon warning$/m);
+  assert.doesNotMatch(result.stdout, /\s[+-]\d{4}\]/);
   assert.doesNotMatch(result.stdout, /hidden daemon info/);
   assert.doesNotMatch(result.stdout, /"level":/);
 });

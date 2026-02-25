@@ -42,27 +42,36 @@ function createConsoleLogger(level: LogLevel): Logger {
   const threshold = LOG_LEVELS[level];
 
   const shouldLog = (logLevel: LogLevel): boolean => LOG_LEVELS[logLevel] >= threshold;
+  const formatMessage = (logLevel: LogLevel, message: string): string => {
+    const now = new Date();
+    const pad2 = (value: number): string => String(value).padStart(2, "0");
+    const pad3 = (value: number): string => String(value).padStart(3, "0");
+    const timestamp =
+      `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())} ` +
+      `${pad2(now.getHours())}:${pad2(now.getMinutes())}:${pad2(now.getSeconds())}.${pad3(now.getMilliseconds())}`;
+    return `[${timestamp}] ${logLevel}: ${message}`;
+  };
 
   return {
     level,
     debug(message: string): void {
       if (shouldLog("DEBUG")) {
-        console.debug(message);
+        console.debug(formatMessage("DEBUG", message));
       }
     },
     info(message: string): void {
       if (shouldLog("INFO")) {
-        console.info(message);
+        console.info(formatMessage("INFO", message));
       }
     },
     warn(message: string): void {
       if (shouldLog("WARN")) {
-        console.warn(message);
+        console.warn(formatMessage("WARN", message));
       }
     },
     error(message: string): void {
       if (shouldLog("ERROR")) {
-        console.error(message);
+        console.error(formatMessage("ERROR", message));
       }
     },
   };
@@ -78,7 +87,7 @@ function createDaemonLogger(level: LogLevel): Logger {
       ignore: "pid,hostname",
       singleLine: true,
       sync: true,
-      translateTime: "SYS:standard",
+      translateTime: "SYS:yyyy-mm-dd HH:MM:ss.l",
     }),
   );
 
