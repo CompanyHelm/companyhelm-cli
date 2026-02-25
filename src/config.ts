@@ -52,6 +52,12 @@ export const config = z.object({
     agent_home_directory: z.string()
         .describe("The home directory for the agent.")
         .default("/home/agent"),
+    git_user_name: z.string()
+        .describe("Default git author name used when runtime repositories are missing user.name.")
+        .default("agent"),
+    git_user_email: z.string()
+        .describe("Default git author email used when runtime repositories are missing user.email.")
+        .default("agent@companyhelm.com"),
     codex: codexConfig.default(() => codexConfig.parse({})),
 });
 

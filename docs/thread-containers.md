@@ -48,3 +48,6 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
 - Runtime container runs as host `uid:gid`.
 - On runtime start, CompanyHelm provisions `/etc/passwd` and `/etc/group` entries so that uid maps to `agent_user`.
 - `HOME` and `USER` are set from configured `agent_home_directory` and `agent_user`.
+- Runtime startup sets default git author values when missing:
+  - Global fallback: `git_user_name` / `git_user_email`.
+  - Repository-local fallback: applies the same defaults to any repo found under `/workspace` that is missing local git author settings.
