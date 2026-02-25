@@ -43,6 +43,13 @@
       "when": 1771997158851,
       "tag": "0005_open_toro",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1772060984769,
+      "tag": "0006_fixed_jack_flag",
+      "breakpoints": true
     }
   ]
 }

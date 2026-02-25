@@ -40,6 +40,12 @@ export const config = z.object({
     dind_image: z.string()
         .describe("The name of the DIND image.")
         .default("docker:29-dind-rootless"),
+    use_host_docker_runtime: z.boolean()
+        .describe("When true, mount host Docker socket into runtime containers instead of creating DinD sidecars.")
+        .default(false),
+    host_docker_socket_path: z.string()
+        .describe("Host Docker socket path to mount into runtime containers when use_host_docker_runtime is enabled.")
+        .default("/var/run/docker.sock"),
     agent_user: z.string()
         .describe("The user for the agent.")
         .default("agent"),

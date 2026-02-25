@@ -71,6 +71,8 @@ interface RootCommandOptions {
   daemon?: boolean;
   logLevel?: string;
   secret?: string;
+  useHostDockerRuntime?: boolean;
+  hostDockerSocketPath?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
@@ -166,7 +168,7 @@ async function stopAllThreadAppServerSessions(): Promise<void> {
 
 async function stopAllThreadContainers(cfg: Config, logger: Logger): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
-  let containers: Array<{ runtimeContainer: string; dindContainer: string }> = [];
+  let containers: Array<{ runtimeContainer: string; dindContainer: string | null }> = [];
   try {
     containers = await db
       .select({
@@ -184,9 +186,11 @@ async function stopAllThreadContainers(cfg: Config, logger: Logger): Promise<voi
     await containerService.stopContainer(container.runtimeContainer).catch((error: unknown) => {
       logger.warn(`Failed to stop runtime container '${container.runtimeContainer}': ${toErrorMessage(error)}`);
     });
-    await containerService.stopContainer(container.dindContainer).catch((error: unknown) => {
-      logger.warn(`Failed to stop DinD container '${container.dindContainer}': ${toErrorMessage(error)}`);
-    });
+    if (container.dindContainer && container.dindContainer.trim().length > 0) {
+      await containerService.stopContainer(container.dindContainer).catch((error: unknown) => {
+        logger.warn(`Failed to stop DinD container '${container.dindContainer}': ${toErrorMessage(error)}`);
+      });
+    }
   }
 }
 
@@ -753,7 +757,7 @@ async function handleCreateThreadRequest(
       isCurrentTurnRunning: false,
       workspace: threadDirectory,
       runtimeContainer: containerNames.runtime,
-      dindContainer: containerNames.dind,
+      dindContainer: cfg.use_host_docker_runtime ? null : containerNames.dind,
       homeDirectory: cfg.agent_home_directory,
       uid: hostInfo.uid,
       gid: hostInfo.gid,
@@ -796,8 +800,14 @@ async function handleCreateThreadRequest(
         agentHomeDirectory: cfg.agent_home_directory,
       },
       mounts,
+      useHostDockerRuntime: cfg.use_host_docker_runtime,
+      hostDockerSocketPath: cfg.host_docker_socket_path,
     });
-    logger.debug(`Thread '${threadId}' containers created (${containerNames.runtime}, ${containerNames.dind}).`);
+    if (cfg.use_host_docker_runtime) {
+      logger.debug(`Thread '${threadId}' runtime container created (${containerNames.runtime}) in host docker mode.`);
+    } else {
+      logger.debug(`Thread '${threadId}' containers created (${containerNames.runtime}, ${containerNames.dind}).`);
+    }
   } catch (error: unknown) {
     logger.warn(`Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
     await sendRequestError(commandChannel, `Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
@@ -810,7 +820,9 @@ async function handleCreateThreadRequest(
   } catch (error: unknown) {
     logger.warn(`Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     await containerService.forceRemoveContainer(containerNames.runtime);
-    await containerService.forceRemoveContainer(containerNames.dind);
+    if (!cfg.use_host_docker_runtime) {
+      await containerService.forceRemoveContainer(containerNames.dind);
+    }
     await containerService.forceRemoveVolume(containerNames.home);
     await containerService.forceRemoveVolume(containerNames.tmp);
     await sendRequestError(commandChannel, `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
@@ -897,7 +909,7 @@ async function handleDeleteAgentRequest(
 type ExistingThreadResource = {
   id: string;
   runtimeContainer: string;
-  dindContainer: string;
+  dindContainer: string | null;
   workspace: string;
 };
 
@@ -948,7 +960,9 @@ async function deleteThreadWithCleanup(
     await stopThreadAppServerSession(request.threadId);
     threadRolloutPaths.delete(request.threadId);
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
-    await containerService.forceRemoveContainer(existingThread.dindContainer);
+    if (existingThread.dindContainer && existingThread.dindContainer.trim().length > 0) {
+      await containerService.forceRemoveContainer(existingThread.dindContainer);
+    }
     await containerService.forceRemoveVolume(containerNames.home);
     await containerService.forceRemoveVolume(containerNames.tmp);
     removeWorkspaceDirectory(existingThread.workspace);
@@ -1325,9 +1339,11 @@ async function executeCreateUserMessageRequest(
       await containerService.stopContainer(threadState.runtimeContainer).catch((error: unknown) => {
         logger.warn(`Failed to stop runtime container '${threadState.runtimeContainer}': ${toErrorMessage(error)}`);
       });
-      await containerService.stopContainer(threadState.dindContainer).catch((error: unknown) => {
-        logger.warn(`Failed to stop DinD container '${threadState.dindContainer}': ${toErrorMessage(error)}`);
-      });
+      if (threadState.dindContainer && threadState.dindContainer.trim().length > 0) {
+        await containerService.stopContainer(threadState.dindContainer).catch((error: unknown) => {
+          logger.warn(`Failed to stop DinD container '${threadState.dindContainer}': ${toErrorMessage(error)}`);
+        });
+      }
     }
   }
 }
@@ -1466,6 +1482,8 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   const logger = createLogger(options.logLevel ?? "INFO", { daemonMode: options.daemon ?? false });
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.serverUrl,
+    use_host_docker_runtime: options.useHostDockerRuntime,
+    host_docker_socket_path: options.hostDockerSocketPath,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -1538,6 +1556,14 @@ export function registerRootCommand(program: Command): void {
   program
     .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
     .option("--secret <secret>", "Bearer secret used as gRPC Authorization header.")
+    .option(
+      "--use-host-docker-runtime",
+      "Mount host Docker socket into runtime containers instead of creating DinD sidecars.",
+    )
+    .option(
+      "--host-docker-socket-path <path>",
+      "Host Docker socket path to mount when --use-host-docker-runtime is enabled.",
+    )
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
     .action(async () => {

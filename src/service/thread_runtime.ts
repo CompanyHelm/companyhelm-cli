@@ -1,7 +1,7 @@
 import { ThreadContainerService, type ThreadContainerUser } from "./thread_lifecycle.js";
 
 export interface ThreadRuntimeReadyOptions {
-  dindContainer: string;
+  dindContainer: string | null;
   runtimeContainer: string;
   user: ThreadContainerUser;
   containerService?: ThreadContainerService;
@@ -9,7 +9,9 @@ export interface ThreadRuntimeReadyOptions {
 
 export async function ensureThreadRuntimeReady(options: ThreadRuntimeReadyOptions): Promise<void> {
   const containerService = options.containerService ?? new ThreadContainerService();
-  await containerService.ensureContainerRunning(options.dindContainer);
+  if (typeof options.dindContainer === "string" && options.dindContainer.trim().length > 0) {
+    await containerService.ensureContainerRunning(options.dindContainer);
+  }
   await containerService.ensureContainerRunning(options.runtimeContainer);
   await containerService.ensureRuntimeContainerIdentity(options.runtimeContainer, options.user);
   await containerService.ensureRuntimeContainerTooling(options.runtimeContainer, options.user);
