@@ -837,17 +837,24 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
   const activeContainerNames = new Set<string>();
+  const activeVolumeNames = new Set<string>();
 
   const createThreadContainersSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
     .mockImplementation(async (options) => {
       activeContainerNames.add(options.names.runtime);
       activeContainerNames.add(options.names.dind);
+      activeVolumeNames.add(options.names.home);
     });
   const forceRemoveContainerSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
     .mockImplementation(async (name) => {
       activeContainerNames.delete(name);
+    });
+  const forceRemoveVolumeSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveVolume")
+    .mockImplementation(async (name) => {
+      activeVolumeNames.delete(name);
     });
 
   try {
@@ -864,8 +871,10 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     let receivedDeleteAgentUpdate = false;
     let runtimeContainerPresentAtReady: boolean | null = null;
     let dindContainerPresentAtReady: boolean | null = null;
+    let homeVolumePresentAtReady: boolean | null = null;
     let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
     let dindContainerPresentAfterThreadDelete: boolean | null = null;
+    let homeVolumePresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
     let expectedThreadWorkspacePath: string | null = null;
     let expectedAgentWorkspacePath: string | null = null;
@@ -925,8 +934,10 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
             createdThreadId = message.payload.value.threadId;
             const expectedRuntimeContainer = `companyhelm-runtime-thread-${createdThreadId}`;
             const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
+            const expectedHomeVolume = `companyhelm-home-thread-${createdThreadId}`;
             runtimeContainerPresentAtReady = activeContainerNames.has(expectedRuntimeContainer);
             dindContainerPresentAtReady = activeContainerNames.has(expectedDindContainer);
+            homeVolumePresentAtReady = activeVolumeNames.has(expectedHomeVolume);
 
             const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
             threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
@@ -965,6 +976,9 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
               );
               dindContainerPresentAfterThreadDelete = activeContainerNames.has(
                 `companyhelm-dind-thread-${createdThreadId}`,
+              );
+              homeVolumePresentAfterThreadDelete = activeVolumeNames.has(
+                `companyhelm-home-thread-${createdThreadId}`,
               );
             }
 
@@ -1005,6 +1019,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
     assert.equal(runtimeContainerPresentAtReady, true, "expected runtime container to exist when thread is ready");
     assert.equal(dindContainerPresentAtReady, true, "expected dind container to exist when thread is ready");
+    assert.equal(homeVolumePresentAtReady, true, "expected thread home volume to exist when thread is ready");
     assert.equal(
       runtimeContainerPresentAfterThreadDelete,
       false,
@@ -1015,8 +1030,14 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
       false,
       "expected dind container to be removed after deleteThreadRequest",
     );
+    assert.equal(
+      homeVolumePresentAfterThreadDelete,
+      false,
+      "expected thread home volume to be removed after deleteThreadRequest",
+    );
     assert.equal(threadWorkspacePresentAtReady, true, "expected thread workspace directory to exist when thread is ready");
     assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of lifecycle flow");
+    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home volumes at end of lifecycle flow");
 
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
     const { db, client } = await initDb(stateDbPath);
@@ -1046,8 +1067,14 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
     assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${createdThreadId}`);
     assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${createdThreadId}`);
+    assert.equal(createOptions.names.home, `companyhelm-home-thread-${createdThreadId}`);
     assert.equal(createOptions.mounts[0]?.Target, "/workspace");
     assert.equal(createOptions.mounts[0]?.Source, threadWorkspacePath);
+    const homeVolumeMount = createOptions.mounts.find(
+      (mount: { Type?: string; Source?: string; Target?: string }) =>
+        mount.Type === "volume" && mount.Source === `companyhelm-home-thread-${createdThreadId}`,
+    );
+    assert.equal(homeVolumeMount?.Target, "/home/agent");
     assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include agent/thread segmentation");
     assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
     assert.equal(
@@ -1061,9 +1088,12 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
       `companyhelm-runtime-thread-${createdThreadId}`,
       `companyhelm-dind-thread-${createdThreadId}`,
     ]);
+    const removedVolumeNames = forceRemoveVolumeSpy.mock.calls.map((call) => call[0]);
+    assert.deepEqual(removedVolumeNames, [`companyhelm-home-thread-${createdThreadId}`]);
   } finally {
     createThreadContainersSpy.mockRestore();
     forceRemoveContainerSpy.mockRestore();
+    forceRemoveVolumeSpy.mockRestore();
 
     if (server) {
       await shutdownServer(server);

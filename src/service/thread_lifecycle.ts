@@ -9,6 +9,7 @@ export type ThreadAuthMode = "host" | "dedicated";
 export interface ThreadContainerNames {
   dind: string;
   runtime: string;
+  home: string;
 }
 
 export interface ThreadContainerUser {
@@ -20,6 +21,7 @@ export interface ThreadContainerUser {
 
 export interface ThreadMountOptions {
   threadDirectory: string;
+  homeVolumeName: string;
   codexAuthMode: ThreadAuthMode;
   codexAuthPath: string;
   codexAuthFilePath: string;
@@ -52,6 +54,7 @@ export function buildThreadContainerNames(threadId: string): ThreadContainerName
   return {
     dind: `companyhelm-dind-thread-${threadId}`,
     runtime: `companyhelm-runtime-thread-${threadId}`,
+    home: `companyhelm-home-thread-${threadId}`,
   };
 }
 
@@ -83,6 +86,11 @@ export function buildSharedThreadMounts(options: ThreadMountOptions): MountSetti
       Type: "bind",
       Source: options.threadDirectory,
       Target: "/workspace",
+    },
+    {
+      Type: "volume",
+      Source: options.homeVolumeName,
+      Target: options.containerHomeDirectory,
     },
   ];
 
@@ -200,6 +208,20 @@ function isContainerNotFound(error: unknown): boolean {
 
   const message = error instanceof Error ? error.message : String(error);
   return /No such container/i.test(message);
+}
+
+function isVolumeNotFound(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+
+  const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+  if (statusCode === 404) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  return /No such volume/i.test(message);
 }
 
 function isContainerAlreadyStarted(error: unknown): boolean {
@@ -333,6 +355,7 @@ export class ThreadContainerService {
       await this.docker.createContainer(buildRuntimeContainerOptions(options));
     } catch (error) {
       await this.forceRemoveContainer(options.names.dind);
+      await this.forceRemoveVolume(options.names.home).catch(() => undefined);
       throw new Error(toErrorMessage(error));
     }
   }
@@ -409,6 +432,17 @@ export class ThreadContainerService {
       await this.docker.getContainer(name).remove({ force: true });
     } catch (error) {
       if (isContainerNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+  }
+
+  async forceRemoveVolume(name: string): Promise<void> {
+    try {
+      await this.docker.getVolume(name).remove();
+    } catch (error) {
+      if (isVolumeNotFound(error)) {
         return;
       }
       throw error;

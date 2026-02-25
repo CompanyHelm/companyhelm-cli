@@ -624,6 +624,7 @@ async function handleCreateThreadRequest(
   const containerService = new ThreadContainerService();
   const mounts = buildSharedThreadMounts({
     threadDirectory,
+    homeVolumeName: containerNames.home,
     codexAuthMode: authMode,
     codexAuthPath: cfg.codex.codex_auth_path,
     codexAuthFilePath: cfg.codex.codex_auth_file_path,
@@ -658,6 +659,7 @@ async function handleCreateThreadRequest(
     logger.warn(`Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     await containerService.forceRemoveContainer(containerNames.runtime);
     await containerService.forceRemoveContainer(containerNames.dind);
+    await containerService.forceRemoveVolume(containerNames.home);
     await sendRequestError(commandChannel, `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     return;
   } finally {
@@ -710,10 +712,12 @@ async function handleDeleteAgentRequest(
   const containerService = new ThreadContainerService();
   try {
     for (const threadResource of threadResources) {
+      const containerNames = buildThreadContainerNames(threadResource.id);
       await stopThreadAppServerSession(threadResource.id);
       threadRolloutPaths.delete(threadResource.id);
       await containerService.forceRemoveContainer(threadResource.runtimeContainer);
       await containerService.forceRemoveContainer(threadResource.dindContainer);
+      await containerService.forceRemoveVolume(containerNames.home);
       removeWorkspaceDirectory(threadResource.workspace);
     }
     removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
@@ -776,10 +780,12 @@ async function handleDeleteThreadRequest(
 
   const containerService = new ThreadContainerService();
   try {
+    const containerNames = buildThreadContainerNames(existingThread.id);
     await stopThreadAppServerSession(request.threadId);
     threadRolloutPaths.delete(request.threadId);
     await containerService.forceRemoveContainer(existingThread.runtimeContainer);
     await containerService.forceRemoveContainer(existingThread.dindContainer);
+    await containerService.forceRemoveVolume(containerNames.home);
     removeWorkspaceDirectory(existingThread.workspace);
   } catch (error: unknown) {
     await sendRequestError(commandChannel, `Failed to delete resources for thread '${request.threadId}': ${toErrorMessage(error)}`);

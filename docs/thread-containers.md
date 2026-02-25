@@ -8,6 +8,7 @@ CompanyHelm creates two Docker containers per thread:
 
 Both containers use the same mount set:
 - Thread workspace: host `workspaces/agent-{agentId}/thread-{threadId}` -> container `/workspace`
+- Thread home volume: Docker volume `companyhelm-home-thread-{threadId}` -> container `agent_home_directory`
 - Codex auth (dedicated mode): host `codex_auth_file_path` -> container `codex_auth_path`
 - Codex auth (host mode): host `codex_auth_path` -> same container path
 
@@ -34,6 +35,7 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
 - `deleteThreadRequest`:
   - Stops/cleans session state.
   - Removes both containers.
+  - Removes the per-thread home volume.
   - Removes thread workspace directory.
 - `deleteAgentRequest`:
   - Deletes all thread containers/workspaces for that agent.
