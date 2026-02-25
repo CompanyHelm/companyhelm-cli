@@ -16,6 +16,7 @@ import {
 import type { Command } from "commander";
 import * as grpc from "@grpc/grpc-js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { runThreadDockerCommand } from "./thread/docker.js";
@@ -1109,10 +1110,12 @@ async function handleCreateThread(
 
   const requestValue: {
     agentId: string;
+    threadId: string;
     model: string;
     reasoningLevel?: string;
   } = {
     agentId: selectedAgentId,
+    threadId: randomUUID(),
     model: modelName,
   };
   if (reasoningLevel) {

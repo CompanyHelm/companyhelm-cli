@@ -20,7 +20,6 @@ import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import * as grpc from "@grpc/grpc-js";
 import { mkdirSync, rmSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
@@ -688,9 +687,14 @@ async function handleCreateThreadRequest(
   apiCallOptions: CompanyhelmApiCallOptions | undefined,
   logger: Logger,
 ): Promise<void> {
-  const { db, client } = await initDb(cfg.state_db_path);
+  const threadId = (request.threadId ?? "").trim();
+  if (!threadId) {
+    logger.warn(`Rejecting createThreadRequest for agent '${request.agentId}': threadId is required.`);
+    await sendRequestError(commandChannel, "Thread id is required.");
+    return;
+  }
 
-  const threadId = randomUUID();
+  const { db, client } = await initDb(cfg.state_db_path);
   const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, request.agentId, threadId);
   const containerNames = buildThreadContainerNames(threadId);
   const hostInfo = getHostInfo(cfg.codex.codex_auth_path);

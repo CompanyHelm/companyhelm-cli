@@ -584,6 +584,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
               case: "createThreadRequest",
               value: {
                 agentId: "missing-agent",
+                threadId: "thread-missing-agent",
                 model: "gpt-5.3-codex",
               },
             },
@@ -697,6 +698,7 @@ test("companyhelm root command writes GitHub installations into thread AGENTS.md
                   case: "createThreadRequest",
                   value: {
                     agentId: "agent-github-installations",
+                    threadId: "thread-github-installations",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
                   },
@@ -917,6 +919,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
                   case: "createThreadRequest",
                   value: {
                     agentId: "agent-for-lifecycle",
+                    threadId: "thread-for-lifecycle",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
                   },
@@ -1193,6 +1196,7 @@ test("companyhelm root command deleteAgentRequest deletes thread resources befor
                   case: "createThreadRequest",
                   value: {
                     agentId: "agent-delete-cascade",
+                    threadId: "thread-delete-cascade",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
                   },
@@ -1412,6 +1416,7 @@ test(
                       case: "createThreadRequest",
                       value: {
                         agentId: "agent-real-docker",
+                        threadId: "thread-real-docker",
                         model: "gpt-5.3-codex",
                       },
                     },
@@ -1679,6 +1684,7 @@ test(
                     case: "createThreadRequest",
                     value: {
                       agentId: "agent-user-message",
+                      threadId: "thread-user-message",
                       model: "gpt-5.3-codex",
                     },
                   },
@@ -1920,6 +1926,7 @@ test(
                     case: "createThreadRequest",
                     value: {
                       agentId: "agent-steer",
+                      threadId: "thread-steer",
                       model: "gpt-5.3-codex",
                     },
                   },
