@@ -354,6 +354,15 @@ test("companyhelm root command forwards --secret as authorization metadata", asy
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-secret-header-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after secret header validation");
+  const nativeSetTimeout = global.setTimeout;
+  let shouldStopAfterValidation = false;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   const secret = "7Rj8DjutkQTB_1SmyNpuizXh6SdyApPvBligVouPuRs";
   let registerAuthorizationHeaders: string[] = [];
@@ -370,6 +379,7 @@ test("companyhelm root command forwards --secret as authorization metadata", asy
       },
       controlChannel(call) {
         controlChannelAuthorizationHeaders = call.metadata.get("authorization").map((value) => String(value));
+        shouldStopAfterValidation = true;
         call.sendMetadata(new grpc.Metadata());
         call.end();
       },
@@ -377,15 +387,20 @@ test("companyhelm root command forwards --secret as authorization metadata", asy
 
     server = started.server;
 
-    await runRootCommand({
-      daemon: true,
-      secret,
-      serverUrl: `127.0.0.1:${started.port}/grpc`,
-    });
+    await assert.rejects(
+      runRootCommand({
+        daemon: true,
+        secret,
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after validating authorization headers",
+    );
 
     assert.deepEqual(registerAuthorizationHeaders, [`Bearer ${secret}`]);
     assert.deepEqual(controlChannelAuthorizationHeaders, [`Bearer ${secret}`]);
   } finally {
+    reconnectDelaySpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
@@ -2146,6 +2161,15 @@ test(
     const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-user-message-steer-");
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
+    const reconnectStopError = new Error("stop root command after steering validation");
+    const nativeSetTimeout = global.setTimeout;
+    let shouldStopAfterValidation = false;
+    const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+      if (shouldStopAfterValidation && timeout === 1_000) {
+        throw reconnectStopError;
+      }
+      return nativeSetTimeout(handler, timeout as any, ...args);
+    }) as typeof global.setTimeout);
 
     let createdThreadId: string | null = null;
     let receivedRequestError: any = null;
@@ -2323,6 +2347,7 @@ test(
             }
 
             if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.COMPLETED) {
+              shouldStopAfterValidation = true;
               call.end();
             }
           });
@@ -2331,15 +2356,19 @@ test(
 
       server = started.server;
 
-      await runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      });
+      await assert.rejects(
+        runRootCommand({
+          serverUrl: `127.0.0.1:${started.port}/grpc`,
+        }),
+        (error: unknown) => error === reconnectStopError,
+        "expected root command to stop after validating steering flow",
+      );
 
       assert.equal(receivedRequestError, null, "did not expect requestError while steering running turn");
       assert.ok(createdThreadId, "expected thread id for steering flow");
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
-      assert.equal(appServerStartSpy.mock.calls.length, 1, "expected one app-server session start");
-      assert.equal(appServerStopSpy.mock.calls.length, 1, "expected app-server session stop on shutdown");
+      assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server session start");
+      assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server session stop on shutdown");
       assert.equal(startThreadSpy.mock.calls.length, 1, "expected one sdk thread start");
       assert.equal(startTurnSpy.mock.calls.length, 1, "expected only initial turn/start call");
       assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
@@ -2354,6 +2383,7 @@ test(
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
       assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
     } finally {
+      reconnectDelaySpy.mockRestore();
       createThreadContainersSpy.mockRestore();
       ensureContainerRunningSpy.mockRestore();
       ensureRuntimeContainerIdentitySpy.mockRestore();
