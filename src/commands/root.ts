@@ -791,7 +791,7 @@ async function handleDeleteAgentRequest(
   const { db, client } = await initDb(cfg.state_db_path);
 
   let agentExists = false;
-  let threadResources: Array<{ id: string; runtimeContainer: string; dindContainer: string; workspace: string }> = [];
+  let threadIds: string[] = [];
 
   try {
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
@@ -801,16 +801,16 @@ async function handleDeleteAgentRequest(
       return;
     }
 
-    threadResources = await db
+    const threadRows = await db
       .select({
         id: threads.id,
-        runtimeContainer: threads.runtimeContainer,
-        dindContainer: threads.dindContainer,
-        workspace: threads.workspace,
       })
       .from(threads)
       .where(eq(threads.agentId, request.agentId))
+      .orderBy(threads.id)
       .all();
+
+    threadIds = threadRows.map((thread) => thread.id);
   } catch (error: unknown) {
     await sendRequestError(commandChannel, `Failed to load agent '${request.agentId}': ${toErrorMessage(error)}`);
     return;
@@ -822,22 +822,24 @@ async function handleDeleteAgentRequest(
     return;
   }
 
-  const containerService = new ThreadContainerService();
-  try {
-    for (const threadResource of threadResources) {
-      const containerNames = buildThreadContainerNames(threadResource.id);
-      await stopThreadAppServerSession(threadResource.id);
-      threadRolloutPaths.delete(threadResource.id);
-      await containerService.forceRemoveContainer(threadResource.runtimeContainer);
-      await containerService.forceRemoveContainer(threadResource.dindContainer);
-      await containerService.forceRemoveVolume(containerNames.home);
-      removeWorkspaceDirectory(threadResource.workspace);
+  for (const threadId of threadIds) {
+    const deleteResult = await deleteThreadWithCleanup(cfg, {
+      agentId: request.agentId,
+      threadId,
+    });
+    if (deleteResult.kind === "error") {
+      await sendRequestError(
+        commandChannel,
+        `Failed to delete thread '${threadId}' while deleting agent '${request.agentId}': ${deleteResult.message}`,
+      );
+      return;
     }
-    removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
-  } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete resources for agent '${request.agentId}': ${toErrorMessage(error)}`);
-    return;
+    if (deleteResult.kind === "deleted") {
+      await sendThreadUpdate(commandChannel, threadId, ThreadStatus.DELETED);
+    }
   }
+
+  removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
 
   const { db: deleteDb, client: deleteClient } = await initDb(cfg.state_db_path);
   try {
@@ -852,22 +854,30 @@ async function handleDeleteAgentRequest(
   await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.DELETED);
 }
 
-async function handleDeleteThreadRequest(
+type ExistingThreadResource = {
+  id: string;
+  runtimeContainer: string;
+  dindContainer: string;
+  workspace: string;
+};
+
+type DeleteThreadWithCleanupResult =
+  | { kind: "deleted" }
+  | { kind: "not_found" }
+  | { kind: "error"; message: string };
+
+type ThreadDeletionRequest = {
+  agentId: string;
+  threadId: string;
+};
+
+async function deleteThreadWithCleanup(
   cfg: Config,
-  commandChannel: ClientMessageSink,
-  request: DeleteThreadRequest,
-): Promise<void> {
+  request: ThreadDeletionRequest,
+): Promise<DeleteThreadWithCleanupResult> {
   const { db, client } = await initDb(cfg.state_db_path);
 
-  let existingThread:
-    | {
-        id: string;
-        runtimeContainer: string;
-        dindContainer: string;
-        workspace: string;
-      }
-    | undefined;
-
+  let existingThread: ExistingThreadResource | undefined;
   try {
     existingThread = await db
       .select({
@@ -879,16 +889,17 @@ async function handleDeleteThreadRequest(
       .from(threads)
       .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
       .get();
-
-    if (!existingThread) {
-      await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
-      return;
-    }
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
-    return;
+    return {
+      kind: "error",
+      message: `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`,
+    };
   } finally {
     client.close();
+  }
+
+  if (!existingThread) {
+    return { kind: "not_found" };
   }
 
   const containerService = new ThreadContainerService();
@@ -901,8 +912,10 @@ async function handleDeleteThreadRequest(
     await containerService.forceRemoveVolume(containerNames.home);
     removeWorkspaceDirectory(existingThread.workspace);
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete resources for thread '${request.threadId}': ${toErrorMessage(error)}`);
-    return;
+    return {
+      kind: "error",
+      message: `Failed to delete resources for thread '${request.threadId}': ${toErrorMessage(error)}`,
+    };
   }
 
   const { db: deleteDb, client: deleteClient } = await initDb(cfg.state_db_path);
@@ -911,10 +924,30 @@ async function handleDeleteThreadRequest(
       .delete(threads)
       .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)));
   } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete thread '${request.threadId}': ${toErrorMessage(error)}`);
-    return;
+    return {
+      kind: "error",
+      message: `Failed to delete thread '${request.threadId}': ${toErrorMessage(error)}`,
+    };
   } finally {
     deleteClient.close();
+  }
+
+  return { kind: "deleted" };
+}
+
+async function handleDeleteThreadRequest(
+  cfg: Config,
+  commandChannel: ClientMessageSink,
+  request: DeleteThreadRequest,
+): Promise<void> {
+  const deleteResult = await deleteThreadWithCleanup(cfg, request);
+  if (deleteResult.kind === "not_found") {
+    await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`);
+    return;
+  }
+  if (deleteResult.kind === "error") {
+    await sendRequestError(commandChannel, deleteResult.message);
+    return;
   }
 
   await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);

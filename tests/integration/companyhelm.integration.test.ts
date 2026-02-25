@@ -1104,6 +1104,238 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
   }
 });
 
+test("companyhelm root command deleteAgentRequest deletes thread resources before deleting the agent", async () => {
+  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-delete-agent-cascade-"));
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const activeContainerNames = new Set<string>();
+  const activeVolumeNames = new Set<string>();
+  const reconnectStopError = new Error("stop root command after delete-agent cascade validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout, ...args);
+  }) as typeof global.setTimeout);
+
+  const createThreadContainersSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+    .mockImplementation(async (options) => {
+      activeContainerNames.add(options.names.runtime);
+      activeContainerNames.add(options.names.dind);
+      activeVolumeNames.add(options.names.home);
+    });
+  const forceRemoveContainerSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
+    .mockImplementation(async (name) => {
+      activeContainerNames.delete(name);
+    });
+  const forceRemoveVolumeSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveVolume")
+    .mockImplementation(async (name) => {
+      activeVolumeNames.delete(name);
+    });
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+    await writeHostAuthFile(homeDirectory);
+
+    let receivedRequestError: any = null;
+    let createdThreadId: string | null = null;
+    let sentCreateThreadRequest = false;
+    let sentDeleteAgentRequest = false;
+    let receivedThreadDeletedUpdate = false;
+    let receivedDeleteAgentUpdate = false;
+    let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
+    let dindContainerPresentAfterThreadDelete: boolean | null = null;
+    let homeVolumePresentAfterThreadDelete: boolean | null = null;
+    let threadWorkspacePath: string | null = null;
+    let agentWorkspacePath: string | null = null;
+    const deleteSequence: string[] = [];
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        call.write(
+          create(ServerMessageSchema, {
+            request: {
+              case: "createAgentRequest",
+              value: {
+                agentId: "agent-delete-cascade",
+                agentSdk: "codex",
+              },
+            },
+          }),
+        );
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            !sentCreateThreadRequest &&
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "agent-delete-cascade" &&
+            message.payload.value.status === AgentStatus.READY
+          ) {
+            sentCreateThreadRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "createThreadRequest",
+                  value: {
+                    agentId: "agent-delete-cascade",
+                    model: "gpt-5.3-codex",
+                    reasoningLevel: "high",
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (
+            !sentDeleteAgentRequest &&
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.READY
+          ) {
+            createdThreadId = message.payload.value.threadId;
+            const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
+            threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
+            agentWorkspacePath = threadWorkspacePath ? path.dirname(threadWorkspacePath) : null;
+
+            sentDeleteAgentRequest = true;
+            call.write(
+              create(ServerMessageSchema, {
+                request: {
+                  case: "deleteAgentRequest",
+                  value: {
+                    agentId: "agent-delete-cascade",
+                  },
+                },
+              }),
+            );
+            return;
+          }
+
+          if (
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.DELETED &&
+            message.payload.value.threadId === createdThreadId
+          ) {
+            receivedThreadDeletedUpdate = true;
+            deleteSequence.push("thread");
+
+            if (createdThreadId) {
+              runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-runtime-thread-${createdThreadId}`);
+              dindContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-dind-thread-${createdThreadId}`);
+              homeVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-home-thread-${createdThreadId}`);
+            }
+            return;
+          }
+
+          if (
+            message.payload.case === "agentUpdate" &&
+            message.payload.value.agentId === "agent-delete-cascade" &&
+            message.payload.value.status === AgentStatus.DELETED
+          ) {
+            receivedDeleteAgentUpdate = true;
+            deleteSequence.push("agent");
+            shouldStopAfterValidation = true;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after first validated delete-agent cycle",
+    );
+
+    assert.equal(receivedRequestError, null, "did not expect requestError during delete-agent cascade flow");
+    assert.ok(createdThreadId, "expected thread id from thread ready update");
+    assert.equal(receivedThreadDeletedUpdate, true, "expected thread deleted update before deleting agent");
+    assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
+    assert.deepEqual(deleteSequence, ["thread", "agent"], "expected thread deletion update to arrive before agent deletion");
+    assert.equal(
+      runtimeContainerPresentAfterThreadDelete,
+      false,
+      "expected runtime container to be removed during deleteAgentRequest thread cleanup",
+    );
+    assert.equal(
+      dindContainerPresentAfterThreadDelete,
+      false,
+      "expected dind container to be removed during deleteAgentRequest thread cleanup",
+    );
+    assert.equal(
+      homeVolumePresentAfterThreadDelete,
+      false,
+      "expected thread home volume to be removed during deleteAgentRequest thread cleanup",
+    );
+    assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of delete-agent cascade flow");
+    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home volumes at end of delete-agent cascade flow");
+    assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
+    assert.equal(agentWorkspacePath ? existsSync(agentWorkspacePath) : false, false, "expected agent workspace directory to be removed");
+
+    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+    const { db, client } = await initDb(stateDbPath);
+
+    try {
+      const storedAgents = await db.select().from(agents).all();
+      assert.equal(
+        storedAgents.some((agent) => agent.id === "agent-delete-cascade"),
+        false,
+        "expected delete-agent-cascade agent to be removed",
+      );
+
+      const storedThreads = await db.select().from(threads).all();
+      assert.equal(
+        storedThreads.some((thread) => thread.id === createdThreadId),
+        false,
+        "expected delete-agent-cascade thread to be removed",
+      );
+    } finally {
+      client.close();
+    }
+
+    assert.equal(createThreadContainersSpy.mock.calls.length, 1);
+    assert.equal(forceRemoveContainerSpy.mock.calls.length, 2);
+    const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
+    assert.deepEqual(removedContainerNames, [
+      `companyhelm-runtime-thread-${createdThreadId}`,
+      `companyhelm-dind-thread-${createdThreadId}`,
+    ]);
+    const removedVolumeNames = forceRemoveVolumeSpy.mock.calls.map((call) => call[0]);
+    assert.deepEqual(removedVolumeNames, [`companyhelm-home-thread-${createdThreadId}`]);
+  } finally {
+    reconnectDelaySpy.mockRestore();
+    createThreadContainersSpy.mockRestore();
+    forceRemoveContainerSpy.mockRestore();
+    forceRemoveVolumeSpy.mockRestore();
+
+    if (server) {
+      await shutdownServer(server);
+    }
+
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test(
   "companyhelm root command creates real docker containers for thread and removes them on delete",
   async () => {
