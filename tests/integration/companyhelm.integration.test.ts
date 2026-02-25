@@ -41,6 +41,17 @@ const { agents, agentSdks, llmModels, threads } = require("../../dist/state/sche
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const TEST_HOME_ROOT = process.env.COMPANYHELM_TEST_HOME_ROOT
+  ? path.resolve(process.env.COMPANYHELM_TEST_HOME_ROOT)
+  : existsSync("/workspace")
+    ? "/workspace"
+    : tmpdir();
+
+async function makeTemporaryHomeDirectory(prefix: string): Promise<string> {
+  const tempRoot = path.join(TEST_HOME_ROOT, ".tmp-companyhelm-tests");
+  await mkdir(tempRoot, { recursive: true });
+  return mkdtemp(path.join(tempRoot, prefix));
+}
 
 function waitForExit(
   child: ReturnType<typeof spawn>,
@@ -319,7 +330,7 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
 });
 
 test("companyhelm root command forwards --secret as authorization metadata", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-secret-header-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-secret-header-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
 
@@ -363,7 +374,7 @@ test("companyhelm root command forwards --secret as authorization metadata", asy
 });
 
 test("companyhelm root command in daemon mode fails when no sdk is configured", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-daemon-no-sdk-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-daemon-no-sdk-");
 
   try {
     const repositoryRoot = path.resolve(__dirname, "../..");
@@ -387,7 +398,7 @@ test("companyhelm root command in daemon mode fails when no sdk is configured", 
 });
 
 test("companyhelm shell command fails early when daemon startup fails", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-shell-no-sdk-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-shell-no-sdk-");
 
   try {
     const repositoryRoot = path.resolve(__dirname, "../..");
@@ -411,7 +422,7 @@ test("companyhelm shell command fails early when daemon startup fails", async ()
 });
 
 test("initDb reconciles legacy threads.sdk_id column to sdk_thread_id", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-legacy-sdk-id-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-legacy-sdk-id-");
 
   try {
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
@@ -443,7 +454,7 @@ test("initDb reconciles legacy threads.sdk_id column to sdk_thread_id", async ()
 });
 
 test("companyhelm root command connects to API and triggers registration flow", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-integration-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-integration-");
   let server: grpc.Server | undefined;
   const staleModelName = "hardcoded-stale-model";
 
@@ -502,7 +513,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
 });
 
 test("companyhelm root command retries until server becomes available", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-retry-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-retry-");
   let server: grpc.Server | undefined;
 
   try {
@@ -565,7 +576,7 @@ test("companyhelm root command retries until server becomes available", async ()
 });
 
 test("companyhelm root command returns requestError for createThreadRequest when agent does not exist", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-thread-missing-agent-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-missing-agent-");
   let server: grpc.Server | undefined;
 
   try {
@@ -623,7 +634,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
 });
 
 test("companyhelm root command writes GitHub installations into thread AGENTS.md", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-thread-github-installations-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-github-installations-");
   let server: grpc.Server | undefined;
 
   const createThreadContainersSpy = vi
@@ -764,7 +775,7 @@ test("companyhelm root command writes GitHub installations into thread AGENTS.md
 });
 
 test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-create-agent-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-agent-");
   let server: grpc.Server | undefined;
 
   try {
@@ -835,7 +846,7 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
 });
 
 test("companyhelm root command handles full lifecycle: create agent, create thread, delete thread, delete agent", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-thread-lifecycle-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-lifecycle-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
   const activeContainerNames = new Set<string>();
@@ -1108,7 +1119,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 });
 
 test("companyhelm root command deleteAgentRequest deletes thread resources before deleting the agent", async () => {
-  const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-delete-agent-cascade-"));
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-delete-agent-cascade-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
   const activeContainerNames = new Set<string>();
@@ -1351,9 +1362,18 @@ test(
     }
 
     const docker = new Dockerode();
-    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-real-docker-lifecycle-"));
+    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-real-docker-lifecycle-");
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
+    const reconnectStopError = new Error("stop root command after real docker lifecycle validation");
+    const nativeSetTimeout = global.setTimeout;
+    let shouldStopAfterValidation = false;
+    const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+      if (shouldStopAfterValidation && timeout === 1_000) {
+        throw reconnectStopError;
+      }
+      return nativeSetTimeout(handler, timeout as any, ...args);
+    }) as typeof global.setTimeout);
 
     let createdThreadId: string | null = null;
     let runtimeContainerStatusAtReady: string | null = null;
@@ -1497,6 +1517,7 @@ test(
               ) {
                 agentWorkspaceExistsAfterAgentDelete = agentWorkspacePathAtReady ? existsSync(agentWorkspacePathAtReady) : false;
                 receivedDeleteAgentUpdate = true;
+                shouldStopAfterValidation = true;
                 call.end();
               }
             })().catch((error: unknown) => {
@@ -1509,9 +1530,13 @@ test(
 
       server = started.server;
 
-      await runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      });
+      await assert.rejects(
+        runRootCommand({
+          serverUrl: `127.0.0.1:${started.port}/grpc`,
+        }),
+        (error: unknown) => error === reconnectStopError,
+        "expected root command to stop after first validated real-docker lifecycle",
+      );
 
       assert.equal(channelHandlerError, null, channelHandlerError?.message ?? "unexpected channel handler error");
       assert.equal(receivedRequestError, null, "did not expect requestError during real docker lifecycle");
@@ -1541,6 +1566,8 @@ test(
         await forceRemoveContainerIfExists(docker, names.dind);
       }
 
+      reconnectDelaySpy.mockRestore();
+
       if (server) {
         await shutdownServer(server);
       }
@@ -1555,7 +1582,7 @@ test(
 test(
   "companyhelm root command resumes user-message threads using persisted rollout path after stop/start cycle",
   async () => {
-    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-user-message-resume-"));
+    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-user-message-resume-");
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
     const reconnectStopError = new Error("stop root command after user-message resume validation");
@@ -1852,7 +1879,7 @@ test(
 test(
   "companyhelm root command steers a running turn without adding a second completion waiter",
   async () => {
-    const homeDirectory = await mkdtemp(path.join(tmpdir(), "companyhelm-cli-user-message-steer-"));
+    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-user-message-steer-");
     let server: grpc.Server | undefined;
     const previousHome = process.env.HOME;
 
