@@ -17,6 +17,14 @@ type JsonObject = { [key: string]: unknown };
 type AppServerLogger = Pick<Logger, "debug">;
 const NOOP_APP_SERVER_LOGGER: AppServerLogger = { debug: () => undefined };
 
+export interface AppServerLogContext {
+  threadId?: string | null;
+  sdkThreadId?: string | null;
+}
+
+type AppServerLogContextProvider = () => AppServerLogContext;
+const NOOP_APP_SERVER_LOG_CONTEXT_PROVIDER: AppServerLogContextProvider = () => ({});
+
 interface PendingRequest {
   resolve: (result: unknown) => void;
   reject: (error: Error) => void;
@@ -129,6 +137,7 @@ export class AppServerService {
   private readonly transport: AppServerTransport;
   private readonly clientName: string;
   private readonly logger: AppServerLogger;
+  private readonly logContextProvider: AppServerLogContextProvider;
   private stream: AsyncGenerator<AppServerTransportEvent, void, void> | null = null;
   private pumpTask: Promise<void> | null = null;
   private readonly messageQueue = new AsyncQueue<AppServerIncomingMessage>();
@@ -139,10 +148,16 @@ export class AppServerService {
   private stdoutBuffer = Buffer.alloc(0);
   private framing: "unknown" | "content-length" | "newline" = "unknown";
 
-  constructor(transport: AppServerTransport, clientName: string, logger?: AppServerLogger) {
+  constructor(
+    transport: AppServerTransport,
+    clientName: string,
+    logger?: AppServerLogger,
+    logContextProvider?: AppServerLogContextProvider,
+  ) {
     this.transport = transport;
     this.clientName = clientName;
     this.logger = logger ?? NOOP_APP_SERVER_LOGGER;
+    this.logContextProvider = logContextProvider ?? NOOP_APP_SERVER_LOG_CONTEXT_PROVIDER;
   }
 
   async start(): Promise<void> {
@@ -300,7 +315,7 @@ export class AppServerService {
 
   private async sendMessage(message: AppServerOutgoingMessage): Promise<void> {
     const payload = JSON.stringify(message);
-    this.logger.debug(`[app-server][outgoing] ${payload}`);
+    this.logger.debug(`[app-server][outgoing]${this.formatDebugContext()} ${payload}`);
     await this.transport.sendRaw(`${payload}\n`);
   }
 
@@ -426,7 +441,7 @@ export class AppServerService {
     if (!payload.trim()) {
       return;
     }
-    this.logger.debug(`[app-server][incoming] ${payload}`);
+    this.logger.debug(`[app-server][incoming]${this.formatDebugContext()} ${payload}`);
 
     let parsed: unknown;
     try {
@@ -528,5 +543,14 @@ export class AppServerService {
       }
       resolve(bufferedResponse.result);
     });
+  }
+
+  private formatDebugContext(): string {
+    const { threadId, sdkThreadId } = this.logContextProvider();
+    return `[thread: ${this.normalizeDebugContextValue(threadId)}][sdkThread: ${this.normalizeDebugContextValue(sdkThreadId)}]`;
+  }
+
+  private normalizeDebugContextValue(value: string | null | undefined): string {
+    return typeof value === "string" ? value : "";
   }
 }
