@@ -12,6 +12,7 @@ import {
   type DeleteAgentRequest,
   type DeleteThreadRequest,
   type InterruptTurnRequest,
+  type ClientMessage,
   type RegisterRunnerRequest,
   RegisterRunnerRequestSchema,
 } from "@companyhelm/protos";
@@ -28,6 +29,10 @@ import {
   type CompanyhelmApiCallOptions,
   type CompanyhelmCommandChannel,
 } from "../service/companyhelm_api_client.js";
+import {
+  BufferedClientMessageSender,
+  type ClientMessageSink,
+} from "../service/buffered_client_message_sender.js";
 import { getHostInfo } from "../service/host.js";
 import { refreshSdkModels } from "../service/sdk/refresh_models.js";
 import { AppServerService } from "../service/app_server.js";
@@ -69,7 +74,6 @@ interface RootCommandOptions {
   secret?: string;
 }
 
-const COMMAND_CHANNEL_CONNECT_ATTEMPTS = 4;
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
@@ -344,101 +348,96 @@ function resolveAgentWorkspaceDirectory(cfg: Config, agentId: string): string {
 }
 
 async function sendRequestError(
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   errorMessage: string,
   requestId?: string,
 ): Promise<void> {
-  await commandChannel.send(
-    create(ClientMessageSchema, {
-      requestId,
-      payload: {
-        case: "requestError",
-        value: {
-          errorMessage,
-        },
+  const message = create(ClientMessageSchema, {
+    requestId,
+    payload: {
+      case: "requestError",
+      value: {
+        errorMessage,
       },
-    }),
-  );
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
 }
 
 async function sendAgentUpdate(
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   agentId: string,
   status: AgentStatus,
 ): Promise<void> {
-  await commandChannel.send(
-    create(ClientMessageSchema, {
-      payload: {
-        case: "agentUpdate",
-        value: {
-          agentId,
-          status,
-        },
+  const message = create(ClientMessageSchema, {
+    payload: {
+      case: "agentUpdate",
+      value: {
+        agentId,
+        status,
       },
-    }),
-  );
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
 }
 
 async function sendThreadUpdate(
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   threadId: string,
   status: ThreadStatus,
 ): Promise<void> {
-  await commandChannel.send(
-    create(ClientMessageSchema, {
-      payload: {
-        case: "threadUpdate",
-        value: {
-          threadId,
-          status,
-        },
+  const message = create(ClientMessageSchema, {
+    payload: {
+      case: "threadUpdate",
+      value: {
+        threadId,
+        status,
       },
-    }),
-  );
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
 }
 
 async function sendTurnExecutionUpdate(
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   sdkTurnId: string,
   status: TurnStatus,
   requestId?: string,
 ): Promise<void> {
-  await commandChannel.send(
-    create(ClientMessageSchema, {
-      requestId,
-      payload: {
-        case: "turnUpdate",
-        value: {
-          sdkTurnId,
-          status,
-        },
+  const message = create(ClientMessageSchema, {
+    requestId,
+    payload: {
+      case: "turnUpdate",
+      value: {
+        sdkTurnId,
+        status,
       },
-    }),
-  );
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
 }
 
 async function sendItemExecutionUpdate(
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   sdkItemId: string,
   status: ItemStatus,
   item: ThreadItem,
   requestId?: string,
 ): Promise<void> {
-  await commandChannel.send(
-    create(ClientMessageSchema, {
-      requestId,
-      payload: {
-        case: "itemUpdate",
-        value: {
-          sdkItemId,
-          status,
-          itemType: mapThreadItemType(item),
-          text: summarizeThreadItemText(item),
-          commandExecutionItem: buildCommandExecutionItem(item),
-        },
+  const message = create(ClientMessageSchema, {
+    requestId,
+    payload: {
+      case: "itemUpdate",
+      value: {
+        sdkItemId,
+        status,
+        itemType: mapThreadItemType(item),
+        text: summarizeThreadItemText(item),
+        commandExecutionItem: buildCommandExecutionItem(item),
       },
-    }),
-  );
+    },
+  }) as ClientMessage;
+  await commandChannel.send(message);
 }
 
 async function buildRegisterRunnerRequest(cfg: Config): Promise<RegisterRunnerRequest> {
@@ -546,7 +545,7 @@ async function resolveThreadAuthMode(cfg: Config): Promise<ThreadAuthMode> {
 
 async function handleCreateAgentRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: CreateAgentRequest,
   logger: Logger,
 ): Promise<void> {
@@ -564,7 +563,7 @@ async function handleCreateAgentRequest(
 
 async function handleCreateThreadRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: CreateThreadRequest,
   apiClient: CompanyhelmApiClient,
   apiCallOptions: CompanyhelmApiCallOptions | undefined,
@@ -671,7 +670,7 @@ async function handleCreateThreadRequest(
 
 async function handleDeleteAgentRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: DeleteAgentRequest,
 ): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
@@ -738,7 +737,7 @@ async function handleDeleteAgentRequest(
 
 async function handleDeleteThreadRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: DeleteThreadRequest,
 ): Promise<void> {
   const { db, client } = await initDb(cfg.state_db_path);
@@ -804,7 +803,7 @@ async function handleDeleteThreadRequest(
 
 async function handleInterruptTurnRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: InterruptTurnRequest,
   logger: Logger,
 ): Promise<void> {
@@ -890,7 +889,7 @@ async function updateThreadTurnState(
 
 async function waitForThreadTurnCompletion(
   appServer: AppServerService,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   sdkThreadId: string,
   sdkTurnId: string,
   requestId?: string,
@@ -933,7 +932,7 @@ async function waitForThreadTurnCompletion(
 
 async function executeCreateUserMessageRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: CreateUserMessageRequest,
   requestId: string | undefined,
   threadState: ThreadMessageExecutionState,
@@ -1114,7 +1113,7 @@ async function executeCreateUserMessageRequest(
 
 async function handleCreateUserMessageRequest(
   cfg: Config,
-  commandChannel: CompanyhelmCommandChannel,
+  commandChannel: ClientMessageSink,
   request: CreateUserMessageRequest,
   requestId: string | undefined,
   logger: Logger,
@@ -1192,6 +1191,7 @@ async function handleCreateUserMessageRequest(
 async function runCommandLoop(
   cfg: Config,
   commandChannel: CompanyhelmCommandChannel,
+  commandMessageSink: ClientMessageSink,
   apiClient: CompanyhelmApiClient,
   apiCallOptions: CompanyhelmApiCallOptions | undefined,
   logger: Logger,
@@ -1200,21 +1200,21 @@ async function runCommandLoop(
     const requestId = (serverMessage as typeof serverMessage & { requestId?: string }).requestId;
     switch (serverMessage.request.case) {
       case "createAgentRequest":
-        await handleCreateAgentRequest(cfg, commandChannel, serverMessage.request.value, logger);
+        await handleCreateAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       case "createThreadRequest":
-        await handleCreateThreadRequest(cfg, commandChannel, serverMessage.request.value, apiClient, apiCallOptions, logger);
+        await handleCreateThreadRequest(cfg, commandMessageSink, serverMessage.request.value, apiClient, apiCallOptions, logger);
         break;
       case "deleteAgentRequest":
-        await handleDeleteAgentRequest(cfg, commandChannel, serverMessage.request.value);
+        await handleDeleteAgentRequest(cfg, commandMessageSink, serverMessage.request.value);
         break;
       case "deleteThreadRequest":
-        await handleDeleteThreadRequest(cfg, commandChannel, serverMessage.request.value);
+        await handleDeleteThreadRequest(cfg, commandMessageSink, serverMessage.request.value);
         break;
       case "createUserMessageRequest":
         void handleCreateUserMessageRequest(
           cfg,
-          commandChannel,
+          commandMessageSink,
           serverMessage.request.value,
           requestId,
           logger,
@@ -1223,7 +1223,7 @@ async function runCommandLoop(
         });
         break;
       case "interruptTurnRequest":
-        await handleInterruptTurnRequest(cfg, commandChannel, serverMessage.request.value, logger);
+        await handleInterruptTurnRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       default:
         break;
@@ -1259,33 +1259,55 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   await refreshCodexModelsForRegistration(cfg, logger);
   const registerRequest = await buildRegisterRunnerRequest(cfg);
   const apiCallOptions = buildGrpcAuthCallOptions(options.secret);
-  let lastError: Error | null = null;
+  const commandMessageSink = new BufferedClientMessageSender({
+    maxBufferedEvents: cfg.client_message_buffer_limit,
+    logger,
+  });
+  let reconnectAttempt = 0;
 
   try {
-    for (let attempt = 1; attempt <= COMMAND_CHANNEL_CONNECT_ATTEMPTS; attempt += 1) {
+    while (true) {
       const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url });
+      let commandChannel: CompanyhelmCommandChannel | null = null;
+
       try {
-        const commandChannel = await apiClient.connect(registerRequest, apiCallOptions);
+        reconnectAttempt += 1;
+        commandChannel = await apiClient.connect(registerRequest, apiCallOptions);
         await commandChannel.waitForOpen(COMMAND_CHANNEL_OPEN_TIMEOUT_MS);
-        logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
-        await runCommandLoop(cfg, commandChannel, apiClient, apiCallOptions, logger);
-        return;
-      } catch (error: unknown) {
-        lastError = error instanceof Error ? error : new Error(String(error));
-        if (attempt < COMMAND_CHANNEL_CONNECT_ATTEMPTS) {
-          const attemptLabel = `${attempt}/${COMMAND_CHANNEL_CONNECT_ATTEMPTS}`;
-          logger.warn(`CompanyHelm API connection attempt ${attemptLabel} failed: ${lastError.message}`);
-          await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
+        commandMessageSink.bind(commandChannel);
+        const bufferedMessages = commandMessageSink.getBufferedMessageCount();
+        if (bufferedMessages > 0) {
+          logger.info(
+            `Connected to CompanyHelm API at ${cfg.companyhelm_api_url}; flushing ${bufferedMessages} buffered message(s).`,
+          );
+        } else {
+          logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
         }
+        reconnectAttempt = 0;
+        await runCommandLoop(cfg, commandChannel, commandMessageSink, apiClient, apiCallOptions, logger);
+        logger.warn("CompanyHelm API command channel closed. Reconnecting...");
+      } catch (error: unknown) {
+        const failureMessage = toErrorMessage(error);
+        logger.warn(
+          `CompanyHelm API connection attempt ${reconnectAttempt} failed: ${failureMessage}. ` +
+            "Retrying...",
+        );
       } finally {
+        if (commandChannel) {
+          commandMessageSink.unbind(commandChannel);
+        } else {
+          commandMessageSink.unbind();
+        }
         apiClient.close();
       }
-    }
 
-    throw new Error(
-      `Unable to establish CompanyHelm command channel after ${COMMAND_CHANNEL_CONNECT_ATTEMPTS} attempts: ${lastError?.message ?? "unknown error"}`,
-    );
+      await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
+    }
   } finally {
+    const droppedMessages = commandMessageSink.getDroppedMessageCount();
+    if (droppedMessages > 0) {
+      logger.warn(`Dropped ${droppedMessages} outbound client message(s) while command channel was disconnected.`);
+    }
     await stopAllThreadAppServerSessions();
     await stopAllThreadContainers(cfg, logger);
   }

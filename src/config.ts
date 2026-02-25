@@ -28,6 +28,12 @@ export const config = z.object({
     companyhelm_api_url: z.string()
         .describe("CompanyHelm control plane gRPC endpoint URL.")
         .default("api.companyhelm.com/grpc"),
+    // Max outbound gRPC client messages to hold while the command channel is disconnected.
+    client_message_buffer_limit: z.number()
+        .int()
+        .positive()
+        .describe("Maximum number of outbound client messages buffered during command channel disconnects.")
+        .default(10_000),
     runtime_image: z.string()
         .describe("The name of the runtime image.")
         .default("companyhelm/runner:latest"),
