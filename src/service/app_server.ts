@@ -16,6 +16,7 @@ import type { Logger } from "../utils/logger.js";
 type JsonObject = { [key: string]: unknown };
 type AppServerLogger = Pick<Logger, "debug">;
 const NOOP_APP_SERVER_LOGGER: AppServerLogger = { debug: () => undefined };
+const TURN_COMPLETION_NOTIFICATION_DRAIN_MS = 500;
 
 export interface AppServerLogContext {
   threadId?: string | null;
@@ -217,9 +218,18 @@ export class AppServerService {
     timeoutMs = 2 * 60 * 60_000,
   ): Promise<"completed" | "interrupted" | "failed"> {
     const deadline = Date.now() + timeoutMs;
+    let completionStatus: "completed" | "interrupted" | "failed" | null = null;
+    let completionDrainDeadline = 0;
 
-    while (Date.now() < deadline) {
-      const remaining = Math.max(1, deadline - Date.now());
+    while (true) {
+      const now = Date.now();
+      const activeDeadline = completionStatus
+        ? Math.min(deadline, completionDrainDeadline)
+        : deadline;
+      if (now >= activeDeadline) {
+        break;
+      }
+      const remaining = Math.max(1, activeDeadline - now);
       const message = await this.popMessageWithTimeout(remaining);
 
       if (!message) {
@@ -267,9 +277,14 @@ export class AppServerService {
       ) {
         const status = message.params.turn.status;
         if (status === "completed" || status === "interrupted" || status === "failed") {
-          return status;
+          completionStatus = status;
+          completionDrainDeadline = Date.now() + TURN_COMPLETION_NOTIFICATION_DRAIN_MS;
         }
       }
+    }
+
+    if (completionStatus) {
+      return completionStatus;
     }
 
     throw new AppServerTimeoutError(`Timed out waiting for completion of turn '${turnId}' in thread '${threadId}'.`);

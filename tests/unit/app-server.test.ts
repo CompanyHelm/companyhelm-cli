@@ -141,6 +141,49 @@ test("AppServerService preserves request responses while waiting for turn comple
   await service.stop();
 });
 
+test("AppServerService forwards notifications that arrive shortly after turn completion", async () => {
+  const transport = new FakeTransport();
+  const service = new AppServerService(transport as any, "test-client");
+  const seenMethods: string[] = [];
+
+  await service.start();
+
+  const completionPromise = service.waitForTurnCompletion(
+    "thread-1",
+    "turn-1",
+    (notification) => {
+      seenMethods.push(notification.method);
+    },
+    1_000,
+  );
+
+  transport.emitJson({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: {
+        id: "turn-1",
+        status: "completed",
+      },
+    },
+  });
+
+  await sleep(50);
+
+  transport.emitJson({
+    method: "thread/name/updated",
+    params: {
+      threadId: "thread-1",
+      threadName: "Renamed thread",
+    },
+  });
+
+  assert.equal(await completionPromise, "completed");
+  assert.deepEqual(seenMethods, ["turn/completed", "thread/name/updated"]);
+
+  await service.stop();
+});
+
 test("AppServerService includes thread context in app-server debug logs", async () => {
   const transport = new FakeTransport();
   const debugLogs: string[] = [];
