@@ -521,6 +521,39 @@ test("ThreadContainerService provisions runtime user identity with docker exec a
   assert.match(invocation.args[6], /chown -R "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME"/);
 });
 
+test("ThreadContainerService provisions runtime bashrc with nvm bootstrap in agent home", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerBashrc("companyhelm-runtime-thread-bashrc", {
+    uid: 501,
+    gid: 20,
+    agentUser: "agent",
+    agentHomeDirectory: "/home/agent",
+  });
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-bashrc", "bash", "-lc"]);
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /AGENT_HOME='\/home\/agent'/);
+  assert.match(invocation.args[6], /BASHRC_CONTENT='/);
+  assert.match(invocation.args[6], /printf '%s' "\$BASHRC_CONTENT" > "\$AGENT_HOME\/\.bashrc"/);
+  assert.match(invocation.args[6], /NVM_DIR/);
+  assert.match(invocation.args[6], /nvm use --silent default/);
+});
+
 test("ThreadContainerService configures default git author values in runtime repos", async () => {
   let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
   const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {

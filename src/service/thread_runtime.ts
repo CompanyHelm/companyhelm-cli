@@ -16,6 +16,7 @@ export async function ensureThreadRuntimeReady(options: ThreadRuntimeReadyOption
   }
   await containerService.ensureContainerRunning(options.runtimeContainer);
   await containerService.ensureRuntimeContainerIdentity(options.runtimeContainer, options.user);
+  await containerService.ensureRuntimeContainerBashrc(options.runtimeContainer, options.user);
   await containerService.ensureRuntimeContainerGitConfig(
     options.runtimeContainer,
     options.user,
