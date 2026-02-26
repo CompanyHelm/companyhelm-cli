@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { eq } from "drizzle-orm";
+import Dockerode from "dockerode";
 import { config as configSchema, type Config } from "../../config.js";
 import { initDb } from "../../state/db.js";
 import { agentSdks } from "../../state/schema.js";
@@ -54,10 +55,143 @@ function shellQuote(value: string): string {
 
 export class AppServerContainerService implements AppServerTransport {
   private readonly messageQueue = new AsyncQueue<AppServerTransportEvent>();
+  private readonly docker: Dockerode;
+  private readonly imageStatusReporter?: (message: string) => void;
 
   private child: ChildProcessWithoutNullStreams | null = null;
   private containerName: string | null = null;
   private running = false;
+
+  constructor(options?: { docker?: Dockerode; imageStatusReporter?: (message: string) => void }) {
+    this.docker = options?.docker ?? new Dockerode();
+    this.imageStatusReporter = options?.imageStatusReporter;
+  }
+
+  private reportImageStatus(message: string): void {
+    this.imageStatusReporter?.(message);
+  }
+
+  private static isImageNotFound(error: unknown): boolean {
+    if (typeof error !== "object" || error === null) {
+      return false;
+    }
+
+    const statusCode = "statusCode" in error ? (error as { statusCode?: number }).statusCode : undefined;
+    if (statusCode === 404) {
+      return true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return /No such image/i.test(message);
+  }
+
+  private static isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+  }
+
+  private async pullImage(image: string): Promise<void> {
+    let lastReportedProgressBucket = -1;
+    const layerProgress = new Map<string, { current: number; total: number }>();
+    let lastReportedStatus = "";
+
+    const reportPullProgress = (event: unknown): void => {
+      if (!AppServerContainerService.isRecord(event)) {
+        return;
+      }
+
+      const status = typeof event.status === "string" ? event.status.trim() : "";
+      const id = typeof event.id === "string" ? event.id.trim() : "";
+      const progressDetail = AppServerContainerService.isRecord(event.progressDetail) ? event.progressDetail : null;
+      const current = progressDetail && typeof progressDetail.current === "number"
+        ? progressDetail.current
+        : undefined;
+      const total = progressDetail && typeof progressDetail.total === "number"
+        ? progressDetail.total
+        : undefined;
+
+      if (id && current !== undefined && total !== undefined && total > 0) {
+        layerProgress.set(id, { current: Math.min(current, total), total });
+
+        let totalCurrent = 0;
+        let totalSize = 0;
+        for (const progress of layerProgress.values()) {
+          totalCurrent += progress.current;
+          totalSize += progress.total;
+        }
+
+        if (totalSize > 0) {
+          const percent = Math.floor((totalCurrent / totalSize) * 100);
+          const bucket = Math.floor(percent / 5) * 5;
+          if (bucket > lastReportedProgressBucket) {
+            lastReportedProgressBucket = bucket;
+            this.reportImageStatus(`Pulling Docker image '${image}': ${bucket}%`);
+          }
+        }
+        return;
+      }
+
+      if (status && status !== lastReportedStatus) {
+        lastReportedStatus = status;
+        this.reportImageStatus(`Pulling Docker image '${image}': ${status}`);
+      }
+    };
+
+    await new Promise<void>((resolve, reject) => {
+      this.docker.pull(image, (error: Error | null, stream?: NodeJS.ReadableStream) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+
+        if (!stream) {
+          reject(new Error(`Docker returned an empty stream while pulling image '${image}'.`));
+          return;
+        }
+
+        const modem = (this.docker as unknown as {
+          modem?: {
+            followProgress?: (
+              pullStream: NodeJS.ReadableStream,
+              onFinished: (pullError: unknown) => void,
+              onProgress?: (event: unknown) => void,
+            ) => void;
+          };
+        }).modem;
+
+        if (!modem?.followProgress) {
+          resolve();
+          return;
+        }
+
+        modem.followProgress(
+          stream,
+          (pullError: unknown) => {
+            if (pullError) {
+              reject(pullError);
+              return;
+            }
+            resolve();
+          },
+          reportPullProgress,
+        );
+      });
+    });
+  }
+
+  private async ensureImageAvailable(image: string): Promise<void> {
+    try {
+      await this.docker.getImage(image).inspect();
+      return;
+    } catch (error: unknown) {
+      if (!AppServerContainerService.isImageNotFound(error)) {
+        throw error;
+      }
+    }
+
+    this.reportImageStatus(`Docker image '${image}' not found locally. Downloading now.`);
+    await this.pullImage(image);
+    this.reportImageStatus(`Docker image '${image}' is ready.`);
+  }
 
   async start(): Promise<void> {
     if (this.running) {
@@ -65,6 +199,7 @@ export class AppServerContainerService implements AppServerTransport {
     }
 
     const cfg: Config = configSchema.parse({});
+    await this.ensureImageAvailable(cfg.runtime_image);
     const { db, client } = await initDb(cfg.state_db_path);
 
     let codexAuthMode: string;
