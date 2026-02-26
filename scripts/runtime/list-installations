@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_INSTALLATIONS_FILE="/workspace/.companyhelm/installations.json"
+
+usage() {
+  cat <<'USAGE'
+list-installations: show synced GitHub installation credentials.
+
+Usage:
+  list-installations [--file PATH]
+
+Defaults:
+  Installations file comes from --file, then $COMPANYHELM_INSTALLATIONS_FILE,
+  else /workspace/.companyhelm/installations.json
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+INSTALLATIONS_FILE="${COMPANYHELM_INSTALLATIONS_FILE:-$DEFAULT_INSTALLATIONS_FILE}"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "${1:-}" == "--file" ]]; then
+  [[ -n "${2:-}" ]] || die "--file requires a value"
+  INSTALLATIONS_FILE="$2"
+  shift 2
+fi
+
+[[ $# -eq 0 ]] || die "list-installations does not accept positional arguments"
+
+python3 - "$INSTALLATIONS_FILE" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def parse_expiration(entry: dict[str, Any]) -> tuple[datetime | None, str]:
+    raw_iso = str(entry.get("access_token_expiration") or "").strip()
+    raw_unix_ms = str(entry.get("access_token_expires_unix_time_ms") or "").strip()
+
+    if raw_iso:
+      normalized = raw_iso.replace("Z", "+00:00")
+      try:
+          parsed = datetime.fromisoformat(normalized)
+      except ValueError:
+          parsed = None
+      else:
+          if parsed.tzinfo is None:
+              parsed = parsed.replace(tzinfo=timezone.utc)
+          else:
+              parsed = parsed.astimezone(timezone.utc)
+          return parsed, parsed.isoformat()
+
+    if raw_unix_ms:
+        try:
+            raw_ms = int(raw_unix_ms)
+        except ValueError:
+            return None, "unknown"
+        if raw_ms > 0:
+            parsed = datetime.fromtimestamp(raw_ms / 1000.0, tz=timezone.utc)
+            return parsed, parsed.isoformat()
+
+    return None, "unknown"
+
+
+installations_path = Path(sys.argv[1])
+if not installations_path.exists():
+    raise SystemExit(f"installations file not found: {installations_path}")
+
+try:
+    payload = json.loads(installations_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"installations file is not valid JSON: {exc}") from exc
+
+installations = payload.get("installations")
+if not isinstance(installations, list):
+    raise SystemExit("installations payload is missing an 'installations' list")
+
+if not installations:
+    print("No synced GitHub installations are available.")
+    raise SystemExit(0)
+
+now_utc = datetime.now(timezone.utc)
+
+rows: list[dict[str, Any]] = []
+for raw_entry in installations:
+    if not isinstance(raw_entry, dict):
+        continue
+    installation_id = str(raw_entry.get("installation_id") or "").strip()
+    access_token = str(raw_entry.get("access_token") or "").strip()
+    repositories_raw = raw_entry.get("repositories")
+    repositories = []
+    if isinstance(repositories_raw, list):
+        repositories = [str(repo).strip() for repo in repositories_raw if str(repo).strip()]
+
+    if not installation_id:
+        continue
+
+    expiration_dt, expiration_text = parse_expiration(raw_entry)
+    if expiration_dt is None:
+        status = "unknown"
+    elif expiration_dt <= now_utc:
+        status = "expired"
+    else:
+        status = "active"
+
+    rows.append(
+        {
+            "installation_id": installation_id,
+            "access_token": access_token,
+            "expiration": expiration_text,
+            "status": status,
+            "repositories": sorted(set(repositories)),
+        }
+    )
+
+if not rows:
+    raise SystemExit("No valid installations were found in installations.json")
+
+rows.sort(key=lambda item: item["installation_id"])
+for row in rows:
+    print(f"Installation {row['installation_id']}")
+    print(f"  Token status: {row['status']}")
+    print(f"  Access token: {row['access_token']}")
+    print(f"  Access token expiration: {row['expiration']}")
+    repositories = row["repositories"]
+    if repositories:
+        print("  Repositories:")
+        for repository in repositories:
+            print(f"    - {repository}")
+    else:
+        print("  Repositories: none")
+    print()
+PY

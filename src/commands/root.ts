@@ -19,7 +19,7 @@ import {
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import * as grpc from "@grpc/grpc-js";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
@@ -64,7 +64,7 @@ import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
-import { ensureWorkspaceAgentsMd, type RuntimeGithubInstallation } from "../service/workspace_agents.js";
+import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
   serverUrl?: string;
@@ -79,6 +79,11 @@ interface RootCommandOptions {
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
+const GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS = 5 * 60_000;
+const GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS = 30_000;
+const GITHUB_INSTALLATIONS_REFRESH_WINDOW_MS = 15 * 60_000;
+const WORKSPACE_INSTALLATIONS_DIRECTORY = ".companyhelm";
+const WORKSPACE_INSTALLATIONS_FILENAME = "installations.json";
 const YOLO_APPROVAL_POLICY: AskForApproval = "never";
 const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
@@ -89,6 +94,25 @@ interface ThreadAppServerSession {
   sdkThreadId: string | null;
   rolloutPath: string | null;
   started: boolean;
+}
+
+interface RuntimeGithubInstallation {
+  installationId: string;
+  accessToken: string;
+  accessTokenExpiresUnixTimeMs: string;
+  accessTokenExpiration: string;
+  repositories: string[];
+}
+
+interface WorkspaceGithubInstallationsPayload {
+  synced_at: string;
+  installations: Array<{
+    installation_id: string;
+    access_token: string;
+    access_token_expires_unix_time_ms: string;
+    access_token_expiration: string;
+    repositories: string[];
+  }>;
 }
 
 const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
@@ -403,6 +427,21 @@ function isUnimplementedGrpcMethod(error: unknown): boolean {
   return isGrpcServiceError(error) && error.code === grpc.status.UNIMPLEMENTED;
 }
 
+function normalizeAccessTokenExpiration(accessTokenExpiresUnixTimeMs: bigint): {
+  accessTokenExpiresUnixTimeMs: string;
+  accessTokenExpiration: string;
+} {
+  const rawUnixTimeMs = Number(accessTokenExpiresUnixTimeMs);
+  const expirationUnixTimeMs = Number.isFinite(rawUnixTimeMs) && rawUnixTimeMs > 0
+    ? Math.floor(rawUnixTimeMs)
+    : Date.now() + 60 * 60_000;
+
+  return {
+    accessTokenExpiresUnixTimeMs: expirationUnixTimeMs.toString(),
+    accessTokenExpiration: new Date(expirationUnixTimeMs).toISOString(),
+  };
+}
+
 async function loadRuntimeGithubInstallations(
   apiClient: CompanyhelmApiClient,
   options: CompanyhelmApiCallOptions | undefined,
@@ -425,12 +464,20 @@ async function loadRuntimeGithubInstallations(
   for (const installationId of installationIds) {
     try {
       const accessTokenResponse = await apiClient.getGithubInstallationAccessTokenForRunner(installationId, options);
+      const accessToken = accessTokenResponse.accessToken.trim();
+      if (!accessToken) {
+        logger.warn(`Received empty GitHub access token for installation ${installationId.toString()}; skipping.`);
+        continue;
+      }
+
+      const expiration = normalizeAccessTokenExpiration(accessTokenResponse.accessTokenExpiresUnixTimeMs);
       const repositories = [...new Set(accessTokenResponse.repositories.filter((repository) => repository.trim().length > 0))]
         .sort((left, right) => left.localeCompare(right));
       installationDetails.push({
         installationId: accessTokenResponse.installationId.toString(),
-        accessToken: accessTokenResponse.accessToken,
-        accessTokenExpiresUnixTimeMs: accessTokenResponse.accessTokenExpiresUnixTimeMs.toString(),
+        accessToken,
+        accessTokenExpiresUnixTimeMs: expiration.accessTokenExpiresUnixTimeMs,
+        accessTokenExpiration: expiration.accessTokenExpiration,
         repositories,
       });
     } catch (error: unknown) {
@@ -442,6 +489,151 @@ async function loadRuntimeGithubInstallations(
   }
 
   return installationDetails;
+}
+
+function buildWorkspaceGithubInstallationsPayload(
+  installations: RuntimeGithubInstallation[],
+): WorkspaceGithubInstallationsPayload {
+  return {
+    synced_at: new Date().toISOString(),
+    installations: installations.map((installation) => ({
+      installation_id: installation.installationId,
+      access_token: installation.accessToken,
+      access_token_expires_unix_time_ms: installation.accessTokenExpiresUnixTimeMs,
+      access_token_expiration: installation.accessTokenExpiration,
+      repositories: installation.repositories,
+    })),
+  };
+}
+
+function writeWorkspaceGithubInstallationsPayload(
+  workspaceDirectory: string,
+  payload: WorkspaceGithubInstallationsPayload,
+  logger: Logger,
+): void {
+  const installationsDirectory = join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY);
+  const installationsPath = join(installationsDirectory, WORKSPACE_INSTALLATIONS_FILENAME);
+  const temporaryPath = `${installationsPath}.tmp`;
+  const serializedPayload = `${JSON.stringify(payload, null, 2)}\n`;
+
+  try {
+    mkdirSync(installationsDirectory, { recursive: true });
+    writeFileSync(temporaryPath, serializedPayload, "utf8");
+    renameSync(temporaryPath, installationsPath);
+  } catch (error: unknown) {
+    logger.warn(`Failed writing GitHub installations file for workspace '${workspaceDirectory}': ${toErrorMessage(error)}`);
+  }
+}
+
+async function listTrackedThreadWorkspaces(cfg: Config, logger: Logger): Promise<string[]> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const rows = await db.select({ workspace: threads.workspace }).from(threads);
+    return [...new Set(rows.map((row) => row.workspace.trim()).filter((workspace) => workspace.length > 0))];
+  } catch (error: unknown) {
+    logger.warn(`Failed to list tracked thread workspaces for GitHub installation sync: ${toErrorMessage(error)}`);
+    return [];
+  } finally {
+    client.close();
+  }
+}
+
+function resolveGithubInstallationsSyncDelayMs(installations: RuntimeGithubInstallation[]): number {
+  let syncDelayMs = GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS;
+  const now = Date.now();
+
+  for (const installation of installations) {
+    const expirationUnixTimeMs = Number(installation.accessTokenExpiresUnixTimeMs);
+    if (!Number.isFinite(expirationUnixTimeMs) || expirationUnixTimeMs <= 0) {
+      continue;
+    }
+
+    const refreshInMs = expirationUnixTimeMs - now - GITHUB_INSTALLATIONS_REFRESH_WINDOW_MS;
+    const boundedRefreshDelayMs = Math.max(
+      GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS,
+      Math.min(GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS, refreshInMs),
+    );
+    syncDelayMs = Math.min(syncDelayMs, boundedRefreshDelayMs);
+  }
+
+  return Math.max(
+    GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS,
+    Math.min(GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS, syncDelayMs),
+  );
+}
+
+async function syncGithubInstallationsForWorkspaces(
+  apiClient: CompanyhelmApiClient,
+  options: CompanyhelmApiCallOptions | undefined,
+  workspaceDirectories: string[],
+  logger: Logger,
+): Promise<RuntimeGithubInstallation[]> {
+  const uniqueWorkspaces = [
+    ...new Set(workspaceDirectories.map((workspace) => workspace.trim()).filter((workspace) => workspace.length > 0)),
+  ];
+  if (uniqueWorkspaces.length === 0) {
+    return [];
+  }
+
+  const installations = await loadRuntimeGithubInstallations(apiClient, options, logger);
+  const payload = buildWorkspaceGithubInstallationsPayload(installations);
+
+  for (const workspaceDirectory of uniqueWorkspaces) {
+    writeWorkspaceGithubInstallationsPayload(workspaceDirectory, payload, logger);
+  }
+
+  logger.debug(
+    `Synced ${installations.length} GitHub installation token(s) to ${uniqueWorkspaces.length} workspace(s).`,
+  );
+  return installations;
+}
+
+async function waitForAbort(signal: AbortSignal, delayMs: number): Promise<void> {
+  if (signal.aborted) {
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }, delayMs);
+
+    function handleAbort(): void {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", handleAbort);
+      resolve();
+    }
+
+    signal.addEventListener("abort", handleAbort);
+  });
+}
+
+async function runGithubInstallationsSyncLoop(
+  cfg: Config,
+  apiClient: CompanyhelmApiClient,
+  options: CompanyhelmApiCallOptions | undefined,
+  logger: Logger,
+  signal: AbortSignal,
+): Promise<void> {
+  while (!signal.aborted) {
+    let nextDelayMs = GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS;
+    try {
+      const workspaces = await listTrackedThreadWorkspaces(cfg, logger);
+      const installations = await syncGithubInstallationsForWorkspaces(
+        apiClient,
+        options,
+        workspaces,
+        logger,
+      );
+      nextDelayMs = resolveGithubInstallationsSyncDelayMs(installations);
+    } catch (error: unknown) {
+      logger.warn(`GitHub installation sync loop iteration failed: ${toErrorMessage(error)}`);
+      nextDelayMs = GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS;
+    }
+
+    await waitForAbort(signal, nextDelayMs);
+  }
 }
 
 function normalizeReasoningEffort(value: string | undefined): ReasoningEffort | null {
@@ -845,8 +1037,13 @@ async function handleCreateThreadRequest(
   }
 
   mkdirSync(threadDirectory, { recursive: true });
-  const githubInstallations = await loadRuntimeGithubInstallations(apiClient, apiCallOptions, logger);
-  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory, githubInstallations);
+  ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
+  await syncGithubInstallationsForWorkspaces(
+    apiClient,
+    apiCallOptions,
+    [threadDirectory],
+    logger,
+  );
   logger.debug(`Thread '${threadId}' workspace initialized at '${threadDirectory}'.`);
 
   const containerService = new ThreadContainerService();
@@ -1597,6 +1794,8 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     while (true) {
       const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url, logger });
       let commandChannel: CompanyhelmCommandChannel | null = null;
+      let githubInstallationsSyncAbortController: AbortController | null = null;
+      let githubInstallationsSyncTask: Promise<void> | null = null;
 
       try {
         reconnectAttempt += 1;
@@ -1612,6 +1811,20 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
           logger.info(`Connected to CompanyHelm API at ${cfg.companyhelm_api_url}`);
         }
         reconnectAttempt = 0;
+
+        githubInstallationsSyncAbortController = new AbortController();
+        githubInstallationsSyncTask = runGithubInstallationsSyncLoop(
+          cfg,
+          apiClient,
+          apiCallOptions,
+          logger,
+          githubInstallationsSyncAbortController.signal,
+        ).catch((error: unknown) => {
+          if (!githubInstallationsSyncAbortController?.signal.aborted) {
+            logger.warn(`GitHub installation sync loop exited unexpectedly: ${toErrorMessage(error)}`);
+          }
+        });
+
         await runCommandLoop(cfg, commandChannel, commandMessageSink, apiClient, apiCallOptions, logger);
         logger.warn("CompanyHelm API command channel closed. Reconnecting...");
       } catch (error: unknown) {
@@ -1621,6 +1834,10 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
             "Retrying...",
         );
       } finally {
+        if (githubInstallationsSyncAbortController) {
+          githubInstallationsSyncAbortController.abort();
+        }
+        void githubInstallationsSyncTask;
         if (commandChannel) {
           commandMessageSink.unbind(commandChannel);
         } else {

@@ -4,22 +4,23 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENTS_MD_CLI_TOOLS_SECTION,
+  AGENTS_MD_GITHUB_INSTALLATIONS_SECTION,
   AGENTS_MD_WORKSPACE_SECTION,
   ensureWorkspaceAgentsMd,
   renderRuntimeAgentsMd,
 } from "../../dist/service/workspace_agents.js";
 
-test("renderRuntimeAgentsMd includes workspace and CLI tools sections", () => {
+test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   const rendered = renderRuntimeAgentsMd();
 
   assert.equal(rendered.includes("## Workspace Structure"), true);
   assert.equal(rendered.includes("## GitHub Installations"), true);
-  assert.equal(rendered.includes("No linked GitHub installations were provided for this thread."), true);
+  assert.equal(rendered.includes("/workspace/.companyhelm/installations.json"), true);
+  assert.equal(rendered.includes("list-installations"), true);
+  assert.equal(rendered.includes("gh-use-installation"), true);
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
-  assert.equal(rendered.includes("no additional CompanyHelm helper CLI tools"), true);
   assert.equal(rendered.includes("Playwright CLI is available"), true);
-  assert.equal(rendered.includes("playwright install chromium"), true);
   assert.equal(rendered.includes("/home/agent/.codex/auth.json"), true);
   assert.equal(rendered.includes("{{"), false);
 });
@@ -40,7 +41,7 @@ test("ensureWorkspaceAgentsMd creates AGENTS.md from the runtime template", () =
   }
 });
 
-test("ensureWorkspaceAgentsMd appends missing CLI section to existing AGENTS.md", () => {
+test("ensureWorkspaceAgentsMd appends missing sections to existing AGENTS.md", () => {
   const workspaceDir = mkdtempSync(join(tmpdir(), "companyhelm-workspace-agents-"));
   const agentsPath = join(workspaceDir, "AGENTS.md");
 
@@ -53,25 +54,9 @@ test("ensureWorkspaceAgentsMd appends missing CLI section to existing AGENTS.md"
     assert.equal(contents.includes("## Workspace Structure"), true);
     assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
+    assert.equal(contents.includes(AGENTS_MD_GITHUB_INSTALLATIONS_SECTION.trim()), true);
     assert.equal(contents.includes(AGENTS_MD_CLI_TOOLS_SECTION.trim()), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
   }
-});
-
-test("renderRuntimeAgentsMd includes GitHub installation tokens and repositories when provided", () => {
-  const rendered = renderRuntimeAgentsMd("/home/agent", [
-    {
-      installationId: "110600868",
-      accessToken: "ghs_example_token",
-      accessTokenExpiresUnixTimeMs: "1767142800000",
-      repositories: ["acme/backend", "acme/frontend"],
-    },
-  ]);
-
-  assert.equal(rendered.includes("### Installation 110600868"), true);
-  assert.equal(rendered.includes("`ghs_example_token`"), true);
-  assert.equal(rendered.includes("`1767142800000`"), true);
-  assert.equal(rendered.includes("`acme/backend`"), true);
-  assert.equal(rendered.includes("`acme/frontend`"), true);
 });
