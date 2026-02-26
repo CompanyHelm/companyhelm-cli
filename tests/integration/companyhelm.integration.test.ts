@@ -848,15 +848,26 @@ test("companyhelm root command returns agentUpdate deleted for deleteAgentReques
   }
 });
 
-test("companyhelm root command writes GitHub installations into thread AGENTS.md", async () => {
+test("companyhelm root command writes synced GitHub installations payload and CLI instructions into thread workspace", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-github-installations-");
   let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after github installation sync validation");
+  const nativeSetTimeout = global.setTimeout;
+  let shouldStopAfterValidation = false;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   const createThreadContainersSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
     .mockImplementation(async () => undefined);
 
   try {
+    process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory);
     await writeHostAuthFile(homeDirectory);
 
@@ -939,6 +950,7 @@ test("companyhelm root command writes GitHub installations into thread AGENTS.md
             message.payload.value.status === ThreadStatus.READY
           ) {
             createdThreadId = message.payload.value.threadId;
+            shouldStopAfterValidation = true;
             call.end();
           }
         });
@@ -947,44 +959,59 @@ test("companyhelm root command writes GitHub installations into thread AGENTS.md
 
     server = started.server;
 
-    const repositoryRoot = path.resolve(__dirname, "../..");
-    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
-        cwd: repositoryRoot,
-        env: { ...process.env, HOME: homeDirectory },
-        stdio: ["ignore", "pipe", "pipe"],
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       }),
-      30_000,
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after github installation sync validation",
     );
 
-    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.equal(receivedRequestError, null, "did not expect requestError during createThread flow");
     assert.ok(createdThreadId, "expected thread to be created");
 
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
     const { db, client } = await initDb(stateDbPath);
     let agentsMdContents = "";
+    let installationsPayload: Record<string, unknown> | null = null;
     try {
       const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
       assert.ok(threadRow, "expected thread row to exist");
       const agentsPath = path.join(threadRow!.workspace, "AGENTS.md");
       assert.equal(existsSync(agentsPath), true, "expected AGENTS.md to be created in thread workspace");
       agentsMdContents = await readFile(agentsPath, "utf8");
+
+      const installationsPath = path.join(threadRow!.workspace, ".companyhelm", "installations.json");
+      assert.equal(existsSync(installationsPath), true, "expected installations.json to be created in thread workspace");
+      installationsPayload = JSON.parse(await readFile(installationsPath, "utf8")) as Record<string, unknown>;
     } finally {
       client.close();
     }
 
     assert.equal(agentsMdContents.includes("## GitHub Installations"), true);
-    assert.equal(agentsMdContents.includes("### Installation 112102565"), true);
-    assert.equal(agentsMdContents.includes("`ghs_test_installation_token`"), true);
-    assert.equal(agentsMdContents.includes("`acme/backend`"), true);
-    assert.equal(agentsMdContents.includes("`acme/frontend`"), true);
+    assert.equal(agentsMdContents.includes("list-installations"), true);
+    assert.equal(agentsMdContents.includes("gh-use-installation"), true);
+    assert.ok(installationsPayload, "expected installations payload to be parsed");
+    const syncedAt = String((installationsPayload as Record<string, unknown>).synced_at ?? "");
+    assert.equal(syncedAt.length > 0, true);
+    const rawInstallations = (installationsPayload as Record<string, unknown>).installations;
+    assert.equal(Array.isArray(rawInstallations), true);
+    const installations = (rawInstallations as Array<Record<string, unknown>>);
+    assert.equal(installations.length, 1);
+    assert.deepEqual(installations[0], {
+      installation_id: "112102565",
+      access_token: "ghs_test_installation_token",
+      access_token_expires_unix_time_ms: "1767142800000",
+      access_token_expiration: new Date(1767142800000).toISOString(),
+      repositories: ["acme/backend", "acme/frontend"],
+    });
   } finally {
+    reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
+    process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });

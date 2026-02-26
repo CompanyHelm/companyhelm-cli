@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEFAULT_INSTALLATIONS_FILE="/workspace/.companyhelm/installations.json"
+
+usage() {
+  cat <<'USAGE'
+gh-use-installation: configure GitHub CLI auth for a synced installation token.
+
+Usage:
+  gh-use-installation [--file PATH] <installation-id>
+
+Defaults:
+  Installations file comes from --file, then $COMPANYHELM_INSTALLATIONS_FILE,
+  else /workspace/.companyhelm/installations.json
+USAGE
+}
+
+die() {
+  echo "error: $*" >&2
+  exit 1
+}
+
+INSTALLATIONS_FILE="${COMPANYHELM_INSTALLATIONS_FILE:-$DEFAULT_INSTALLATIONS_FILE}"
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+  usage
+  exit 0
+fi
+
+if [[ "${1:-}" == "--file" ]]; then
+  [[ -n "${2:-}" ]] || die "--file requires a value"
+  INSTALLATIONS_FILE="$2"
+  shift 2
+fi
+
+INSTALLATION_ID="${1:-}"
+[[ -n "$INSTALLATION_ID" ]] || die "installation-id is required"
+[[ $# -eq 1 ]] || die "gh-use-installation accepts exactly one installation-id"
+
+if ! command -v gh >/dev/null 2>&1; then
+  die "gh CLI is not available in this environment"
+fi
+
+mapfile -t RESOLVED_INSTALLATION < <(
+  python3 - "$INSTALLATIONS_FILE" "$INSTALLATION_ID" <<'PY'
+import json
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+def parse_expiration(entry: dict[str, Any]) -> datetime | None:
+    raw_iso = str(entry.get("access_token_expiration") or "").strip()
+    raw_unix_ms = str(entry.get("access_token_expires_unix_time_ms") or "").strip()
+
+    if raw_iso:
+        normalized = raw_iso.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            parsed = None
+        else:
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+
+    if raw_unix_ms:
+        try:
+            raw_ms = int(raw_unix_ms)
+        except ValueError:
+            return None
+        if raw_ms > 0:
+            return datetime.fromtimestamp(raw_ms / 1000.0, tz=timezone.utc)
+
+    return None
+
+
+installations_path = Path(sys.argv[1])
+installation_id = str(sys.argv[2] or "").strip()
+if not installation_id:
+    raise SystemExit("installation-id is required")
+
+if not installations_path.exists():
+    raise SystemExit(f"installations file not found: {installations_path}")
+
+try:
+    payload = json.loads(installations_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"installations file is not valid JSON: {exc}") from exc
+
+installations = payload.get("installations")
+if not isinstance(installations, list):
+    raise SystemExit("installations payload is missing an 'installations' list")
+
+selected: dict[str, Any] | None = None
+for raw_entry in installations:
+    if not isinstance(raw_entry, dict):
+        continue
+    candidate_id = str(raw_entry.get("installation_id") or "").strip()
+    if candidate_id != installation_id:
+        continue
+    selected = raw_entry
+    break
+
+if selected is None:
+    raise SystemExit(f"installation '{installation_id}' was not found")
+
+access_token = str(selected.get("access_token") or "").strip()
+if not access_token:
+    raise SystemExit(f"installation '{installation_id}' does not have an access token")
+
+expiration = parse_expiration(selected)
+if expiration is not None and expiration <= datetime.now(timezone.utc):
+    raise SystemExit(f"installation '{installation_id}' token is expired at {expiration.isoformat()}")
+
+expiration_text = expiration.isoformat() if expiration is not None else "unknown"
+print(access_token)
+print(expiration_text)
+PY
+)
+
+TOKEN="${RESOLVED_INSTALLATION[0]:-}"
+EXPIRATION_TEXT="${RESOLVED_INSTALLATION[1]:-unknown}"
+
+[[ -n "$TOKEN" ]] || die "installation '$INSTALLATION_ID' resolved to an empty token"
+
+gh auth logout --hostname github.com --yes >/dev/null 2>&1 || true
+printf '%s' "$TOKEN" | gh auth login --hostname github.com --with-token >/dev/null
+gh auth setup-git >/dev/null
+
+echo "Configured gh auth for installation $INSTALLATION_ID (token expires at $EXPIRATION_TEXT)."
+gh auth status --hostname github.com

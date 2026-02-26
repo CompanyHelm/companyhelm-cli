@@ -101,5 +101,9 @@ RUN mkdir -p "$NVM_DIR" \
     && install -d /opt/google/chrome \
     && ln -sf "${CHROMIUM_BIN}" /opt/google/chrome/chrome
 
+COPY scripts/runtime/list-installations /usr/local/bin/list-installations
+COPY scripts/runtime/gh-use-installation /usr/local/bin/gh-use-installation
+RUN chmod 0755 /usr/local/bin/list-installations /usr/local/bin/gh-use-installation
+
 # Set environment variables
 ENV DOCKER_HOST=tcp://127.0.0.1:2375
