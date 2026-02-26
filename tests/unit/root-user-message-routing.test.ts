@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
-import { isNoActiveTurnSteerError, shouldUseTurnSteer } from "../../dist/commands/root.js";
+import {
+  isNoActiveTurnSteerError,
+  isNoRunningTurnInterruptError,
+  shouldUseTurnSteer,
+} from "../../dist/commands/root.js";
 
 test("shouldUseTurnSteer only steers when a turn was already active", () => {
   assert.equal(shouldUseTurnSteer(true, false), true);
@@ -13,4 +17,14 @@ test("isNoActiveTurnSteerError matches app-server no-active-turn steer errors", 
     true,
   );
   assert.equal(isNoActiveTurnSteerError(new Error("turn/steer failed for another reason")), false);
+});
+
+test("isNoRunningTurnInterruptError matches app-server no-running-turn interrupt errors", () => {
+  assert.equal(
+    isNoRunningTurnInterruptError(
+      new Error("app-server returned an error: {\"code\":-32600,\"message\":\"Thread has no running turn to interrupt.\"}"),
+    ),
+    true,
+  );
+  assert.equal(isNoRunningTurnInterruptError(new Error("turn/interrupt failed for another reason")), false);
 });
