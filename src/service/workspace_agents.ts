@@ -12,7 +12,7 @@ export const AGENTS_MD_WORKSPACE_SECTION = `## Workspace Structure
 export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 
 - There are currently no additional CompanyHelm helper CLI tools installed in this runtime.
-`;
+- Playwright CLI is available for browser automation tasks with chromoum pre-installed: .e.g. \`playwright --browser=chromium ...`
 
 export interface RuntimeGithubInstallation {
   installationId: string;
