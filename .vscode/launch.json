@@ -9,12 +9,26 @@
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "npm: build",
       "args": [
+        "--server-url",
+        "localhost:50051",
+        "--log-level",
+        "DEBUG",
+        "--secret",
+        "${input:userSecret}"
       ],
       "console": "integratedTerminal",
       "internalConsoleOptions": "neverOpen",
       "skipFiles": [
         "<node_internals>/**"
       ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "userSecret",
+      "type": "promptString",
+      "description": "Bearer secret for --secret",
+      "password": true
     }
   ]
 }
