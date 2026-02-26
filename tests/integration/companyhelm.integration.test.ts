@@ -1860,8 +1860,11 @@ test(
     }) as typeof global.setTimeout);
 
     const rolloutPath = "/workspace/rollouts/saved-thread-rollout.json";
+    const additionalModelInstructions = "  Ask for explicit assumptions before coding.  ";
+    const normalizedAdditionalModelInstructions = "Ask for explicit assumptions before coding.";
     let createdThreadId: string | null = null;
     let receivedRequestError: any = null;
+    const debugSpy = vi.spyOn(console, "debug").mockImplementation(() => undefined);
 
     const createThreadContainersSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
@@ -2002,6 +2005,7 @@ test(
                       agentId: "agent-user-message",
                       threadId: "thread-user-message",
                       model: "gpt-5.3-codex",
+                      additionalModelInstructions,
                     },
                   },
                 }),
@@ -2066,6 +2070,7 @@ test(
       await assert.rejects(
         runRootCommand({
           serverUrl: `127.0.0.1:${started.port}/grpc`,
+          logLevel: "DEBUG",
         }),
         (error: unknown) => error === reconnectStopError,
         "expected root command to stop after validating user-message resume flow",
@@ -2081,6 +2086,20 @@ test(
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
       assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
       assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(
+        startThreadSpy.mock.calls[0]?.[0]?.developerInstructions,
+        normalizedAdditionalModelInstructions,
+        "expected additional model instructions to be sent as thread/start developerInstructions",
+      );
+      assert.equal(
+        debugSpy.mock.calls.some(
+          (call) =>
+            String(call[0]).includes("Starting app-server thread") &&
+            String(call[0]).includes(normalizedAdditionalModelInstructions),
+        ),
+        true,
+        "expected debug logs to include thread/start developer instructions",
+      );
       for (const [params] of startTurnSpy.mock.calls) {
         assert.equal(params.approvalPolicy, "never", "expected yolo approval on turn/start");
         assert.deepEqual(params.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
@@ -2128,6 +2147,7 @@ test(
       resumeThreadSpy.mockRestore();
       startTurnSpy.mockRestore();
       waitForTurnCompletionSpy.mockRestore();
+      debugSpy.mockRestore();
 
       if (server) {
         await shutdownServer(server);

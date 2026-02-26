@@ -39,6 +39,7 @@ export const threads = sqliteTable("threads", {
   sdkThreadId: text("sdk_thread_id"),
   model: text("model").notNull(),
   reasoningLevel: text("reasoning_level").notNull(),
+  additionalModelInstructions: text("additional_model_instructions"),
   status: text("status", { enum: ["pending", "ready", "deleting"] }).notNull(),
   currentSdkTurnId: text("current_sdk_turn_id"),
   isCurrentTurnRunning: integer("is_current_turn_running", { mode: "boolean" }).notNull(),
