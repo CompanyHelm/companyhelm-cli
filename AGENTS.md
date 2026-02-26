@@ -16,4 +16,4 @@
 
 ## Testing
 
-- If your current environment doesn't support DinD, run `companyhelm --use-host-docker-runtime` (optionally with `--host-docker-socket-path <path>`) so the host socket is mounted instead of starting DinD sidecars.
+- If your current environment doesn't support DinD, run `companyhelm --use-host-docker-runtime` (optionally with `--host-docker-path <path>`) so the host socket is mounted instead of starting DinD sidecars.
