@@ -41,6 +41,7 @@ export interface ThreadContainerCreateOptions {
   mounts: MountSettings[];
   useHostDockerRuntime?: boolean;
   hostDockerSocketPath?: string;
+  imageStatusReporter?: (message: string) => void;
 }
 
 const CONTAINER_START_TIMEOUT_MS = 30_000;
@@ -348,6 +349,10 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
 export class ThreadContainerService {
   private readonly docker: Dockerode;
   private readonly runCommand: typeof spawnSync;
@@ -374,7 +379,53 @@ export class ThreadContainerService {
     throw new Error(`${contextMessage} (exit ${status})${detail ? `: ${detail}` : "."}`);
   }
 
-  private async pullImage(image: string): Promise<void> {
+  private async pullImage(image: string, imageStatusReporter?: (message: string) => void): Promise<void> {
+    let lastReportedProgressBucket = -1;
+    const layerProgress = new Map<string, { current: number; total: number }>();
+    let lastReportedStatus = "";
+
+    const reportPullProgress = (event: unknown): void => {
+      if (!isRecord(event)) {
+        return;
+      }
+
+      const status = typeof event.status === "string" ? event.status.trim() : "";
+      const id = typeof event.id === "string" ? event.id.trim() : "";
+      const progressDetail = isRecord(event.progressDetail) ? event.progressDetail : null;
+      const current = progressDetail && typeof progressDetail.current === "number"
+        ? progressDetail.current
+        : undefined;
+      const total = progressDetail && typeof progressDetail.total === "number"
+        ? progressDetail.total
+        : undefined;
+
+      if (id && current !== undefined && total !== undefined && total > 0) {
+        layerProgress.set(id, { current: Math.min(current, total), total });
+
+        let totalCurrent = 0;
+        let totalSize = 0;
+        for (const progress of layerProgress.values()) {
+          totalCurrent += progress.current;
+          totalSize += progress.total;
+        }
+
+        if (totalSize > 0) {
+          const percent = Math.floor((totalCurrent / totalSize) * 100);
+          const bucket = Math.floor(percent / 5) * 5;
+          if (bucket > lastReportedProgressBucket) {
+            lastReportedProgressBucket = bucket;
+            imageStatusReporter?.(`Pulling Docker image '${image}': ${bucket}%`);
+          }
+        }
+        return;
+      }
+
+      if (status && status !== lastReportedStatus) {
+        lastReportedStatus = status;
+        imageStatusReporter?.(`Pulling Docker image '${image}': ${status}`);
+      }
+    };
+
     await new Promise<void>((resolve, reject) => {
       this.docker.pull(image, (error: Error | null, stream?: NodeJS.ReadableStream) => {
         if (error) {
@@ -389,7 +440,11 @@ export class ThreadContainerService {
 
         const modem = (this.docker as unknown as {
           modem?: {
-            followProgress?: (pullStream: NodeJS.ReadableStream, onFinished: (pullError: unknown) => void) => void;
+            followProgress?: (
+              pullStream: NodeJS.ReadableStream,
+              onFinished: (pullError: unknown) => void,
+              onProgress?: (event: unknown) => void,
+            ) => void;
           };
         }).modem;
 
@@ -398,18 +453,22 @@ export class ThreadContainerService {
           return;
         }
 
-        modem.followProgress(stream, (pullError: unknown) => {
-          if (pullError) {
-            reject(pullError);
-            return;
-          }
-          resolve();
-        });
+        modem.followProgress(
+          stream,
+          (pullError: unknown) => {
+            if (pullError) {
+              reject(pullError);
+              return;
+            }
+            resolve();
+          },
+          reportPullProgress,
+        );
       });
     });
   }
 
-  private async ensureImageAvailable(image: string): Promise<void> {
+  private async ensureImageAvailable(image: string, imageStatusReporter?: (message: string) => void): Promise<void> {
     try {
       await this.docker.getImage(image).inspect();
       return;
@@ -419,7 +478,9 @@ export class ThreadContainerService {
       }
     }
 
-    await this.pullImage(image);
+    imageStatusReporter?.(`Docker image '${image}' not found locally. Downloading now.`);
+    await this.pullImage(image, imageStatusReporter);
+    imageStatusReporter?.(`Docker image '${image}' is ready.`);
   }
 
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
@@ -428,7 +489,7 @@ export class ThreadContainerService {
       if (!existsSync(hostDockerSocketPath)) {
         throw new Error(`Host Docker socket path '${hostDockerSocketPath}' does not exist.`);
       }
-      await this.ensureImageAvailable(options.runtimeImage);
+      await this.ensureImageAvailable(options.runtimeImage, options.imageStatusReporter);
       try {
         await this.docker.createContainer(buildRuntimeContainerOptions(options));
       } catch (error) {
@@ -439,9 +500,9 @@ export class ThreadContainerService {
       return;
     }
 
-    await this.ensureImageAvailable(options.dindImage);
+    await this.ensureImageAvailable(options.dindImage, options.imageStatusReporter);
     if (options.runtimeImage !== options.dindImage) {
-      await this.ensureImageAvailable(options.runtimeImage);
+      await this.ensureImageAvailable(options.runtimeImage, options.imageStatusReporter);
     }
 
     await this.docker.createContainer(buildDindContainerOptions(options));

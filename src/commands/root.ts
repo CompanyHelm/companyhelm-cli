@@ -819,6 +819,9 @@ async function handleCreateThreadRequest(
       mounts,
       useHostDockerRuntime: cfg.use_host_docker_runtime,
       hostDockerSocketPath: cfg.host_docker_socket_path,
+      imageStatusReporter: (message: string) => {
+        logger.info(`[thread ${threadId}] ${message}`);
+      },
     });
     if (cfg.use_host_docker_runtime) {
       logger.debug(`Thread '${threadId}' runtime container created (${containerNames.runtime}) in host docker mode.`);

@@ -222,6 +222,7 @@ test("buildRuntimeContainerOptions honors custom host docker socket path in host
 test("ThreadContainerService pulls missing images before creating containers", async () => {
   const pulledImages: string[] = [];
   const createdImages: string[] = [];
+  const reportedMessages: string[] = [];
 
   const fakeDocker = {
     getImage(image: string) {
@@ -239,7 +240,19 @@ test("ThreadContainerService pulls missing images before creating containers", a
       callback(null, {} as NodeJS.ReadableStream);
     },
     modem: {
-      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+      followProgress(
+        _stream: NodeJS.ReadableStream,
+        callback: (error: Error | null) => void,
+        onProgress?: (event: unknown) => void,
+      ) {
+        onProgress?.({
+          status: "Downloading",
+          id: "layer-1",
+          progressDetail: {
+            current: 50,
+            total: 100,
+          },
+        });
         callback(null);
       },
     },
@@ -269,10 +282,37 @@ test("ThreadContainerService pulls missing images before creating containers", a
       agentUser: "agent",
       agentHomeDirectory: "/home/agent",
     },
+    imageStatusReporter: (message: string) => {
+      reportedMessages.push(message);
+    },
   });
 
   assert.deepEqual(pulledImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
   assert.deepEqual(createdImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
+  assert.equal(
+    reportedMessages.includes("Docker image 'docker:29-dind-rootless' not found locally. Downloading now."),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes("Pulling Docker image 'docker:29-dind-rootless': 50%"),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes("Docker image 'docker:29-dind-rootless' is ready."),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes("Docker image 'companyhelm/runner:latest' not found locally. Downloading now."),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes("Pulling Docker image 'companyhelm/runner:latest': 50%"),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes("Docker image 'companyhelm/runner:latest' is ready."),
+    true,
+  );
 });
 
 test("ThreadContainerService host docker runtime mode skips dind image/container", async () => {
