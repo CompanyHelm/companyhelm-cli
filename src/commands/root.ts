@@ -259,6 +259,10 @@ export function isNoActiveTurnSteerError(error: unknown): boolean {
   return /no active turn to steer/i.test(toErrorMessage(error));
 }
 
+export function isNoRunningTurnInterruptError(error: unknown): boolean {
+  return /no running turn to interrupt/i.test(toErrorMessage(error));
+}
+
 interface ResolvedThreadNameUpdate {
   sdkThreadId: string;
   threadName?: string;
@@ -1285,6 +1289,36 @@ async function handleDeleteThreadRequest(
   await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
 }
 
+async function reportNoRunningInterruptAsReady(
+  cfg: Config,
+  commandChannel: ClientMessageSink,
+  request: InterruptTurnRequest,
+  threadState: ThreadMessageExecutionState,
+  logger: Logger,
+  logMessage: string,
+): Promise<void> {
+  try {
+    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+      isCurrentTurnRunning: false,
+    });
+  } catch (error: unknown) {
+    logger.warn(
+      `Failed to persist non-running interrupt state for thread '${request.threadId}': ${toErrorMessage(error)}`,
+    );
+  }
+
+  if (threadState.currentSdkTurnId) {
+    await sendTurnExecutionUpdate(
+      commandChannel,
+      request.threadId,
+      threadState.currentSdkTurnId,
+      TurnStatus.COMPLETED,
+    );
+  }
+  await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.READY);
+  logger.info(logMessage);
+}
+
 async function handleInterruptTurnRequest(
   cfg: Config,
   commandChannel: ClientMessageSink,
@@ -1305,7 +1339,14 @@ async function handleInterruptTurnRequest(
   }
 
   if (!threadState.isCurrentTurnRunning) {
-    await sendRequestError(commandChannel, `Thread '${request.threadId}' has no running turn to interrupt.`);
+    await reportNoRunningInterruptAsReady(
+      cfg,
+      commandChannel,
+      request,
+      threadState,
+      logger,
+      `Interrupt requested for thread '${request.threadId}' with no running turn; reported ready state.`,
+    );
     return;
   }
 
@@ -1346,6 +1387,17 @@ async function handleInterruptTurnRequest(
   try {
     await appServerSession.appServer.interruptTurn(interruptParams);
   } catch (error: unknown) {
+    if (isNoRunningTurnInterruptError(error)) {
+      await reportNoRunningInterruptAsReady(
+        cfg,
+        commandChannel,
+        request,
+        threadState,
+        logger,
+        `Interrupt requested for thread '${request.threadId}' but turn '${threadState.currentSdkTurnId}' was already stopped; reported ready state.`,
+      );
+      return;
+    }
     const message = toErrorMessage(error);
     logger.warn(`Failed to interrupt turn '${threadState.currentSdkTurnId}': ${message}`);
     await sendRequestError(
