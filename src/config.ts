@@ -1,5 +1,18 @@
 import { z } from "zod";
 
+const DEFAULT_RUNTIME_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"] as const;
+
+function parseRuntimeDnsServers(value: unknown): unknown {
+    if (typeof value !== "string") {
+        return value;
+    }
+
+    return value
+        .split(",")
+        .map((server) => server.trim())
+        .filter((server) => server.length > 0);
+}
+
 export const codexConfig = z.object({
     codex_auth_file_path: z.string()
         .describe("The path to the Codex authentication file on the host, relative to config_directory.")
@@ -48,6 +61,12 @@ export const config = z.object({
             "Host Docker endpoint when use_host_docker_runtime is enabled. Supported: unix:///<socket-path> or tcp://localhost:<port>.",
         )
         .default("unix:///var/run/docker.sock"),
+    runtime_dns_servers: z.preprocess(
+        parseRuntimeDnsServers,
+        z.array(z.string().min(1)),
+    )
+        .describe("DNS servers applied to runtime-related Docker containers.")
+        .default(() => [...DEFAULT_RUNTIME_DNS_SERVERS]),
     agent_user: z.string()
         .describe("The user for the agent.")
         .default("agent"),
