@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildFallbackThreadTitleFromText, extractThreadNameUpdateFromNotification } from "../../dist/commands/root.js";
+import { extractThreadNameUpdateFromNotification } from "../../dist/commands/root.js";
 
 test("extractThreadNameUpdateFromNotification reads mapped thread/name/updated notifications", () => {
   const notification = {
@@ -32,16 +32,4 @@ test("extractThreadNameUpdateFromNotification reads raw codex/event/thread_name_
     sdkThreadId: "sdk-thread-2",
     threadName: "Sales data helper",
   });
-});
-
-test("buildFallbackThreadTitleFromText derives a concise context title from user input", () => {
-  const title = buildFallbackThreadTitleFromText(
-    "Create a Python script that summarizes CSV sales data by month and region, then outputs top-performing regions.",
-  );
-
-  assert.equal(title, "A Python script that summarizes CSV sales data by month and region");
-});
-
-test("buildFallbackThreadTitleFromText returns undefined for empty input", () => {
-  assert.equal(buildFallbackThreadTitleFromText("   "), undefined);
 });

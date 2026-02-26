@@ -79,20 +79,6 @@ interface RootCommandOptions {
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
-const FALLBACK_THREAD_TITLE_MAX_WORDS = 12;
-const FALLBACK_THREAD_TITLE_MAX_LENGTH = 80;
-const FALLBACK_THREAD_TITLE_LEADING_WORDS = new Set([
-  "please",
-  "can",
-  "could",
-  "would",
-  "create",
-  "build",
-  "write",
-  "make",
-  "implement",
-  "generate",
-]);
 const YOLO_APPROVAL_POLICY: AskForApproval = "never";
 const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
@@ -302,35 +288,6 @@ export function extractThreadNameUpdateFromNotification(
     normalizeNonEmptyString(params.threadName);
 
   return { sdkThreadId, threadName };
-}
-
-export function buildFallbackThreadTitleFromText(text: string): string | undefined {
-  const normalized = text.replace(/\s+/g, " ").trim();
-  if (normalized.length === 0) {
-    return undefined;
-  }
-
-  const words = normalized.split(" ").filter((word) => word.length > 0);
-  while (words.length > 1 && FALLBACK_THREAD_TITLE_LEADING_WORDS.has(words[0].toLowerCase())) {
-    words.shift();
-  }
-
-  if (words.length === 0) {
-    return undefined;
-  }
-
-  let title = words.slice(0, FALLBACK_THREAD_TITLE_MAX_WORDS).join(" ").replace(/[.,:;!?]+$/g, "").trim();
-  if (title.length > FALLBACK_THREAD_TITLE_MAX_LENGTH) {
-    const truncated = title.slice(0, FALLBACK_THREAD_TITLE_MAX_LENGTH);
-    const safeCutoff = truncated.lastIndexOf(" ");
-    title = (safeCutoff > 0 ? truncated.slice(0, safeCutoff) : truncated).trim();
-  }
-
-  if (title.length === 0) {
-    return undefined;
-  }
-
-  return `${title.slice(0, 1).toUpperCase()}${title.slice(1)}`;
 }
 
 interface UnknownWireField {
@@ -1224,16 +1181,14 @@ async function waitForThreadTurnCompletion(
   sdkThreadId: string,
   sdkTurnId: string,
   requestId?: string,
-): Promise<{ terminalStatus: "completed" | "interrupted" | "failed"; threadNameUpdated: boolean }> {
-  let threadNameUpdated = false;
-  const terminalStatus = await appServer.waitForTurnCompletion(
+): Promise<"completed" | "interrupted" | "failed"> {
+  return appServer.waitForTurnCompletion(
     sdkThreadId,
     sdkTurnId,
     async (notification: ServerNotification) => {
       const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
       if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
         await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
-        threadNameUpdated = true;
       }
 
       if (
@@ -1270,7 +1225,6 @@ async function waitForThreadTurnCompletion(
     },
     TURN_COMPLETION_TIMEOUT_MS,
   );
-  return { terminalStatus, threadNameUpdated };
 }
 
 async function executeCreateUserMessageRequest(
@@ -1297,7 +1251,6 @@ async function executeCreateUserMessageRequest(
   let turnAccepted = false;
   let keepRuntimeWarm = false;
   let shouldTrackTurnCompletion = trackTurnCompletion;
-  let startedNewSdkThread = false;
 
   try {
     await ensureThreadRuntimeReady({
@@ -1357,7 +1310,6 @@ async function executeCreateUserMessageRequest(
       appServerSession.sdkThreadId = sdkThreadId;
       appServerSession.rolloutPath = threadStartResult.thread.path;
       rememberThreadRolloutPath(request.threadId, threadStartResult.thread.path);
-      startedNewSdkThread = true;
       await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
     }
 
@@ -1430,7 +1382,7 @@ async function executeCreateUserMessageRequest(
       return;
     }
 
-    const completionResult = await waitForThreadTurnCompletion(
+    const terminalStatus = await waitForThreadTurnCompletion(
       appServer,
       commandChannel,
       request.threadId,
@@ -1438,17 +1390,6 @@ async function executeCreateUserMessageRequest(
       sdkTurnId,
       requestId,
     );
-    const terminalStatus = completionResult.terminalStatus;
-
-    if (terminalStatus === "completed" && startedNewSdkThread && !completionResult.threadNameUpdated) {
-      const fallbackThreadTitle = buildFallbackThreadTitleFromText(request.text);
-      if (fallbackThreadTitle) {
-        logger.debug(
-          `No thread name notification received for thread '${request.threadId}'. Applying fallback title '${fallbackThreadTitle}'.`,
-        );
-        await sendThreadNameUpdate(commandChannel, request.threadId, fallbackThreadTitle);
-      }
-    }
 
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       currentSdkTurnId: sdkTurnId,
