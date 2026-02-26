@@ -12,13 +12,7 @@ export const AGENTS_MD_WORKSPACE_SECTION = `## Workspace Structure
 export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 
 - There are currently no additional CompanyHelm helper CLI tools installed in this runtime.
-- Playwright CLI is available for browser automation tasks.
-- Minimum Chromium smoke test command:
-  - \`playwright screenshot --browser=chromium https://example.com /tmp/playwright-chromium-smoke.png\`
-- If Chromium is missing, install it first:
-  - \`playwright install chromium\`
-  - \`playwright screenshot --browser=chromium https://example.com /tmp/playwright-chromium-smoke.png\`
-`;
+- Playwright CLI is available for browser automation tasks with chromoum pre-installed: .e.g. \`playwright --browser=chromium ...`
 
 export interface RuntimeGithubInstallation {
   installationId: string;
