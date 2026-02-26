@@ -238,7 +238,35 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
 }
 
 function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string {
-  return buildNvmCodexBootstrapScript(user.agentHomeDirectory);
+  const bootstrap = buildNvmCodexBootstrapScript(user.agentHomeDirectory);
+  return [
+    bootstrap,
+    "",
+    'if ! command -v playwright >/dev/null 2>&1; then',
+    '  echo "playwright CLI is not available after sourcing nvm." >&2',
+    '  echo "Fix: install playwright in the runtime image (for example: npm install --global playwright)." >&2',
+    "  exit 1",
+    "fi",
+    "",
+    'PLAYWRIGHT_CACHE_DIR="${PLAYWRIGHT_BROWSERS_PATH:-/ms-playwright}"',
+    'if [ ! -d "$PLAYWRIGHT_CACHE_DIR" ]; then',
+    '  echo "Playwright browser cache directory is missing: $PLAYWRIGHT_CACHE_DIR" >&2',
+    '  echo "Fix: set PLAYWRIGHT_BROWSERS_PATH and run npx playwright install chromium during runtime image build." >&2',
+    "  exit 1",
+    "fi",
+    "",
+    'CHROMIUM_BIN="$(find "$PLAYWRIGHT_CACHE_DIR" -type f -path "*/chrome-linux/chrome" -print -quit 2>/dev/null || true)"',
+    'if [ -z "$CHROMIUM_BIN" ]; then',
+    '  echo "Playwright chromium binary is missing under $PLAYWRIGHT_CACHE_DIR." >&2',
+    '  echo "Fix: run npx playwright install chromium while building the runtime image." >&2',
+    "  exit 1",
+    "fi",
+    "",
+    'if [ ! -x "$CHROMIUM_BIN" ]; then',
+    '  echo "Playwright chromium binary exists but is not executable: $CHROMIUM_BIN" >&2',
+    "  exit 1",
+    "fi",
+  ].join("\n");
 }
 
 function buildRuntimeBashrcProvisionScript(user: ThreadContainerUser): string {
@@ -636,7 +664,7 @@ export class ThreadContainerService {
     const script = buildRuntimeToolingValidationScript(user);
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
-      `Failed to validate nvm/codex in runtime container '${name}'`,
+      `Failed to validate runtime tooling (nvm/codex/playwright) in container '${name}'`,
     );
   }
 

@@ -689,6 +689,39 @@ test("ThreadContainerService provisions runtime bashrc with nvm bootstrap in age
   assert.match(invocation.args[6], /nvm use --silent default/);
 });
 
+test("ThreadContainerService validates playwright chromium availability in runtime tooling bootstrap", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerTooling("companyhelm-runtime-thread-tooling", {
+    uid: 501,
+    gid: 20,
+    agentUser: "agent",
+    agentHomeDirectory: "/home/agent",
+  });
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "agent", "companyhelm-runtime-thread-tooling", "bash", "-lc"]);
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /if ! command -v codex >/);
+  assert.match(invocation.args[6], /if ! command -v playwright >/);
+  assert.match(invocation.args[6], /PLAYWRIGHT_CACHE_DIR="\$\{PLAYWRIGHT_BROWSERS_PATH:-\/ms-playwright\}"/);
+  assert.match(invocation.args[6], /find "\$PLAYWRIGHT_CACHE_DIR" -type f -path "\*\/chrome-linux\/chrome"/);
+  assert.match(invocation.args[6], /npx playwright install chromium/);
+});
+
 test("ThreadContainerService configures default git author values in runtime repos", async () => {
   let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
   const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
@@ -727,6 +760,30 @@ test("ThreadContainerService configures default git author values in runtime rep
   assert.match(invocation.args[6], /git -C "\$repo_root" config --local user\.name "\$DEFAULT_GIT_USER_NAME"/);
   assert.match(invocation.args[6], /git -C "\$repo_root" config --local user\.email "\$DEFAULT_GIT_USER_EMAIL"/);
   assert.match(invocation.args[6], /find \/workspace -type d -name \.git -print0/);
+});
+
+test("ThreadContainerService surfaces runtime tooling validation failures", async () => {
+  const runCommand = () =>
+    ({
+      pid: 1,
+      output: [null, "", "playwright missing"],
+      stdout: "",
+      stderr: "playwright missing",
+      status: 10,
+      signal: null,
+    }) as any;
+  const service = new ThreadContainerService({} as any, runCommand as any);
+
+  await assert.rejects(
+    () =>
+      service.ensureRuntimeContainerTooling("companyhelm-runtime-thread-tooling-error", {
+        uid: 501,
+        gid: 20,
+        agentUser: "agent",
+        agentHomeDirectory: "/home/agent",
+      }),
+    /Failed to validate runtime tooling \(nvm\/codex\/playwright\) in container 'companyhelm-runtime-thread-tooling-error' \(exit 10\): playwright missing/,
+  );
 });
 
 test("ThreadContainerService surfaces runtime identity bootstrap failures", async () => {
