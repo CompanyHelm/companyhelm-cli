@@ -33,6 +33,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const USER_MESSAGE_START_TIMEOUT_MS = 120_000;
 const USER_MESSAGE_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
 const DAEMON_STOP_TIMEOUT_MS = 5_000;
+const SHELL_DAEMON_CONFIG_START = "__start__";
+const SHELL_DAEMON_CONFIG_RESET = "__reset__";
+const NON_OVERRIDABLE_DAEMON_OPTION_NAMES = new Set(["daemon", "serverUrl", "secret", "help"]);
 
 type ShellMainAction = "grpc" | "db" | "thread-docker-shell" | "show-state" | "show-daemon-logs" | "exit";
 
@@ -90,6 +93,15 @@ interface DaemonHandle {
   getExitStatus: () => DaemonExitStatus | null;
 }
 
+export interface ShellDaemonOption {
+  name: string;
+  longFlag: string;
+  description: string;
+  takesValue: boolean;
+  negate: boolean;
+  defaultValue: unknown;
+}
+
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -104,11 +116,202 @@ function buildDaemonExitMessage(status: DaemonExitStatus, output: string): strin
   return `companyhelm daemon process exited unexpectedly (${outcome}).\n${compactOutput}`;
 }
 
-function startDaemonProcess(apiUrl: string): DaemonHandle {
+function isShellInteractive(): boolean {
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY);
+}
+
+function resolveDaemonOptionValue(option: ShellDaemonOption, values: Record<string, unknown>): unknown {
+  const explicit = values[option.name];
+  if (explicit !== undefined) {
+    return explicit;
+  }
+
+  if (option.defaultValue !== undefined) {
+    return option.defaultValue;
+  }
+
+  if (!option.takesValue) {
+    return option.negate ? true : false;
+  }
+
+  return undefined;
+}
+
+function formatDaemonOptionValue(option: ShellDaemonOption, value: unknown): string {
+  if (!option.takesValue) {
+    return Boolean(value) ? "enabled" : "disabled";
+  }
+
+  if (value === undefined || value === null || String(value).trim().length === 0) {
+    return "(unset)";
+  }
+
+  return String(value);
+}
+
+export function getShellConfigurableDaemonOptions(program: Command): ShellDaemonOption[] {
+  return program.options
+    .filter((option) => {
+      if (!option.long || option.hidden) {
+        return false;
+      }
+
+      return !NON_OVERRIDABLE_DAEMON_OPTION_NAMES.has(option.attributeName());
+    })
+    .map((option) => ({
+      name: option.attributeName(),
+      longFlag: option.long!,
+      description: option.description || "",
+      takesValue: option.required || option.optional,
+      negate: option.negate,
+      defaultValue: option.defaultValue,
+    }));
+}
+
+export function buildShellDaemonOverrideArgs(
+  options: ShellDaemonOption[],
+  values: Record<string, unknown>,
+): string[] {
+  const args: string[] = [];
+
+  for (const option of options) {
+    const value = resolveDaemonOptionValue(option, values);
+    if (option.takesValue) {
+      if (value !== undefined && value !== null && String(value).trim().length > 0) {
+        args.push(option.longFlag, String(value));
+      }
+      continue;
+    }
+
+    const enabled = Boolean(value);
+    if (option.negate) {
+      if (!enabled) {
+        args.push(option.longFlag);
+      }
+      continue;
+    }
+
+    if (enabled) {
+      args.push(option.longFlag);
+    }
+  }
+
+  return args;
+}
+
+async function promptShellDaemonOverrideArgs(program: Command | undefined): Promise<string[] | null> {
+  if (!program || !isShellInteractive()) {
+    return [];
+  }
+
+  const daemonOptions = getShellConfigurableDaemonOptions(program);
+  if (daemonOptions.length === 0) {
+    return [];
+  }
+
+  const parsedProgramOptions = program.opts<Record<string, unknown>>();
+  const optionValues: Record<string, unknown> = {};
+  for (const option of daemonOptions) {
+    optionValues[option.name] = resolveDaemonOptionValue(option, parsedProgramOptions);
+  }
+  const defaultOptionValues = { ...optionValues };
+
+  while (true) {
+    const action = await p.select<string>({
+      message: "Shell daemon config (daemon/server-url/secret are fixed by shell)",
+      options: [
+        { value: SHELL_DAEMON_CONFIG_START, label: "Start shell client" },
+        ...daemonOptions.map((option) => ({
+          value: option.name,
+          label: `${option.longFlag}: ${formatDaemonOptionValue(option, optionValues[option.name])}`,
+          hint: option.description,
+        })),
+        { value: SHELL_DAEMON_CONFIG_RESET, label: "Reset to defaults" },
+      ],
+    });
+
+    if (p.isCancel(action)) {
+      return null;
+    }
+
+    if (action === SHELL_DAEMON_CONFIG_START) {
+      return buildShellDaemonOverrideArgs(daemonOptions, optionValues);
+    }
+
+    if (action === SHELL_DAEMON_CONFIG_RESET) {
+      for (const option of daemonOptions) {
+        optionValues[option.name] = resolveDaemonOptionValue(option, defaultOptionValues);
+      }
+      continue;
+    }
+
+    const selectedOption = daemonOptions.find((option) => option.name === action);
+    if (!selectedOption) {
+      continue;
+    }
+
+    if (!selectedOption.takesValue) {
+      const selectedBooleanValue = await p.select<boolean>({
+        message: `${selectedOption.longFlag}: ${selectedOption.description}`,
+        options: [
+          { value: true, label: "Enabled" },
+          { value: false, label: "Disabled" },
+        ],
+        initialValue: Boolean(optionValues[selectedOption.name]),
+      });
+
+      if (p.isCancel(selectedBooleanValue)) {
+        return null;
+      }
+
+      optionValues[selectedOption.name] = selectedBooleanValue;
+      continue;
+    }
+
+    if (selectedOption.name === "logLevel") {
+      const currentLogLevel = String(optionValues[selectedOption.name] ?? "INFO").toUpperCase();
+      const selectedLogLevel = await p.select<string>({
+        message: `${selectedOption.longFlag}: ${selectedOption.description}`,
+        options: [
+          { value: "DEBUG", label: "DEBUG" },
+          { value: "INFO", label: "INFO" },
+          { value: "WARN", label: "WARN" },
+          { value: "ERROR", label: "ERROR" },
+        ],
+        initialValue: currentLogLevel,
+      });
+
+      if (p.isCancel(selectedLogLevel)) {
+        return null;
+      }
+
+      optionValues[selectedOption.name] = selectedLogLevel;
+      continue;
+    }
+
+    const textValue = await p.text({
+      message: `${selectedOption.longFlag}: ${selectedOption.description}`,
+      initialValue:
+        typeof optionValues[selectedOption.name] === "string"
+          ? String(optionValues[selectedOption.name])
+          : "",
+      placeholder: "leave empty to keep default behavior",
+    });
+
+    if (p.isCancel(textValue)) {
+      return null;
+    }
+
+    const normalizedValue = textValue.trim();
+    optionValues[selectedOption.name] = normalizedValue.length > 0 ? normalizedValue : undefined;
+  }
+}
+
+function startDaemonProcess(apiUrl: string, daemonOptionArgs: string[] = []): DaemonHandle {
   const cliEntryPoint = resolve(__dirname, "..", "cli.js");
   const child = spawn(
     process.execPath,
-    [cliEntryPoint, "--daemon", "--server-url", apiUrl],
+    [cliEntryPoint, "--daemon", "--server-url", apiUrl, ...daemonOptionArgs],
     {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env },
@@ -1400,17 +1603,23 @@ function printDaemonLogs(logOutput: string): void {
   console.log();
 }
 
-export async function runShellCommand(): Promise<void> {
+export async function runShellCommand(program?: Command): Promise<void> {
   const cfg = configSchema.parse({});
   const controlPlane = new ProtoShellControlPlane();
   let daemon: DaemonHandle | null = null;
 
   try {
+    const daemonOverrideArgs = await promptShellDaemonOverrideArgs(program);
+    if (daemonOverrideArgs === null) {
+      p.cancel("Shell startup cancelled.");
+      return;
+    }
+
     await maybeRunStartupForShell(cfg);
 
     const port = await controlPlane.start();
     const daemonApiUrl = `${CONTROL_PLANE_BIND_HOST}:${port}${CONTROL_PLANE_PATH_PREFIX}`;
-    daemon = startDaemonProcess(daemonApiUrl);
+    daemon = startDaemonProcess(daemonApiUrl, daemonOverrideArgs);
 
     await Promise.race([
       controlPlane.waitForRunnerConnection(),
@@ -1445,6 +1654,6 @@ export function registerShellCommand(program: Command): void {
     .command("shell")
     .description("Start an interactive protobuf shell against a local companyhelm daemon process.")
     .action(async () => {
-      await runShellCommand();
+      await runShellCommand(program);
     });
 }
