@@ -228,3 +228,54 @@ test("AppServerService includes thread context in app-server debug logs", async 
 
   await service.stop();
 });
+
+test("AppServerService logs outgoing thread/start payload including developerInstructions", async () => {
+  const transport = new FakeTransport();
+  const debugLogs: string[] = [];
+  const service = new AppServerService(transport as any, "test-client", {
+    debug(message: string): void {
+      debugLogs.push(message);
+    },
+  });
+
+  await service.start();
+
+  const startPromise = service.startThread({
+    model: "gpt-5.3-codex",
+    modelProvider: null,
+    cwd: "/workspace",
+    approvalPolicy: "never",
+    sandbox: "danger-full-access",
+    config: null,
+    baseInstructions: null,
+    developerInstructions: "Use strict JSON outputs.",
+    personality: null,
+    ephemeral: null,
+    experimentalRawEvents: false,
+    persistExtendedHistory: true,
+  });
+  const requestId = await waitForRequestId(transport, "thread/start");
+  transport.emitJson({
+    id: requestId,
+    result: {
+      thread: {
+        id: "sdk-thread-1",
+        path: "/workspace/rollouts/thread.json",
+      },
+    },
+  });
+
+  await startPromise;
+
+  assert.equal(
+    debugLogs.some(
+      (line) =>
+        line.includes("[app-server][outgoing]") &&
+        line.includes("\"method\":\"thread/start\"") &&
+        line.includes("\"developerInstructions\":\"Use strict JSON outputs.\""),
+    ),
+    true,
+  );
+
+  await service.stop();
+});

@@ -400,6 +400,19 @@ function normalizeReasoningEffort(value: string | undefined): ReasoningEffort | 
   return normalized;
 }
 
+function normalizeAdditionalModelInstructions(value: string | null | undefined): string | null {
+  if (typeof value !== "string") {
+    return null;
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function buildThreadDeveloperInstructions(additionalModelInstructions: string | null | undefined): string | null {
+  return normalizeAdditionalModelInstructions(additionalModelInstructions);
+}
+
 function buildUserTextInput(text: string): UserInput[] {
   return [
     {
@@ -730,8 +743,11 @@ async function handleCreateThreadRequest(
   const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, request.agentId, threadId);
   const containerNames = buildThreadContainerNames(threadId);
   const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
+  const normalizedAdditionalModelInstructions = normalizeAdditionalModelInstructions(
+    request.additionalModelInstructions,
+  );
   logger.debug(
-    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}').`,
+    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}').`,
   );
 
   let authMode: ThreadAuthMode;
@@ -752,6 +768,7 @@ async function handleCreateThreadRequest(
       sdkThreadId: null,
       model: request.model,
       reasoningLevel: request.reasoningLevel ?? "",
+      additionalModelInstructions: normalizedAdditionalModelInstructions,
       status: "pending",
       currentSdkTurnId: null,
       isCurrentTurnRunning: false,
@@ -1208,6 +1225,7 @@ async function executeCreateUserMessageRequest(
       sdkThreadId = appServerSession.sdkThreadId;
       await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
     } else {
+      const developerInstructions = buildThreadDeveloperInstructions(threadState.additionalModelInstructions);
       const threadStartParams: ThreadStartParams = {
         model: request.model ?? threadState.model,
         modelProvider: null,
@@ -1216,13 +1234,16 @@ async function executeCreateUserMessageRequest(
         sandbox: YOLO_SANDBOX_MODE,
         config: null,
         baseInstructions: null,
-        developerInstructions: null,
+        developerInstructions,
         personality: null,
         ephemeral: null,
         experimentalRawEvents: false,
         persistExtendedHistory: true,
       };
 
+      logger.debug(
+        `Starting app-server thread '${request.threadId}' with developer instructions: ${JSON.stringify(developerInstructions)}.`,
+      );
       const threadStartResult = await appServer.startThread(threadStartParams);
       sdkThreadId = threadStartResult.thread.id;
       appServerSession.sdkThreadId = sdkThreadId;

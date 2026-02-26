@@ -1,0 +1,1 @@
+ALTER TABLE `threads` ADD `additional_model_instructions` text;

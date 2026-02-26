@@ -8,6 +8,7 @@ export interface ThreadMessageExecutionState {
   sdkThreadId: string | null;
   model: string;
   reasoningLevel: string;
+  additionalModelInstructions: string | null;
   currentSdkTurnId: string | null;
   isCurrentTurnRunning: boolean;
   runtimeContainer: string;
@@ -37,6 +38,7 @@ export async function loadThreadMessageExecutionState(
         sdkThreadId: threads.sdkThreadId,
         model: threads.model,
         reasoningLevel: threads.reasoningLevel,
+        additionalModelInstructions: threads.additionalModelInstructions,
         currentSdkTurnId: threads.currentSdkTurnId,
         isCurrentTurnRunning: threads.isCurrentTurnRunning,
         runtimeContainer: threads.runtimeContainer,

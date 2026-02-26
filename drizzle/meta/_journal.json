@@ -50,6 +50,13 @@
       "when": 1772060984769,
       "tag": "0006_fixed_jack_flag",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1772064130696,
+      "tag": "0007_mute_lord_tyger",
+      "breakpoints": true
     }
   ]
 }
