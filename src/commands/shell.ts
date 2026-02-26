@@ -19,6 +19,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
+import { startup } from "./startup.js";
 import { runThreadDockerCommand } from "./thread/docker.js";
 import { createAgentRunnerControlServiceDefinition } from "../service/companyhelm_api_client.js";
 import { initDb } from "../state/db.js";
@@ -802,6 +803,30 @@ async function loadShellStateFromDb(cfg: Config): Promise<ShellState> {
   }
 }
 
+async function hasConfiguredSdks(cfg: Config): Promise<boolean> {
+  const { db, client } = await initDb(cfg.state_db_path);
+  try {
+    const sdkRows = await db.select().from(agentSdks).all();
+    return sdkRows.length > 0;
+  } finally {
+    client.close();
+  }
+}
+
+async function maybeRunStartupForShell(cfg: Config): Promise<void> {
+  const configuredSdks = await hasConfiguredSdks(cfg);
+  if (configuredSdks) {
+    return;
+  }
+
+  // Startup is interactive; skip auto-bootstrapping when no TTY is available.
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return;
+  }
+
+  await startup();
+}
+
 async function handleDbAction(cfg: Config, action: DbAction): Promise<void> {
   switch (action) {
     case "list-sdk":
@@ -1381,6 +1406,8 @@ export async function runShellCommand(): Promise<void> {
   let daemon: DaemonHandle | null = null;
 
   try {
+    await maybeRunStartupForShell(cfg);
+
     const port = await controlPlane.start();
     const daemonApiUrl = `${CONTROL_PLANE_BIND_HOST}:${port}${CONTROL_PLANE_PATH_PREFIX}`;
     daemon = startDaemonProcess(daemonApiUrl);
