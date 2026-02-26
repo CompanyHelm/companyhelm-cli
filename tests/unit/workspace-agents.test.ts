@@ -18,6 +18,12 @@ test("renderRuntimeAgentsMd includes workspace and CLI tools sections", () => {
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
   assert.equal(rendered.includes("no additional CompanyHelm helper CLI tools"), true);
+  assert.equal(rendered.includes("Playwright CLI is available"), true);
+  assert.equal(
+    rendered.includes("playwright screenshot --browser=chromium https://example.com /tmp/playwright-chromium-smoke.png"),
+    true,
+  );
+  assert.equal(rendered.includes("playwright install chromium"), true);
   assert.equal(rendered.includes("/home/agent/.codex/auth.json"), true);
   assert.equal(rendered.includes("{{"), false);
 });
