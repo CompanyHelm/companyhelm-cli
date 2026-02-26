@@ -18,8 +18,18 @@ function banner() {
 
 async function refreshCodexModelsInStartup(): Promise<void> {
   const spinner = p.spinner();
-  spinner.start("Refreshing Codex model catalog via app-server");
-  const results = await refreshSdkModels({ sdk: "codex" });
+  const seenStatusMessages = new Set<string>();
+  spinner.start("Preparing Codex runtime image and refreshing model catalog via app-server");
+  const results = await refreshSdkModels({
+    sdk: "codex",
+    imageStatusReporter: (message) => {
+      if (seenStatusMessages.has(message)) {
+        return;
+      }
+      seenStatusMessages.add(message);
+      p.log.info(message);
+    },
+  });
   const count = results[0]?.modelCount ?? 0;
   spinner.stop(`Codex model catalog refreshed (${count} models).`);
 }

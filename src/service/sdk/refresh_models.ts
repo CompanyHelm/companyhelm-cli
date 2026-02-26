@@ -10,6 +10,7 @@ import { AppServerContainerService } from "../docker/app_server_container.js";
 export interface RefreshModelsOptions {
   sdk?: string;
   logger?: Pick<Logger, "debug">;
+  imageStatusReporter?: (message: string) => void;
 }
 
 export interface RefreshModelsResult {
@@ -17,8 +18,12 @@ export interface RefreshModelsResult {
   modelCount: number;
 }
 
-async function fetchCodexModelsFromAppServer(clientName: string, logger?: Pick<Logger, "debug">): Promise<AppServerModel[]> {
-  const transport = new AppServerContainerService();
+async function fetchCodexModelsFromAppServer(
+  clientName: string,
+  logger?: Pick<Logger, "debug">,
+  imageStatusReporter?: (message: string) => void,
+): Promise<AppServerModel[]> {
+  const transport = new AppServerContainerService({ imageStatusReporter });
   const appServer = new AppServerService(transport, clientName, logger);
   await appServer.start();
 
@@ -42,8 +47,12 @@ async function fetchCodexModelsFromAppServer(clientName: string, logger?: Pick<L
   return models;
 }
 
-async function refreshCodexModels(cfg: Config, logger?: Pick<Logger, "debug">): Promise<number> {
-  const models = await fetchCodexModelsFromAppServer(cfg.codex.app_server_client_name, logger);
+async function refreshCodexModels(
+  cfg: Config,
+  logger?: Pick<Logger, "debug">,
+  imageStatusReporter?: (message: string) => void,
+): Promise<number> {
+  const models = await fetchCodexModelsFromAppServer(cfg.codex.app_server_client_name, logger, imageStatusReporter);
   const { db, client } = await initDb(cfg.state_db_path);
 
   try {
@@ -98,7 +107,7 @@ export async function refreshSdkModels(options?: RefreshModelsOptions): Promise<
       throw new Error(`SDK '${sdk.name}' is not supported by model refresh yet.`);
     }
 
-    const modelCount = await refreshCodexModels(cfg, options?.logger);
+    const modelCount = await refreshCodexModels(cfg, options?.logger, options?.imageStatusReporter);
     results.push({ sdk: sdk.name, modelCount });
   }
 
