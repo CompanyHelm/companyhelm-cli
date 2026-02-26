@@ -144,11 +144,31 @@ test("buildDindContainerOptions and buildRuntimeContainerOptions share mounts an
   assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=tcp://localhost:2375"));
   assert.deepEqual(runtimeOptions.Cmd, ["sleep", "infinity"]);
   assert.equal(runtimeOptions.HostConfig.NetworkMode, `container:${names.dind}`);
+  assert.equal(runtimeOptions.HostConfig.Dns, undefined);
 
   assert.deepEqual(dindOptions.HostConfig.Mounts, mounts);
   assert.deepEqual(runtimeOptions.HostConfig.Mounts, mounts);
   assert.equal(path.posix.normalize(dindOptions.WorkingDir), "/workspace");
   assert.equal(path.posix.normalize(runtimeOptions.WorkingDir), "/workspace");
+});
+
+test("buildDindContainerOptions applies configured DNS servers", () => {
+  const names = buildThreadContainerNames("thread-dns");
+  const dindOptions = buildDindContainerOptions({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names,
+    mounts: [],
+    dnsServers: ["1.1.1.1", "8.8.8.8"],
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.deepEqual(dindOptions.HostConfig.Dns, ["1.1.1.1", "8.8.8.8"]);
 });
 
 test("buildRuntimeContainerOptions mounts host docker socket when host runtime mode is enabled", () => {
@@ -165,6 +185,7 @@ test("buildRuntimeContainerOptions mounts host docker socket when host runtime m
     names,
     mounts: [baseMount],
     useHostDockerRuntime: true,
+    dnsServers: ["1.1.1.1", "8.8.8.8"],
     user: {
       uid: 501,
       gid: 20,
@@ -175,6 +196,7 @@ test("buildRuntimeContainerOptions mounts host docker socket when host runtime m
 
   assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=unix:///var/run/docker.sock"));
   assert.equal(runtimeOptions.HostConfig.NetworkMode, undefined);
+  assert.deepEqual(runtimeOptions.HostConfig.Dns, ["1.1.1.1", "8.8.8.8"]);
   assert.deepEqual(runtimeOptions.HostConfig.Mounts, [
     baseMount,
     {

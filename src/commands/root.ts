@@ -73,6 +73,7 @@ interface RootCommandOptions {
   secret?: string;
   useHostDockerRuntime?: boolean;
   hostDockerPath?: string;
+  dns?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
@@ -819,6 +820,7 @@ async function handleCreateThreadRequest(
       mounts,
       useHostDockerRuntime: cfg.use_host_docker_runtime,
       hostDockerPath: cfg.host_docker_path,
+      dnsServers: cfg.runtime_dns_servers,
       imageStatusReporter: (message: string) => {
         logger.info(`[thread ${threadId}] ${message}`);
       },
@@ -1513,6 +1515,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     companyhelm_api_url: options.serverUrl,
     use_host_docker_runtime: options.useHostDockerRuntime,
     host_docker_path: options.hostDockerPath,
+    runtime_dns_servers: options.dns,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -1592,6 +1595,10 @@ export function registerRootCommand(program: Command): void {
     .option(
       "--host-docker-path <path>",
       "Host Docker endpoint when --use-host-docker-runtime is enabled (unix:///<socket-path> or tcp://localhost:<port>).",
+    )
+    .option(
+      "--dns <servers>",
+      "Comma-separated DNS servers applied to runtime-related Docker containers (for example: 1.1.1.1,8.8.8.8).",
     )
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")
