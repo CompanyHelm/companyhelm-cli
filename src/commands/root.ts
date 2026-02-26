@@ -235,6 +235,61 @@ export function isNoActiveTurnSteerError(error: unknown): boolean {
   return /no active turn to steer/i.test(toErrorMessage(error));
 }
 
+interface ResolvedThreadNameUpdate {
+  sdkThreadId: string;
+  threadName?: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+export function extractThreadNameUpdateFromNotification(
+  notification: ServerNotification,
+): ResolvedThreadNameUpdate | null {
+  if (notification.method === "thread/name/updated") {
+    return {
+      sdkThreadId: notification.params.threadId,
+      threadName: normalizeNonEmptyString(notification.params.threadName),
+    };
+  }
+
+  const rawNotification = notification as unknown as { method?: unknown; params?: unknown };
+  if (rawNotification.method !== "codex/event/thread_name_updated") {
+    return null;
+  }
+
+  if (!isRecord(rawNotification.params)) {
+    return null;
+  }
+
+  const params = rawNotification.params;
+  const msg = isRecord(params.msg) ? params.msg : undefined;
+  const sdkThreadId =
+    normalizeNonEmptyString(msg?.thread_id) ??
+    normalizeNonEmptyString(msg?.threadId) ??
+    normalizeNonEmptyString(params.threadId) ??
+    normalizeNonEmptyString(params.conversationId);
+  if (!sdkThreadId) {
+    return null;
+  }
+
+  const threadName =
+    normalizeNonEmptyString(msg?.thread_name) ??
+    normalizeNonEmptyString(msg?.threadName) ??
+    normalizeNonEmptyString(params.threadName);
+
+  return { sdkThreadId, threadName };
+}
+
 interface UnknownWireField {
   no?: number;
   wireType?: number;
@@ -1131,8 +1186,9 @@ async function waitForThreadTurnCompletion(
     sdkThreadId,
     sdkTurnId,
     async (notification: ServerNotification) => {
-      if (notification.method === "thread/name/updated" && notification.params.threadId === sdkThreadId) {
-        await sendThreadNameUpdate(commandChannel, threadId, notification.params.threadName);
+      const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
+      if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
+        await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
       }
 
       if (
@@ -1334,6 +1390,7 @@ async function executeCreateUserMessageRequest(
       sdkTurnId,
       requestId,
     );
+
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: false,
