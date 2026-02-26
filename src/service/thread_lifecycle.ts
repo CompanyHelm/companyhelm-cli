@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { expandHome } from "../utils/path.js";
+import { renderRuntimeBashrc } from "./runtime_bashrc.js";
 import { buildNvmCodexBootstrapScript } from "./runtime_shell.js";
 
 export type ThreadAuthMode = "host" | "dedicated";
@@ -173,6 +174,22 @@ function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string 
 
 function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string {
   return buildNvmCodexBootstrapScript(user.agentHomeDirectory);
+}
+
+function buildRuntimeBashrcProvisionScript(user: ThreadContainerUser): string {
+  const bashrcContent = renderRuntimeBashrc(user.agentHomeDirectory);
+  return [
+    "set -euo pipefail",
+    `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
+    `AGENT_UID=${shellQuote(String(user.uid))}`,
+    `AGENT_GID=${shellQuote(String(user.gid))}`,
+    `BASHRC_CONTENT=${shellQuote(bashrcContent)}`,
+    "",
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME"',
+    'printf \'%s\' "$BASHRC_CONTENT" > "$AGENT_HOME/.bashrc"',
+    'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME/.bashrc"',
+    'chmod 0644 "$AGENT_HOME/.bashrc"',
+  ].join("\n");
 }
 
 function buildRuntimeGitConfigScript(gitUserName: string, gitUserEmail: string): string {
@@ -491,6 +508,14 @@ export class ThreadContainerService {
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to validate nvm/codex in runtime container '${name}'`,
+    );
+  }
+
+  async ensureRuntimeContainerBashrc(name: string, user: ThreadContainerUser): Promise<void> {
+    const script = buildRuntimeBashrcProvisionScript(user);
+    this.runDockerExecScript(
+      ["exec", "-u", "0", name, "bash", "-lc", script],
+      `Failed to provision runtime .bashrc in container '${name}'`,
     );
   }
 
