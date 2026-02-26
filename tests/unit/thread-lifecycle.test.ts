@@ -185,7 +185,7 @@ test("buildRuntimeContainerOptions mounts host docker socket when host runtime m
   ]);
 });
 
-test("buildRuntimeContainerOptions honors custom host docker socket path in host runtime mode", () => {
+test("buildRuntimeContainerOptions honors custom unix host docker path in host runtime mode", () => {
   const names = buildThreadContainerNames("thread-host-custom-socket");
   const baseMount = {
     Type: "bind" as const,
@@ -199,7 +199,7 @@ test("buildRuntimeContainerOptions honors custom host docker socket path in host
     names,
     mounts: [baseMount],
     useHostDockerRuntime: true,
-    hostDockerSocketPath: "/tmp/companyhelm-docker.sock",
+    hostDockerPath: "unix:///tmp/companyhelm-docker.sock",
     user: {
       uid: 501,
       gid: 20,
@@ -217,6 +217,35 @@ test("buildRuntimeContainerOptions honors custom host docker socket path in host
       Target: "/tmp/companyhelm-docker.sock",
     },
   ]);
+});
+
+test("buildRuntimeContainerOptions rewrites localhost tcp host docker path to host.docker.internal", () => {
+  const names = buildThreadContainerNames("thread-host-custom-tcp");
+  const baseMount = {
+    Type: "bind" as const,
+    Source: "/tmp/threads/thread-host-custom-tcp",
+    Target: "/workspace",
+  };
+
+  const runtimeOptions = buildRuntimeContainerOptions({
+    dindImage: "docker:29-dind-rootless",
+    runtimeImage: "companyhelm/runner:latest",
+    names,
+    mounts: [baseMount],
+    useHostDockerRuntime: true,
+    hostDockerPath: "tcp://localhost:2375",
+    user: {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+  });
+
+  assert.ok(runtimeOptions.Env.includes("DOCKER_HOST=tcp://host.docker.internal:2375"));
+  assert.equal(runtimeOptions.HostConfig.NetworkMode, undefined);
+  assert.deepEqual(runtimeOptions.HostConfig.Mounts, [baseMount]);
+  assert.deepEqual(runtimeOptions.HostConfig.ExtraHosts, ["host.docker.internal:host-gateway"]);
 });
 
 test("ThreadContainerService pulls missing images before creating containers", async () => {
@@ -350,7 +379,7 @@ test("ThreadContainerService host docker runtime mode skips dind image/container
     names: buildThreadContainerNames("thread-host-runtime"),
     mounts: [],
     useHostDockerRuntime: true,
-    hostDockerSocketPath: "/tmp",
+    hostDockerPath: "unix:///tmp",
     user: {
       uid: 501,
       gid: 20,
@@ -395,7 +424,7 @@ test("ThreadContainerService host runtime mode fails when socket path is missing
         names: buildThreadContainerNames("thread-host-runtime-missing-socket"),
         mounts: [],
         useHostDockerRuntime: true,
-        hostDockerSocketPath: "/__companyhelm_missing_socket__.sock",
+        hostDockerPath: "unix:///__companyhelm_missing_socket__.sock",
         user: {
           uid: 501,
           gid: 20,
@@ -404,6 +433,50 @@ test("ThreadContainerService host runtime mode fails when socket path is missing
         },
       }),
     /Host Docker socket path '\/__companyhelm_missing_socket__\.sock' does not exist\./,
+  );
+});
+
+test("ThreadContainerService host runtime mode fails when host docker path format is invalid", async () => {
+  const fakeDocker = {
+    getImage() {
+      return {
+        async inspect() {
+          return {};
+        },
+      };
+    },
+    pull(_image: string, callback: (error: Error | null, stream?: NodeJS.ReadableStream) => void) {
+      callback(null, {} as NodeJS.ReadableStream);
+    },
+    modem: {
+      followProgress(_stream: NodeJS.ReadableStream, callback: (error: Error | null) => void) {
+        callback(null);
+      },
+    },
+    async createContainer() {
+      return {};
+    },
+  };
+
+  const service = new ThreadContainerService(fakeDocker as any);
+
+  await assert.rejects(
+    () =>
+      service.createThreadContainers({
+        dindImage: "docker:29-dind-rootless",
+        runtimeImage: "companyhelm/runner:latest",
+        names: buildThreadContainerNames("thread-host-runtime-invalid-path"),
+        mounts: [],
+        useHostDockerRuntime: true,
+        hostDockerPath: "/var/run/docker.sock",
+        user: {
+          uid: 501,
+          gid: 20,
+          agentUser: "agent",
+          agentHomeDirectory: "/home/agent",
+        },
+      }),
+    /Invalid host Docker path '\/var\/run\/docker\.sock'\. Expected 'unix:\/\/\/<socket-path>' or 'tcp:\/\/localhost:<port>'\./,
   );
 });
 

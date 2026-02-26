@@ -13,7 +13,7 @@ test("shell exposes daemon CLI overrides except hardcoded daemon/serverUrl/secre
   const options = getShellConfigurableDaemonOptions(program);
   const optionNames = options.map((option) => option.name);
 
-  assert.deepEqual(optionNames, ["useHostDockerRuntime", "hostDockerSocketPath", "logLevel"]);
+  assert.deepEqual(optionNames, ["useHostDockerRuntime", "hostDockerPath", "logLevel"]);
 });
 
 test("shell builds daemon override args from selected option values", () => {
@@ -23,14 +23,14 @@ test("shell builds daemon override args from selected option values", () => {
 
   const args = buildShellDaemonOverrideArgs(options, {
     useHostDockerRuntime: true,
-    hostDockerSocketPath: "/tmp/custom-docker.sock",
+    hostDockerPath: "unix:///tmp/custom-docker.sock",
     logLevel: "DEBUG",
   });
 
   assert.deepEqual(args, [
     "--use-host-docker-runtime",
-    "--host-docker-socket-path",
-    "/tmp/custom-docker.sock",
+    "--host-docker-path",
+    "unix:///tmp/custom-docker.sock",
     "--log-level",
     "DEBUG",
   ]);

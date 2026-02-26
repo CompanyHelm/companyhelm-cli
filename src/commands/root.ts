@@ -72,7 +72,7 @@ interface RootCommandOptions {
   logLevel?: string;
   secret?: string;
   useHostDockerRuntime?: boolean;
-  hostDockerSocketPath?: string;
+  hostDockerPath?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
@@ -818,7 +818,7 @@ async function handleCreateThreadRequest(
       },
       mounts,
       useHostDockerRuntime: cfg.use_host_docker_runtime,
-      hostDockerSocketPath: cfg.host_docker_socket_path,
+      hostDockerPath: cfg.host_docker_path,
       imageStatusReporter: (message: string) => {
         logger.info(`[thread ${threadId}] ${message}`);
       },
@@ -1512,7 +1512,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.serverUrl,
     use_host_docker_runtime: options.useHostDockerRuntime,
-    host_docker_socket_path: options.hostDockerSocketPath,
+    host_docker_path: options.hostDockerPath,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -1590,8 +1590,8 @@ export function registerRootCommand(program: Command): void {
       "Mount host Docker socket into runtime containers instead of creating DinD sidecars.",
     )
     .option(
-      "--host-docker-socket-path <path>",
-      "Host Docker socket path to mount when --use-host-docker-runtime is enabled.",
+      "--host-docker-path <path>",
+      "Host Docker endpoint when --use-host-docker-runtime is enabled (unix:///<socket-path> or tcp://localhost:<port>).",
     )
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")

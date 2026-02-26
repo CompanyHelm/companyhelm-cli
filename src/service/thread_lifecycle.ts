@@ -40,13 +40,65 @@ export interface ThreadContainerCreateOptions {
   user: ThreadContainerUser;
   mounts: MountSettings[];
   useHostDockerRuntime?: boolean;
-  hostDockerSocketPath?: string;
+  hostDockerPath?: string;
   imageStatusReporter?: (message: string) => void;
 }
 
 const CONTAINER_START_TIMEOUT_MS = 30_000;
 const CONTAINER_START_POLL_MS = 500;
-const DEFAULT_HOST_DOCKER_SOCKET_PATH = "/var/run/docker.sock";
+const DEFAULT_HOST_DOCKER_PATH = "unix:///var/run/docker.sock";
+const HOST_DOCKER_INTERNAL_GATEWAY = "host.docker.internal:host-gateway";
+
+interface UnixHostDockerPath {
+  mode: "unix";
+  socketPath: string;
+  dockerHost: string;
+}
+
+interface TcpHostDockerPath {
+  mode: "tcp";
+  dockerHost: string;
+}
+
+type HostDockerPath = UnixHostDockerPath | TcpHostDockerPath;
+
+function buildInvalidHostDockerPathError(value: string): Error {
+  return new Error(
+    `Invalid host Docker path '${value}'. Expected 'unix:///<socket-path>' or 'tcp://localhost:<port>'.`,
+  );
+}
+
+export function parseHostDockerPath(hostDockerPath: string | undefined): HostDockerPath {
+  const value = (hostDockerPath ?? DEFAULT_HOST_DOCKER_PATH).trim();
+
+  if (value.startsWith("unix:///")) {
+    const socketPath = value.slice("unix://".length);
+    if (socketPath.length <= 1 || !socketPath.startsWith("/")) {
+      throw buildInvalidHostDockerPathError(value);
+    }
+
+    return {
+      mode: "unix",
+      socketPath,
+      dockerHost: `unix://${socketPath}`,
+    };
+  }
+
+  const tcpLocalhostMatch = /^tcp:\/\/localhost:(\d+)$/.exec(value);
+  if (tcpLocalhostMatch) {
+    const port = Number(tcpLocalhostMatch[1]);
+    if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+      throw buildInvalidHostDockerPathError(value);
+    }
+
+    return {
+      mode: "tcp",
+      dockerHost: `tcp://host.docker.internal:${port}`,
+    };
+  }
+
+  throw buildInvalidHostDockerPathError(value);
+}
 
 function resolveContainerPath(path: string, containerHome: string): string {
   if (path === "~") {
@@ -242,23 +294,22 @@ export function buildDindContainerOptions(options: ThreadContainerCreateOptions)
 }
 
 export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
-  const hostDockerSocketPath = options.hostDockerSocketPath || DEFAULT_HOST_DOCKER_SOCKET_PATH;
-  const runtimeMounts = options.useHostDockerRuntime
-    ? [
-        ...options.mounts,
-        {
-          Type: "bind",
-          Source: hostDockerSocketPath,
-          Target: hostDockerSocketPath,
-        } as MountSettings,
-      ]
-    : options.mounts;
+  const hostDocker = options.useHostDockerRuntime ? parseHostDockerPath(options.hostDockerPath) : null;
+  const runtimeMounts =
+    hostDocker?.mode === "unix"
+      ? [
+          ...options.mounts,
+          {
+            Type: "bind",
+            Source: hostDocker.socketPath,
+            Target: hostDocker.socketPath,
+          } as MountSettings,
+        ]
+      : options.mounts;
 
   const runtimeEnv = [
     ...buildCommonContainerEnv(options.user),
-    options.useHostDockerRuntime
-      ? `DOCKER_HOST=unix://${hostDockerSocketPath}`
-      : "DOCKER_HOST=tcp://localhost:2375",
+    hostDocker ? `DOCKER_HOST=${hostDocker.dockerHost}` : "DOCKER_HOST=tcp://localhost:2375",
   ];
 
   return {
@@ -271,6 +322,7 @@ export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptio
     HostConfig: {
       NetworkMode: options.useHostDockerRuntime ? undefined : `container:${options.names.dind}`,
       Mounts: runtimeMounts,
+      ...(hostDocker?.mode === "tcp" ? { ExtraHosts: [HOST_DOCKER_INTERNAL_GATEWAY] } : {}),
     },
   };
 }
@@ -485,9 +537,9 @@ export class ThreadContainerService {
 
   async createThreadContainers(options: ThreadContainerCreateOptions): Promise<void> {
     if (options.useHostDockerRuntime) {
-      const hostDockerSocketPath = options.hostDockerSocketPath || DEFAULT_HOST_DOCKER_SOCKET_PATH;
-      if (!existsSync(hostDockerSocketPath)) {
-        throw new Error(`Host Docker socket path '${hostDockerSocketPath}' does not exist.`);
+      const hostDocker = parseHostDockerPath(options.hostDockerPath);
+      if (hostDocker.mode === "unix" && !existsSync(hostDocker.socketPath)) {
+        throw new Error(`Host Docker socket path '${hostDocker.socketPath}' does not exist.`);
       }
       await this.ensureImageAvailable(options.runtimeImage, options.imageStatusReporter);
       try {
