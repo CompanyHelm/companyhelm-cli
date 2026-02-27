@@ -675,16 +675,97 @@ function buildUserTextInput(text: string): UserInput[] {
   ];
 }
 
+const ITEM_TYPE_PLAN = 6 as ItemType;
+const ITEM_TYPE_FILE_CHANGE = 7 as ItemType;
+const ITEM_TYPE_MCP_TOOL_CALL = 8 as ItemType;
+const ITEM_TYPE_COLLAB_AGENT_TOOL_CALL = 9 as ItemType;
+const ITEM_TYPE_WEB_SEARCH = 10 as ItemType;
+const ITEM_TYPE_IMAGE_VIEW = 11 as ItemType;
+const ITEM_TYPE_ENTERED_REVIEW_MODE = 12 as ItemType;
+const ITEM_TYPE_EXITED_REVIEW_MODE = 13 as ItemType;
+const ITEM_TYPE_CONTEXT_COMPACTION = 14 as ItemType;
+
+function truncateSummary(text: string, maxLength = 240): string {
+  const normalized = text.trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function summarizeUserInput(input: UserInput): string {
+  switch (input.type) {
+    case "text":
+      return input.text.trim();
+    case "image":
+      return `[image] ${input.url}`;
+    case "localImage":
+      return `[local image] ${input.path}`;
+    case "skill":
+      return `[skill] ${input.name} (${input.path})`;
+    case "mention":
+      return `[mention] ${input.name} (${input.path})`;
+    default:
+      return "";
+  }
+}
+
+function summarizeWebSearchItem(item: Extract<ThreadItem, { type: "webSearch" }>): string {
+  if (!item.action) {
+    return `Web search: ${truncateSummary(item.query, 180)}`;
+  }
+
+  switch (item.action.type) {
+    case "search": {
+      const query = item.action.query?.trim()
+        || item.action.queries?.map((entry) => entry.trim()).filter((entry) => entry.length > 0).join(", ")
+        || item.query;
+      return `Web search: ${truncateSummary(query, 180)}`;
+    }
+    case "openPage":
+      return item.action.url ? `Opened web page: ${item.action.url}` : "Opened web page";
+    case "findInPage": {
+      const target = item.action.url ? ` in ${item.action.url}` : "";
+      const pattern = item.action.pattern?.trim();
+      if (!pattern) {
+        return `Find in page${target}`;
+      }
+      return `Find in page${target}: ${truncateSummary(pattern, 140)}`;
+    }
+    case "other":
+    default:
+      return `Web search action: ${truncateSummary(item.query, 180)}`;
+  }
+}
+
 function mapThreadItemType(item: ThreadItem): ItemType {
   switch (item.type) {
     case "userMessage":
       return ItemType.USER_MESSAGE;
     case "agentMessage":
       return ItemType.AGENT_MESSAGE;
+    case "plan":
+      return ITEM_TYPE_PLAN;
     case "reasoning":
       return ItemType.REASONING;
     case "commandExecution":
       return ItemType.COMMAND_EXECUTION;
+    case "fileChange":
+      return ITEM_TYPE_FILE_CHANGE;
+    case "mcpToolCall":
+      return ITEM_TYPE_MCP_TOOL_CALL;
+    case "collabAgentToolCall":
+      return ITEM_TYPE_COLLAB_AGENT_TOOL_CALL;
+    case "webSearch":
+      return ITEM_TYPE_WEB_SEARCH;
+    case "imageView":
+      return ITEM_TYPE_IMAGE_VIEW;
+    case "enteredReviewMode":
+      return ITEM_TYPE_ENTERED_REVIEW_MODE;
+    case "exitedReviewMode":
+      return ITEM_TYPE_EXITED_REVIEW_MODE;
+    case "contextCompaction":
+      return ITEM_TYPE_CONTEXT_COMPACTION;
     default:
       return ItemType.ITEM_TYPE_UNKNOWN;
   }
@@ -692,17 +773,71 @@ function mapThreadItemType(item: ThreadItem): ItemType {
 
 function summarizeThreadItemText(item: ThreadItem): string | undefined {
   switch (item.type) {
-    case "userMessage":
-      return item.content
-        .filter((input): input is Extract<UserInput, { type: "text" }> => input.type === "text")
-        .map((input) => input.text)
-        .join("\n");
+    case "userMessage": {
+      const summarizedInputs = item.content
+        .map((input) => summarizeUserInput(input))
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      if (summarizedInputs.length === 0) {
+        return "User message";
+      }
+      return truncateSummary(summarizedInputs.join("\n"), 800);
+    }
     case "agentMessage":
-      return item.text;
-    case "reasoning":
-      return item.summary.join("\n");
+      return item.text.trim() || "Agent message";
+    case "plan":
+      return item.text.trim() || "Plan update";
+    case "reasoning": {
+      const summary = item.summary.join("\n").trim();
+      if (summary) {
+        return truncateSummary(summary, 800);
+      }
+      const reasoningContent = item.content.join("\n").trim();
+      return reasoningContent ? truncateSummary(reasoningContent, 800) : "Reasoning update";
+    }
     case "commandExecution":
-      return item.aggregatedOutput ?? undefined;
+      return item.command.trim() || "Command execution";
+    case "fileChange": {
+      const changedPaths = item.changes
+        .map((change) => String(change.path || "").trim())
+        .filter((path) => path.length > 0);
+      if (changedPaths.length === 0) {
+        return `File change (${item.status})`;
+      }
+      const preview = changedPaths.slice(0, 3).join(", ");
+      const suffix = changedPaths.length > 3 ? ", ..." : "";
+      const noun = changedPaths.length === 1 ? "file" : "files";
+      return `File change (${item.status}): ${changedPaths.length} ${noun} (${preview}${suffix})`;
+    }
+    case "mcpToolCall": {
+      const base = `MCP ${item.server}/${item.tool} (${item.status})`;
+      if (item.error?.message) {
+        return `${base}: ${truncateSummary(item.error.message, 140)}`;
+      }
+      if (item.status === "completed") {
+        return `${base}: completed`;
+      }
+      return base;
+    }
+    case "collabAgentToolCall": {
+      const receiverCount = item.receiverThreadIds.length;
+      const receiverLabel = receiverCount === 1 ? "1 receiver" : `${receiverCount} receivers`;
+      const prompt = item.prompt?.trim();
+      if (prompt) {
+        return `Collab ${item.tool} (${item.status}, ${receiverLabel}): ${truncateSummary(prompt, 140)}`;
+      }
+      return `Collab ${item.tool} (${item.status}, ${receiverLabel})`;
+    }
+    case "webSearch":
+      return summarizeWebSearchItem(item);
+    case "imageView":
+      return item.path.trim() ? `Viewed image: ${item.path}` : "Viewed image";
+    case "enteredReviewMode":
+      return item.review.trim() ? `Entered review mode: ${truncateSummary(item.review, 180)}` : "Entered review mode";
+    case "exitedReviewMode":
+      return item.review.trim() ? `Exited review mode: ${truncateSummary(item.review, 180)}` : "Exited review mode";
+    case "contextCompaction":
+      return "Context compaction";
     default:
       return undefined;
   }
