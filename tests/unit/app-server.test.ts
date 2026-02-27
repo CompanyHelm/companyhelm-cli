@@ -84,6 +84,47 @@ class FakeTransport {
   }
 }
 
+class DelayedInitializeRetryTransport extends FakeTransport {
+  private initializeAttempts = 0;
+
+  override async sendRaw(payload: string): Promise<void> {
+    const lines = payload
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    for (const line of lines) {
+      const message = JSON.parse(line) as { id?: number; method?: string };
+      if (typeof message.id === "number" && typeof message.method === "string") {
+        this.sentRequests.push({ id: message.id, method: message.method });
+      }
+
+      if (message.method !== "initialize" || typeof message.id !== "number") {
+        continue;
+      }
+
+      this.initializeAttempts += 1;
+      if (this.initializeAttempts === 1) {
+        setTimeout(() => {
+          this.emitJson({
+            id: message.id,
+            result: {},
+          });
+        }, 3_050);
+        continue;
+      }
+
+      this.emitJson({
+        id: message.id,
+        error: {
+          code: -32600,
+          message: "Already initialized",
+        },
+      });
+    }
+  }
+}
+
 async function waitForRequestId(
   transport: FakeTransport,
   method: string,
@@ -99,6 +140,19 @@ async function waitForRequestId(
   }
   throw new Error(`Timed out waiting for request method '${method}'.`);
 }
+
+test("AppServerService treats 'Already initialized' initialize retries as success", async () => {
+  const transport = new DelayedInitializeRetryTransport();
+  const service = new AppServerService(transport as any, "test-client");
+
+  await service.start();
+  await sleep(150);
+
+  const initializeRequests = transport.sentRequests.filter((entry) => entry.method === "initialize");
+  assert.equal(initializeRequests.length >= 2, true);
+
+  await service.stop();
+});
 
 test("AppServerService preserves request responses while waiting for turn completion notifications", async () => {
   const transport = new FakeTransport();
