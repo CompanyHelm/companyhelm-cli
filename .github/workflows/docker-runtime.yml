@@ -7,12 +7,16 @@ on:
       - main
     paths:
       - "dockerfiles/Dockerfile-runtime"
+      - "scripts/runtime/**"
+      - "RUNTIME_IMAGE_VERSION"
       - ".github/workflows/docker-runtime.yml"
   push:
     branches:
       - main
     paths:
       - "dockerfiles/Dockerfile-runtime"
+      - "scripts/runtime/**"
+      - "RUNTIME_IMAGE_VERSION"
       - ".github/workflows/docker-runtime.yml"
     tags:
       - "*"
@@ -40,12 +44,24 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Read runtime image version
+        id: runtime-version
+        run: |
+          set -euo pipefail
+          runtime_version="$(tr -d '[:space:]' < RUNTIME_IMAGE_VERSION)"
+          if [[ -z "${runtime_version}" ]]; then
+            echo "RUNTIME_IMAGE_VERSION is empty." >&2
+            exit 1
+          fi
+          echo "value=${runtime_version}" >> "$GITHUB_OUTPUT"
+
       - name: Generate image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: companyhelm/runner
           tags: |
+            type=raw,value=${{ steps.runtime-version.outputs.value }}
             type=ref,event=tag
             type=raw,value=latest,enable={{is_default_branch}}
 

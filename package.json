@@ -9,6 +9,11 @@
   "bin": {
     "companyhelm-runner": "dist/cli.js"
   },
+  "files": [
+    "dist",
+    "drizzle",
+    "RUNTIME_IMAGE_VERSION"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "start": "npm run build && node dist/cli.js",
@@ -17,7 +22,7 @@
     "test:integration": "npm run build && vitest run tests/integration",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "generate:codex-app-server": "docker run --rm --user \"$(id -u):$(id -g)\" -e CODEX_HOME=/workspace/node_modules/.cache/codex -v \"$PWD:/workspace\" -w /workspace companyhelm/runner:latest bash -lc 'mkdir -p /workspace/node_modules/.cache/codex; source \"$NVM_DIR/nvm.sh\"; codex app-server generate-ts --out src/generated/codex-app-server'"
+    "generate:codex-app-server": "docker run --rm --user \"$(id -u):$(id -g)\" -e CODEX_HOME=/workspace/node_modules/.cache/codex -v \"$PWD:/workspace\" -w /workspace companyhelm/runner:$(tr -d '[:space:]' < RUNTIME_IMAGE_VERSION) bash -lc 'mkdir -p /workspace/node_modules/.cache/codex; source \"$NVM_DIR/nvm.sh\"; codex app-server generate-ts --out src/generated/codex-app-server'"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",

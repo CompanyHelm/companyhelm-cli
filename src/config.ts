@@ -1,6 +1,25 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 
 const DEFAULT_RUNTIME_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"] as const;
+const DEFAULT_RUNTIME_IMAGE_REPOSITORY = "companyhelm/runner";
+const FALLBACK_RUNTIME_IMAGE_VERSION = "latest";
+
+function loadRuntimeImageVersion(): string {
+    try {
+        const version = readFileSync(join(__dirname, "..", "RUNTIME_IMAGE_VERSION"), "utf8").trim();
+        if (version.length > 0) {
+            return version;
+        }
+    } catch {
+        // Fall back when running from source without packaged assets.
+    }
+
+    return FALLBACK_RUNTIME_IMAGE_VERSION;
+}
+
+const DEFAULT_RUNTIME_IMAGE = `${DEFAULT_RUNTIME_IMAGE_REPOSITORY}:${loadRuntimeImageVersion()}`;
 
 function parseRuntimeDnsServers(value: unknown): unknown {
     if (typeof value !== "string") {
@@ -49,7 +68,7 @@ export const config = z.object({
         .default(10_000),
     runtime_image: z.string()
         .describe("The name of the runtime image.")
-        .default("companyhelm/runner:latest"),
+        .default(DEFAULT_RUNTIME_IMAGE),
     dind_image: z.string()
         .describe("The name of the DIND image.")
         .default("docker:29-dind-rootless"),
