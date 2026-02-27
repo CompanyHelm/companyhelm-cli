@@ -86,6 +86,7 @@ class FakeTransport {
 
 class DelayedInitializeRetryTransport extends FakeTransport {
   private initializeAttempts = 0;
+  private firstInitializeRequestId: number | null = null;
 
   override async sendRaw(payload: string): Promise<void> {
     const lines = payload
@@ -105,12 +106,9 @@ class DelayedInitializeRetryTransport extends FakeTransport {
 
       this.initializeAttempts += 1;
       if (this.initializeAttempts === 1) {
-        setTimeout(() => {
-          this.emitJson({
-            id: message.id,
-            result: {},
-          });
-        }, 3_050);
+        // Intentionally do not respond to the first initialize request so it times out
+        // and forces the retry path.
+        this.firstInitializeRequestId = message.id;
         continue;
       }
 
@@ -121,6 +119,14 @@ class DelayedInitializeRetryTransport extends FakeTransport {
           message: "Already initialized",
         },
       });
+
+      // Simulate a stale delayed response arriving after the first request timed out.
+      if (this.firstInitializeRequestId !== null) {
+        this.emitJson({
+          id: this.firstInitializeRequestId,
+          result: {},
+        });
+      }
     }
   }
 }
@@ -146,7 +152,6 @@ test("AppServerService treats 'Already initialized' initialize retries as succes
   const service = new AppServerService(transport as any, "test-client");
 
   await service.start();
-  await sleep(150);
 
   const initializeRequests = transport.sentRequests.filter((entry) => entry.method === "initialize");
   assert.equal(initializeRequests.length >= 2, true);
