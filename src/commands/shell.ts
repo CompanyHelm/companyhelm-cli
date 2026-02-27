@@ -639,6 +639,24 @@ function formatItemType(itemType: ItemType): string {
       return "reasoning";
     case ItemType.COMMAND_EXECUTION:
       return "command_execution";
+    case ItemType.PLAN:
+      return "plan";
+    case ItemType.FILE_CHANGE:
+      return "file_change";
+    case ItemType.MCP_TOOL_CALL:
+      return "mcp_tool_call";
+    case ItemType.COLLAB_AGENT_TOOL_CALL:
+      return "collab_agent_tool_call";
+    case ItemType.WEB_SEARCH:
+      return "web_search";
+    case ItemType.IMAGE_VIEW:
+      return "image_view";
+    case ItemType.ENTERED_REVIEW_MODE:
+      return "entered_review_mode";
+    case ItemType.EXITED_REVIEW_MODE:
+      return "exited_review_mode";
+    case ItemType.CONTEXT_COMPACTION:
+      return "context_compaction";
     case ItemType.ITEM_TYPE_UNKNOWN:
     default:
       return "unknown";
