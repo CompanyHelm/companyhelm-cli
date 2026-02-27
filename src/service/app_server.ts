@@ -118,6 +118,10 @@ function formatUnknownError(value: unknown): string {
   }
 }
 
+function isAlreadyInitializedError(error: unknown): boolean {
+  return error instanceof Error && /already initialized/i.test(error.message);
+}
+
 function isModelListResponse(value: unknown): value is ModelListResponse {
   if (typeof value !== "object" || value === null) {
     return false;
@@ -315,6 +319,9 @@ export class AppServerService {
         await this.request("initialize", params, 3_000);
         return;
       } catch (error: unknown) {
+        if (isAlreadyInitializedError(error)) {
+          return;
+        }
         if (!(error instanceof AppServerTimeoutError) || attempt === attempts) {
           throw error;
         }

@@ -84,6 +84,29 @@ class FakeTransport {
   }
 }
 
+class AlreadyInitializedTransport extends FakeTransport {
+  override async sendRaw(payload: string): Promise<void> {
+    const lines = payload
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    for (const line of lines) {
+      const message = JSON.parse(line) as { id?: number; method?: string };
+      if (typeof message.id === "number" && typeof message.method === "string") {
+        this.sentRequests.push({ id: message.id, method: message.method });
+      }
+
+      if (message.method === "initialize" && typeof message.id === "number") {
+        this.emitJson({
+          id: message.id,
+          error: { code: -32600, message: "Already initialized" },
+        });
+      }
+    }
+  }
+}
+
 async function waitForRequestId(
   transport: FakeTransport,
   method: string,
@@ -313,6 +336,28 @@ test("AppServerService reads thread metadata via thread/read", async () => {
   const response = await readPromise;
   assert.equal(response.thread.id, "thread-1");
   assert.equal(response.thread.preview, "Summarize lunar phases in seven words");
+
+  await service.stop();
+});
+
+test("AppServerService treats 'Already initialized' as a successful initialize handshake", async () => {
+  const transport = new AlreadyInitializedTransport();
+  const service = new AppServerService(transport as any, "test-client");
+
+  await service.start();
+
+  const listPromise = service.listModels(null, 1);
+  const requestId = await waitForRequestId(transport, "model/list");
+  transport.emitJson({
+    id: requestId,
+    result: {
+      data: [],
+      nextCursor: null,
+    },
+  });
+
+  const response = await listPromise;
+  assert.deepEqual(response, { data: [], nextCursor: null });
 
   await service.stop();
 });
