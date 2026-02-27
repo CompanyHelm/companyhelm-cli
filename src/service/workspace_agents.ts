@@ -31,7 +31,7 @@ export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 
 - \`list-installations\`: list synced GitHub installations with repositories, access tokens, and expirations.
 - \`gh-use-installation <installation-id>\`: configure \`gh\` authentication for a selected GitHub installation token.
-- Playwright CLI is available for browser automation tasks with Chromium pre-installed: \`playwright --browser=chromium ...\`
+- DO NOT INSTALL PLAYWRIGHT IN THE RUNTIME IMAGE. Playwright CLI is already installed and available for browser automation tasks with Chromium pre-installed: \`playwright open --browser=chromium ...\`
 `;
 
 const AGENTS_MD_GITHUB_SECTION_MARKER = "## GitHub Installations";

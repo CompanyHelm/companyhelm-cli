@@ -84,6 +84,53 @@ class FakeTransport {
   }
 }
 
+class DelayedInitializeRetryTransport extends FakeTransport {
+  private initializeAttempts = 0;
+  private firstInitializeRequestId: number | null = null;
+
+  override async sendRaw(payload: string): Promise<void> {
+    const lines = payload
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    for (const line of lines) {
+      const message = JSON.parse(line) as { id?: number; method?: string };
+      if (typeof message.id === "number" && typeof message.method === "string") {
+        this.sentRequests.push({ id: message.id, method: message.method });
+      }
+
+      if (message.method !== "initialize" || typeof message.id !== "number") {
+        continue;
+      }
+
+      this.initializeAttempts += 1;
+      if (this.initializeAttempts === 1) {
+        // Intentionally do not respond to the first initialize request so it times out
+        // and forces the retry path.
+        this.firstInitializeRequestId = message.id;
+        continue;
+      }
+
+      this.emitJson({
+        id: message.id,
+        error: {
+          code: -32600,
+          message: "Already initialized",
+        },
+      });
+
+      // Simulate a stale delayed response arriving after the first request timed out.
+      if (this.firstInitializeRequestId !== null) {
+        this.emitJson({
+          id: this.firstInitializeRequestId,
+          result: {},
+        });
+      }
+    }
+  }
+}
+
 async function waitForRequestId(
   transport: FakeTransport,
   method: string,
@@ -99,6 +146,18 @@ async function waitForRequestId(
   }
   throw new Error(`Timed out waiting for request method '${method}'.`);
 }
+
+test("AppServerService treats 'Already initialized' initialize retries as success", async () => {
+  const transport = new DelayedInitializeRetryTransport();
+  const service = new AppServerService(transport as any, "test-client");
+
+  await service.start();
+
+  const initializeRequests = transport.sentRequests.filter((entry) => entry.method === "initialize");
+  assert.equal(initializeRequests.length >= 2, true);
+
+  await service.stop();
+});
 
 test("AppServerService preserves request responses while waiting for turn completion notifications", async () => {
   const transport = new FakeTransport();
