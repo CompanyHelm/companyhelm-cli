@@ -2,6 +2,8 @@ import type { ClientRequest, RequestId, ServerNotification, ServerRequest } from
 import type { ModelListResponse } from "../generated/codex-app-server/v2/ModelListResponse.js";
 import type { ThreadResumeParams } from "../generated/codex-app-server/v2/ThreadResumeParams.js";
 import type { ThreadResumeResponse } from "../generated/codex-app-server/v2/ThreadResumeResponse.js";
+import type { ThreadReadParams } from "../generated/codex-app-server/v2/ThreadReadParams.js";
+import type { ThreadReadResponse } from "../generated/codex-app-server/v2/ThreadReadResponse.js";
 import type { ThreadStartParams } from "../generated/codex-app-server/v2/ThreadStartParams.js";
 import type { ThreadStartResponse } from "../generated/codex-app-server/v2/ThreadStartResponse.js";
 import type { TurnInterruptParams } from "../generated/codex-app-server/v2/TurnInterruptParams.js";
@@ -197,6 +199,10 @@ export class AppServerService {
 
   async resumeThread(params: ThreadResumeParams): Promise<ThreadResumeResponse> {
     return this.request("thread/resume", params, 15_000) as Promise<ThreadResumeResponse>;
+  }
+
+  async readThread(params: ThreadReadParams): Promise<ThreadReadResponse> {
+    return this.request("thread/read", params, 15_000) as Promise<ThreadReadResponse>;
   }
 
   async startTurn(params: TurnStartParams): Promise<TurnStartResponse> {

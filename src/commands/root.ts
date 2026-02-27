@@ -284,9 +284,21 @@ export function extractThreadNameUpdateFromNotification(
   notification: ServerNotification,
 ): ResolvedThreadNameUpdate | null {
   if (notification.method === "thread/name/updated") {
+    const rawParams = notification.params as unknown as Record<string, unknown>;
+    const sdkThreadId =
+      normalizeNonEmptyString(rawParams.threadId) ??
+      normalizeNonEmptyString(rawParams.thread_id) ??
+      normalizeNonEmptyString(rawParams.conversationId) ??
+      normalizeNonEmptyString(rawParams.conversation_id);
+    if (!sdkThreadId) {
+      return null;
+    }
+
     return {
-      sdkThreadId: notification.params.threadId,
-      threadName: normalizeNonEmptyString(notification.params.threadName),
+      sdkThreadId,
+      threadName:
+        normalizeNonEmptyString(rawParams.threadName) ??
+        normalizeNonEmptyString(rawParams.thread_name),
     };
   }
 
@@ -305,7 +317,9 @@ export function extractThreadNameUpdateFromNotification(
     normalizeNonEmptyString(msg?.thread_id) ??
     normalizeNonEmptyString(msg?.threadId) ??
     normalizeNonEmptyString(params.threadId) ??
-    normalizeNonEmptyString(params.conversationId);
+    normalizeNonEmptyString(params.thread_id) ??
+    normalizeNonEmptyString(params.conversationId) ??
+    normalizeNonEmptyString(params.conversation_id);
   if (!sdkThreadId) {
     return null;
   }
@@ -313,7 +327,8 @@ export function extractThreadNameUpdateFromNotification(
   const threadName =
     normalizeNonEmptyString(msg?.thread_name) ??
     normalizeNonEmptyString(msg?.threadName) ??
-    normalizeNonEmptyString(params.threadName);
+    normalizeNonEmptyString(params.threadName) ??
+    normalizeNonEmptyString(params.thread_name);
 
   return { sdkThreadId, threadName };
 }
@@ -1429,14 +1444,17 @@ async function waitForThreadTurnCompletion(
   threadId: string,
   sdkThreadId: string,
   sdkTurnId: string,
+  logger: Logger,
   requestId?: string,
 ): Promise<"completed" | "interrupted" | "failed"> {
-  return appServer.waitForTurnCompletion(
+  let receivedThreadNameUpdate = false;
+  const terminalStatus = await appServer.waitForTurnCompletion(
     sdkThreadId,
     sdkTurnId,
     async (notification: ServerNotification) => {
       const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
       if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
+        receivedThreadNameUpdate = true;
         await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
       }
 
@@ -1474,6 +1492,25 @@ async function waitForThreadTurnCompletion(
     },
     TURN_COMPLETION_TIMEOUT_MS,
   );
+
+  if (!receivedThreadNameUpdate) {
+    try {
+      const threadReadResponse = await appServer.readThread({
+        threadId: sdkThreadId,
+        includeTurns: false,
+      });
+      const fallbackThreadName = normalizeNonEmptyString(threadReadResponse.thread.preview);
+      if (fallbackThreadName) {
+        await sendThreadNameUpdate(commandChannel, threadId, fallbackThreadName);
+      }
+    } catch (error: unknown) {
+      logger.debug(
+        `Failed to read SDK thread '${sdkThreadId}' for fallback thread title inference: ${toErrorMessage(error)}`,
+      );
+    }
+  }
+
+  return terminalStatus;
 }
 
 async function executeCreateUserMessageRequest(
@@ -1637,6 +1674,7 @@ async function executeCreateUserMessageRequest(
       request.threadId,
       sdkThreadId,
       sdkTurnId,
+      logger,
       requestId,
     );
 
