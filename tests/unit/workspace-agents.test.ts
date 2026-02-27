@@ -20,7 +20,7 @@ test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   assert.equal(rendered.includes("gh-use-installation"), true);
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
-  assert.equal(rendered.includes("Playwright CLI is available"), true);
+  assert.equal(rendered.includes("Playwright CLI is already installed and available"), true);
   assert.equal(rendered.includes("/home/agent/.codex/auth.json"), true);
   assert.equal(rendered.includes("{{"), false);
 });
