@@ -34,6 +34,7 @@ const {
   CompanyhelmApiClient,
   createAgentRunnerControlServiceDefinition,
 } = require("../../dist/service/companyhelm_api_client.js");
+const { config } = require("../../dist/config.js");
 const { AppServerService } = require("../../dist/service/app_server.js");
 const threadLifecycle = require("../../dist/service/thread_lifecycle.js");
 const { initDb } = require("../../dist/state/db.js");
@@ -239,11 +240,12 @@ async function supportsRealThreadContainerLifecycle(): Promise<boolean> {
   const threadId = `preflight-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const names = threadLifecycle.buildThreadContainerNames(threadId);
   const containerService = new threadLifecycle.ThreadContainerService();
+  const runtimeImage = config.parse({}).runtime_image;
 
   try {
     await containerService.createThreadContainers({
       dindImage: "docker:29-dind-rootless",
-      runtimeImage: "companyhelm/runner:latest",
+      runtimeImage,
       names,
       mounts: [],
       user: {
@@ -1926,6 +1928,9 @@ test(
     const ensureRuntimeContainerToolingSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerBashrcSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+      .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
       .mockImplementation(async () => undefined);
@@ -2179,6 +2184,7 @@ test(
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
       assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected runtime git config bootstrap on each message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected runtime bashrc bootstrap on each message");
     } finally {
       reconnectDelaySpy.mockRestore();
       createThreadContainersSpy.mockRestore();
@@ -2187,6 +2193,7 @@ test(
       ensureRuntimeContainerIdentitySpy.mockRestore();
       ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
+      ensureRuntimeContainerBashrcSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
@@ -2240,6 +2247,9 @@ test(
       .mockImplementation(async () => undefined);
     const ensureRuntimeContainerToolingSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerBashrcSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
       .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
@@ -2437,6 +2447,7 @@ test(
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
       assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected bashrc bootstrap per message");
       assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
     } finally {
       reconnectDelaySpy.mockRestore();
@@ -2445,6 +2456,7 @@ test(
       ensureRuntimeContainerIdentitySpy.mockRestore();
       ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
+      ensureRuntimeContainerBashrcSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();

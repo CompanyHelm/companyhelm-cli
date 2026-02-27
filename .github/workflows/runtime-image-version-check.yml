@@ -1,0 +1,73 @@
+name: Runtime Image Version Check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "dockerfiles/Dockerfile-runtime"
+      - "scripts/runtime/**"
+      - "RUNTIME_IMAGE_VERSION"
+      - ".github/workflows/runtime-image-version-check.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "dockerfiles/Dockerfile-runtime"
+      - "scripts/runtime/**"
+      - "RUNTIME_IMAGE_VERSION"
+      - ".github/workflows/runtime-image-version-check.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-image-version-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate runtime image version updates
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+          PUSH_AFTER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            changed_files="$(git diff --name-only "${PR_BASE_SHA}...${PR_HEAD_SHA}")"
+          else
+            before="${PUSH_BEFORE_SHA}"
+            after="${PUSH_AFTER_SHA}"
+            if [[ "${before}" == "0000000000000000000000000000000000000000" ]]; then
+              changed_files="$(git show --pretty='' --name-only "${after}")"
+            else
+              changed_files="$(git diff --name-only "${before}..${after}")"
+            fi
+          fi
+
+          echo "Changed files:"
+          printf '%s\n' "${changed_files}"
+
+          image_changed="false"
+          if printf '%s\n' "${changed_files}" | grep -Eq '^(dockerfiles/Dockerfile-runtime|scripts/runtime/)'; then
+            image_changed="true"
+          fi
+
+          version_changed="false"
+          if printf '%s\n' "${changed_files}" | grep -Fxq 'RUNTIME_IMAGE_VERSION'; then
+            version_changed="true"
+          fi
+
+          if [[ "${image_changed}" == "true" && "${version_changed}" != "true" ]]; then
+            echo "::error::Runtime image inputs changed but RUNTIME_IMAGE_VERSION was not updated."
+            exit 1
+          fi
+
+          echo "Runtime image/version check passed."
