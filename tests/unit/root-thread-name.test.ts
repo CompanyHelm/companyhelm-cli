@@ -16,6 +16,21 @@ test("extractThreadNameUpdateFromNotification reads mapped thread/name/updated n
   });
 });
 
+test("extractThreadNameUpdateFromNotification reads mapped thread/name/updated notifications with snake_case fields", () => {
+  const notification = {
+    method: "thread/name/updated",
+    params: {
+      thread_id: "sdk-thread-1b",
+      thread_name: "Snake case title",
+    },
+  } as unknown as Parameters<typeof extractThreadNameUpdateFromNotification>[0];
+
+  assert.deepEqual(extractThreadNameUpdateFromNotification(notification), {
+    sdkThreadId: "sdk-thread-1b",
+    threadName: "Snake case title",
+  });
+});
+
 test("extractThreadNameUpdateFromNotification reads raw codex/event/thread_name_updated payloads", () => {
   const notification = {
     method: "codex/event/thread_name_updated",

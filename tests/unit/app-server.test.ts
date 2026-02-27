@@ -279,3 +279,40 @@ test("AppServerService logs outgoing thread/start payload including developerIns
 
   await service.stop();
 });
+
+test("AppServerService reads thread metadata via thread/read", async () => {
+  const transport = new FakeTransport();
+  const service = new AppServerService(transport as any, "test-client");
+
+  await service.start();
+
+  const readPromise = service.readThread({
+    threadId: "thread-1",
+    includeTurns: false,
+  });
+  const requestId = await waitForRequestId(transport, "thread/read");
+  transport.emitJson({
+    id: requestId,
+    result: {
+      thread: {
+        id: "thread-1",
+        preview: "Summarize lunar phases in seven words",
+        modelProvider: "openai",
+        createdAt: 1,
+        updatedAt: 2,
+        path: "/workspace/.codex/sessions/thread-1",
+        cwd: "/workspace",
+        cliVersion: "0.0.1",
+        source: "appServer",
+        gitInfo: null,
+        turns: [],
+      },
+    },
+  });
+
+  const response = await readPromise;
+  assert.equal(response.thread.id, "thread-1");
+  assert.equal(response.thread.preview, "Summarize lunar phases in seven words");
+
+  await service.stop();
+});
