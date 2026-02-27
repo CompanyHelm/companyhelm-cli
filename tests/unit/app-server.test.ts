@@ -7,11 +7,21 @@ type TransportEvent =
   | { type: "stderr"; payload: string }
   | { type: "error"; reason: string };
 
+interface FakeTransportOptions {
+  autoRespondInitialize?: boolean;
+  onRequest?: (message: { id?: number; method?: string }, transport: FakeTransport) => void;
+}
+
 class FakeTransport {
   readonly sentRequests: Array<{ id: number; method: string }> = [];
   private readonly queue: Array<TransportEvent | null> = [];
   private readonly waiters: Array<(event: TransportEvent | null) => void> = [];
   private closed = false;
+  private readonly options: FakeTransportOptions;
+
+  constructor(options?: FakeTransportOptions) {
+    this.options = options ?? {};
+  }
 
   async start(): Promise<void> {}
 
@@ -31,7 +41,13 @@ class FakeTransport {
         this.sentRequests.push({ id: message.id, method: message.method });
       }
 
-      if (message.method === "initialize" && typeof message.id === "number") {
+      this.options.onRequest?.(message, this);
+
+      if (
+        this.options.autoRespondInitialize !== false &&
+        message.method === "initialize" &&
+        typeof message.id === "number"
+      ) {
         this.emitJson({
           id: message.id,
           result: {},
@@ -137,6 +153,47 @@ test("AppServerService preserves request responses while waiting for turn comple
 
   assert.deepEqual(await steerPromise, { turnId: "turn-1" });
   assert.equal(await completionPromise, "completed");
+
+  await service.stop();
+});
+
+test("AppServerService treats retry initialize 'Already initialized' response as success", async () => {
+  let initializeCount = 0;
+  const transport = new FakeTransport({
+    autoRespondInitialize: false,
+    onRequest(message, currentTransport) {
+      if (message.method !== "initialize" || typeof message.id !== "number") {
+        return;
+      }
+
+      initializeCount += 1;
+      if (initializeCount === 1) {
+        setTimeout(() => {
+          currentTransport.emitJson({
+            id: message.id,
+            result: {},
+          });
+        }, 3_200);
+        return;
+      }
+
+      if (initializeCount === 2) {
+        currentTransport.emitJson({
+          id: message.id,
+          error: {
+            code: -32600,
+            message: "Already initialized",
+          },
+        });
+      }
+    },
+  });
+
+  const service = new AppServerService(transport as any, "test-client");
+  await service.start();
+
+  const initializeRequests = transport.sentRequests.filter((request) => request.method === "initialize");
+  assert.equal(initializeRequests.length >= 2, true);
 
   await service.stop();
 });
