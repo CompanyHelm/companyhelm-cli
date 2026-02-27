@@ -629,16 +629,6 @@ function formatItemStatus(status: ItemStatus): string {
   }
 }
 
-const ITEM_TYPE_PLAN = 6 as ItemType;
-const ITEM_TYPE_FILE_CHANGE = 7 as ItemType;
-const ITEM_TYPE_MCP_TOOL_CALL = 8 as ItemType;
-const ITEM_TYPE_COLLAB_AGENT_TOOL_CALL = 9 as ItemType;
-const ITEM_TYPE_WEB_SEARCH = 10 as ItemType;
-const ITEM_TYPE_IMAGE_VIEW = 11 as ItemType;
-const ITEM_TYPE_ENTERED_REVIEW_MODE = 12 as ItemType;
-const ITEM_TYPE_EXITED_REVIEW_MODE = 13 as ItemType;
-const ITEM_TYPE_CONTEXT_COMPACTION = 14 as ItemType;
-
 function formatItemType(itemType: ItemType): string {
   switch (itemType) {
     case ItemType.USER_MESSAGE:
@@ -649,23 +639,23 @@ function formatItemType(itemType: ItemType): string {
       return "reasoning";
     case ItemType.COMMAND_EXECUTION:
       return "command_execution";
-    case ITEM_TYPE_PLAN:
+    case ItemType.PLAN:
       return "plan";
-    case ITEM_TYPE_FILE_CHANGE:
+    case ItemType.FILE_CHANGE:
       return "file_change";
-    case ITEM_TYPE_MCP_TOOL_CALL:
+    case ItemType.MCP_TOOL_CALL:
       return "mcp_tool_call";
-    case ITEM_TYPE_COLLAB_AGENT_TOOL_CALL:
+    case ItemType.COLLAB_AGENT_TOOL_CALL:
       return "collab_agent_tool_call";
-    case ITEM_TYPE_WEB_SEARCH:
+    case ItemType.WEB_SEARCH:
       return "web_search";
-    case ITEM_TYPE_IMAGE_VIEW:
+    case ItemType.IMAGE_VIEW:
       return "image_view";
-    case ITEM_TYPE_ENTERED_REVIEW_MODE:
+    case ItemType.ENTERED_REVIEW_MODE:
       return "entered_review_mode";
-    case ITEM_TYPE_EXITED_REVIEW_MODE:
+    case ItemType.EXITED_REVIEW_MODE:
       return "exited_review_mode";
-    case ITEM_TYPE_CONTEXT_COMPACTION:
+    case ItemType.CONTEXT_COMPACTION:
       return "context_compaction";
     case ItemType.ITEM_TYPE_UNKNOWN:
     default:

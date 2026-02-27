@@ -675,16 +675,6 @@ function buildUserTextInput(text: string): UserInput[] {
   ];
 }
 
-const ITEM_TYPE_PLAN = 6 as ItemType;
-const ITEM_TYPE_FILE_CHANGE = 7 as ItemType;
-const ITEM_TYPE_MCP_TOOL_CALL = 8 as ItemType;
-const ITEM_TYPE_COLLAB_AGENT_TOOL_CALL = 9 as ItemType;
-const ITEM_TYPE_WEB_SEARCH = 10 as ItemType;
-const ITEM_TYPE_IMAGE_VIEW = 11 as ItemType;
-const ITEM_TYPE_ENTERED_REVIEW_MODE = 12 as ItemType;
-const ITEM_TYPE_EXITED_REVIEW_MODE = 13 as ItemType;
-const ITEM_TYPE_CONTEXT_COMPACTION = 14 as ItemType;
-
 function truncateSummary(text: string, maxLength = 240): string {
   const normalized = text.trim();
   if (normalized.length <= maxLength) {
@@ -745,27 +735,27 @@ function mapThreadItemType(item: ThreadItem): ItemType {
     case "agentMessage":
       return ItemType.AGENT_MESSAGE;
     case "plan":
-      return ITEM_TYPE_PLAN;
+      return ItemType.PLAN;
     case "reasoning":
       return ItemType.REASONING;
     case "commandExecution":
       return ItemType.COMMAND_EXECUTION;
     case "fileChange":
-      return ITEM_TYPE_FILE_CHANGE;
+      return ItemType.FILE_CHANGE;
     case "mcpToolCall":
-      return ITEM_TYPE_MCP_TOOL_CALL;
+      return ItemType.MCP_TOOL_CALL;
     case "collabAgentToolCall":
-      return ITEM_TYPE_COLLAB_AGENT_TOOL_CALL;
+      return ItemType.COLLAB_AGENT_TOOL_CALL;
     case "webSearch":
-      return ITEM_TYPE_WEB_SEARCH;
+      return ItemType.WEB_SEARCH;
     case "imageView":
-      return ITEM_TYPE_IMAGE_VIEW;
+      return ItemType.IMAGE_VIEW;
     case "enteredReviewMode":
-      return ITEM_TYPE_ENTERED_REVIEW_MODE;
+      return ItemType.ENTERED_REVIEW_MODE;
     case "exitedReviewMode":
-      return ITEM_TYPE_EXITED_REVIEW_MODE;
+      return ItemType.EXITED_REVIEW_MODE;
     case "contextCompaction":
-      return ITEM_TYPE_CONTEXT_COMPACTION;
+      return ItemType.CONTEXT_COMPACTION;
     default:
       return ItemType.ITEM_TYPE_UNKNOWN;
   }
