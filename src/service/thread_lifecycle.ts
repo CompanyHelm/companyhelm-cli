@@ -45,6 +45,23 @@ export interface ThreadContainerCreateOptions {
   imageStatusReporter?: (message: string) => void;
 }
 
+export interface ThreadGitSkillConfig {
+  directoryPath: string;
+  linkName: string;
+}
+
+export interface ThreadGitSkillPackageConfig {
+  repositoryUrl: string;
+  commitReference: string;
+  checkoutDirectoryName: string;
+  skills: ThreadGitSkillConfig[];
+}
+
+export interface ThreadGitSkillProvisionOptions {
+  cloneRootDirectory: string;
+  packages: ThreadGitSkillPackageConfig[];
+}
+
 const CONTAINER_START_TIMEOUT_MS = 30_000;
 const CONTAINER_START_POLL_MS = 500;
 const DEFAULT_HOST_DOCKER_PATH = "unix:///var/run/docker.sock";
@@ -316,6 +333,74 @@ function buildRuntimeGitConfigScript(gitUserName: string, gitUserEmail: string):
     "  fi",
     "done < <(find /workspace -type d -name .git -print0 2>/dev/null || true)",
   ].join("\n");
+}
+
+function buildRuntimeThreadGitSkillsProvisionScript(
+  user: ThreadContainerUser,
+  options: ThreadGitSkillProvisionOptions,
+): string {
+  const cloneRootDirectory = options.cloneRootDirectory.trim().length > 0
+    ? options.cloneRootDirectory.trim()
+    : "/skills";
+  const codexSkillsDirectory = join(user.agentHomeDirectory, ".codex", "skills");
+  const scriptLines = [
+    "set -euo pipefail",
+    `AGENT_UID=${shellQuote(String(user.uid))}`,
+    `AGENT_GID=${shellQuote(String(user.gid))}`,
+    `SKILLS_ROOT=${shellQuote(cloneRootDirectory)}`,
+    `CODEX_SKILLS_ROOT=${shellQuote(codexSkillsDirectory)}`,
+    "",
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$SKILLS_ROOT"',
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$CODEX_SKILLS_ROOT"',
+    "",
+    "if ! command -v git >/dev/null 2>&1; then",
+    '  echo "git is not available in the runtime container." >&2',
+    "  exit 1",
+    "fi",
+  ];
+
+  for (const pkg of options.packages) {
+    const checkoutPath = join(cloneRootDirectory, pkg.checkoutDirectoryName);
+    const sourceMarkerPath = join(checkoutPath, ".companyhelm-source");
+    scriptLines.push(
+      "",
+      `PACKAGE_DIR=${shellQuote(checkoutPath)}`,
+      `PACKAGE_SOURCE_MARKER=${shellQuote(sourceMarkerPath)}`,
+      `PACKAGE_REPO_URL=${shellQuote(pkg.repositoryUrl)}`,
+      `PACKAGE_COMMIT_REF=${shellQuote(pkg.commitReference)}`,
+      'if [ ! -d "$PACKAGE_DIR/.git" ] || [ ! -f "$PACKAGE_SOURCE_MARKER" ] || [ "$(cat "$PACKAGE_SOURCE_MARKER")" != "$PACKAGE_REPO_URL#$PACKAGE_COMMIT_REF" ]; then',
+      '  rm -rf "$PACKAGE_DIR"',
+      '  if ! git clone --depth 1 --branch "$PACKAGE_COMMIT_REF" "$PACKAGE_REPO_URL" "$PACKAGE_DIR"; then',
+      '    rm -rf "$PACKAGE_DIR"',
+      '    git clone --depth 1 "$PACKAGE_REPO_URL" "$PACKAGE_DIR"',
+      '    git -C "$PACKAGE_DIR" fetch --depth 1 origin "$PACKAGE_COMMIT_REF"',
+      '    git -C "$PACKAGE_DIR" checkout --detach FETCH_HEAD',
+      "  fi",
+      '  printf \'%s\' "$PACKAGE_REPO_URL#$PACKAGE_COMMIT_REF" > "$PACKAGE_SOURCE_MARKER"',
+      "fi",
+      'chmod -R a+rX "$PACKAGE_DIR" || true',
+    );
+
+    for (const skill of pkg.skills) {
+      scriptLines.push(
+        "",
+        `SKILL_SOURCE=${shellQuote(join(checkoutPath, skill.directoryPath))}`,
+        `SKILL_LINK=${shellQuote(join(codexSkillsDirectory, skill.linkName))}`,
+        'if [ ! -d "$SKILL_SOURCE" ]; then',
+        '  echo "Thread git skill directory not found: $SKILL_SOURCE" >&2',
+        "  exit 1",
+        "fi",
+        'if [ ! -f "$SKILL_SOURCE/SKILL.md" ]; then',
+        '  echo "Thread git skill directory is missing SKILL.md: $SKILL_SOURCE" >&2',
+        "  exit 1",
+        "fi",
+        'rm -rf "$SKILL_LINK"',
+        'ln -s "$SKILL_SOURCE" "$SKILL_LINK"',
+      );
+    }
+  }
+
+  return scriptLines.join("\n");
 }
 
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
@@ -686,6 +771,22 @@ export class ThreadContainerService {
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to configure git author defaults in runtime container '${name}'`,
+    );
+  }
+
+  async ensureRuntimeContainerThreadGitSkills(
+    name: string,
+    user: ThreadContainerUser,
+    options: ThreadGitSkillProvisionOptions,
+  ): Promise<void> {
+    if (options.packages.length === 0) {
+      return;
+    }
+
+    const script = buildRuntimeThreadGitSkillsProvisionScript(user, options);
+    this.runDockerExecScript(
+      ["exec", "-u", "0", name, "bash", "-lc", script],
+      `Failed to provision thread git skills in runtime container '${name}'`,
     );
   }
 

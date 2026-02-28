@@ -762,6 +762,61 @@ test("ThreadContainerService configures default git author values in runtime rep
   assert.match(invocation.args[6], /find \/workspace -type d -name \.git -print0/);
 });
 
+test("ThreadContainerService provisions thread git skills with shallow clone and codex skill symlinks", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerThreadGitSkills(
+    "companyhelm-runtime-thread-skills",
+    {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+    {
+      cloneRootDirectory: "/skills",
+      packages: [
+        {
+          repositoryUrl: "https://github.com/obra/superpowers.git",
+          commitReference: "main",
+          checkoutDirectoryName: "01-superpowers",
+          skills: [
+            { directoryPath: "skills/brainstorming", linkName: "brainstorming" },
+            { directoryPath: "skills/systematic-debugging", linkName: "systematic-debugging" },
+          ],
+        },
+      ],
+    },
+  );
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-skills", "bash", "-lc"]);
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /SKILLS_ROOT='\/skills'/);
+  assert.match(invocation.args[6], /CODEX_SKILLS_ROOT='\/home\/agent\/\.codex\/skills'/);
+  assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$SKILLS_ROOT"/);
+  assert.match(invocation.args[6], /git clone --depth 1 --branch "\$PACKAGE_COMMIT_REF" "\$PACKAGE_REPO_URL" "\$PACKAGE_DIR"/);
+  assert.match(invocation.args[6], /git -C "\$PACKAGE_DIR" fetch --depth 1 origin "\$PACKAGE_COMMIT_REF"/);
+  assert.match(invocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/brainstorming'/);
+  assert.match(invocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/systematic-debugging'/);
+  assert.match(invocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/brainstorming'/);
+  assert.match(invocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/systematic-debugging'/);
+  assert.match(invocation.args[6], /ln -s "\$SKILL_SOURCE" "\$SKILL_LINK"/);
+});
+
 test("ThreadContainerService surfaces runtime tooling validation failures", async () => {
   const runCommand = () =>
     ({
@@ -836,5 +891,43 @@ test("ThreadContainerService surfaces runtime git config failures", async () => 
         "agent@companyhelm.com",
       ),
     /Failed to configure git author defaults in runtime container 'companyhelm-runtime-thread-git-error' \(exit 9\): git missing/,
+  );
+});
+
+test("ThreadContainerService surfaces runtime thread git skill provisioning failures", async () => {
+  const runCommand = () =>
+    ({
+      pid: 1,
+      output: [null, "", "clone failed"],
+      stdout: "",
+      stderr: "clone failed",
+      status: 13,
+      signal: null,
+    }) as any;
+  const service = new ThreadContainerService({} as any, runCommand as any);
+
+  await assert.rejects(
+    () =>
+      service.ensureRuntimeContainerThreadGitSkills(
+        "companyhelm-runtime-thread-skills-error",
+        {
+          uid: 501,
+          gid: 20,
+          agentUser: "agent",
+          agentHomeDirectory: "/home/agent",
+        },
+        {
+          cloneRootDirectory: "/skills",
+          packages: [
+            {
+              repositoryUrl: "https://github.com/obra/superpowers.git",
+              commitReference: "main",
+              checkoutDirectoryName: "01-superpowers",
+              skills: [{ directoryPath: "skills/brainstorming", linkName: "brainstorming" }],
+            },
+          ],
+        },
+      ),
+    /Failed to provision thread git skills in runtime container 'companyhelm-runtime-thread-skills-error' \(exit 13\): clone failed/,
   );
 });
