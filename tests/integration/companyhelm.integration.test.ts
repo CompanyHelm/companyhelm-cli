@@ -940,6 +940,16 @@ test("companyhelm root command writes synced GitHub installations payload and CL
                     threadId: "thread-github-installations",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
+                    gitSkillPackages: [
+                      {
+                        repositoryUrl: "https://github.com/obra/superpowers.git",
+                        commitReference: "main",
+                        skills: [
+                          { directoryPath: "skills/brainstorming" },
+                          { directoryPath: "skills/systematic-debugging" },
+                        ],
+                      },
+                    ],
                   },
                 },
               }),
@@ -976,6 +986,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
     const { db, client } = await initDb(stateDbPath);
     let agentsMdContents = "";
     let installationsPayload: Record<string, unknown> | null = null;
+    let threadGitSkillsPayload: Record<string, unknown> | null = null;
     try {
       const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
       assert.ok(threadRow, "expected thread row to exist");
@@ -986,6 +997,10 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       const installationsPath = path.join(threadRow!.workspace, ".companyhelm", "installations.json");
       assert.equal(existsSync(installationsPath), true, "expected installations.json to be created in thread workspace");
       installationsPayload = JSON.parse(await readFile(installationsPath, "utf8")) as Record<string, unknown>;
+
+      const threadGitSkillsPath = path.join(threadRow!.workspace, ".companyhelm", "thread-git-skills.json");
+      assert.equal(existsSync(threadGitSkillsPath), true, "expected thread git skills config to be created in thread workspace");
+      threadGitSkillsPayload = JSON.parse(await readFile(threadGitSkillsPath, "utf8")) as Record<string, unknown>;
     } finally {
       client.close();
     }
@@ -1007,6 +1022,31 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       access_token_expiration: new Date(1767142800000).toISOString(),
       repositories: ["acme/backend", "acme/frontend"],
     });
+
+    assert.ok(threadGitSkillsPayload, "expected thread git skills payload to be parsed");
+    const rawThreadGitSkillPackages = (threadGitSkillsPayload as Record<string, unknown>).packages;
+    assert.equal(Array.isArray(rawThreadGitSkillPackages), true);
+    const threadGitSkillPackages = rawThreadGitSkillPackages as Array<Record<string, unknown>>;
+    assert.equal(threadGitSkillPackages.length, 1);
+    assert.equal(threadGitSkillPackages[0].repositoryUrl, "https://github.com/obra/superpowers.git");
+    assert.equal(threadGitSkillPackages[0].commitReference, "main");
+    assert.equal(
+      typeof threadGitSkillPackages[0].checkoutDirectoryName === "string" &&
+        String(threadGitSkillPackages[0].checkoutDirectoryName).length > 0,
+      true,
+      "expected checkoutDirectoryName to be set",
+    );
+    const rawThreadGitSkills = threadGitSkillPackages[0].skills;
+    assert.equal(Array.isArray(rawThreadGitSkills), true);
+    const threadGitSkills = rawThreadGitSkills as Array<Record<string, unknown>>;
+    assert.deepEqual(
+      threadGitSkills.map((skill) => skill.directoryPath),
+      ["skills/brainstorming", "skills/systematic-debugging"],
+    );
+    assert.deepEqual(
+      threadGitSkills.map((skill) => skill.linkName),
+      ["brainstorming", "systematic-debugging"],
+    );
   } finally {
     reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
@@ -1931,6 +1971,9 @@ test(
     const ensureRuntimeContainerBashrcSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerThreadGitSkillsSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
+      .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
       .mockImplementation(async () => undefined);
@@ -2056,6 +2099,16 @@ test(
                       threadId: "thread-user-message",
                       model: "gpt-5.3-codex",
                       additionalModelInstructions,
+                      gitSkillPackages: [
+                        {
+                          repositoryUrl: "https://github.com/obra/superpowers.git",
+                          commitReference: "main",
+                          skills: [
+                            { directoryPath: "skills/brainstorming" },
+                            { directoryPath: "skills/systematic-debugging" },
+                          ],
+                        },
+                      ],
                     },
                   },
                 }),
@@ -2185,6 +2238,21 @@ test(
       assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected runtime git config bootstrap on each message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
       assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected runtime bashrc bootstrap on each message");
+      assert.equal(
+        ensureRuntimeContainerThreadGitSkillsSpy.mock.calls.length,
+        2,
+        "expected runtime thread git skill provisioning on each message",
+      );
+      assert.equal(
+        ensureRuntimeContainerThreadGitSkillsSpy.mock.calls[0]?.[2]?.cloneRootDirectory,
+        "/skills",
+        "expected default thread git skills clone root",
+      );
+      assert.deepEqual(
+        ensureRuntimeContainerThreadGitSkillsSpy.mock.calls[0]?.[2]?.packages?.[0]?.skills?.map((skill: any) => skill.linkName),
+        ["brainstorming", "systematic-debugging"],
+        "expected thread git skill link names to be derived from directory paths",
+      );
     } finally {
       reconnectDelaySpy.mockRestore();
       createThreadContainersSpy.mockRestore();
@@ -2194,6 +2262,7 @@ test(
       ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
       ensureRuntimeContainerBashrcSpy.mockRestore();
+      ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();

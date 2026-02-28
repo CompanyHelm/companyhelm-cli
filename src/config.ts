@@ -86,6 +86,9 @@ export const config = z.object({
     )
         .describe("DNS servers applied to runtime-related Docker containers.")
         .default(() => [...DEFAULT_RUNTIME_DNS_SERVERS]),
+    thread_git_skills_directory: z.string()
+        .describe("Container directory where thread git skill repositories are cloned.")
+        .default("/skills"),
     agent_user: z.string()
         .describe("The user for the agent.")
         .default("agent"),

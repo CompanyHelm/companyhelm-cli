@@ -19,7 +19,8 @@ import {
 import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import * as grpc from "@grpc/grpc-js";
-import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
@@ -49,6 +50,8 @@ import {
   resolveThreadsRootDirectory,
   ThreadContainerService,
   type ThreadAuthMode,
+  type ThreadGitSkillConfig,
+  type ThreadGitSkillPackageConfig,
 } from "../service/thread_lifecycle.js";
 import type { ReasoningEffort } from "../generated/codex-app-server/ReasoningEffort.js";
 import type { ServerNotification } from "../generated/codex-app-server/ServerNotification.js";
@@ -74,6 +77,7 @@ interface RootCommandOptions {
   useHostDockerRuntime?: boolean;
   hostDockerPath?: string;
   dns?: string;
+  threadGitSkillsDirectory?: string;
 }
 
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
@@ -84,6 +88,7 @@ const GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS = 30_000;
 const GITHUB_INSTALLATIONS_REFRESH_WINDOW_MS = 15 * 60_000;
 const WORKSPACE_INSTALLATIONS_DIRECTORY = ".companyhelm";
 const WORKSPACE_INSTALLATIONS_FILENAME = "installations.json";
+const THREAD_GIT_SKILLS_CONFIG_FILENAME = "thread-git-skills.json";
 const YOLO_APPROVAL_POLICY: AskForApproval = "never";
 const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
@@ -542,6 +547,280 @@ function writeWorkspaceGithubInstallationsPayload(
   } catch (error: unknown) {
     logger.warn(`Failed writing GitHub installations file for workspace '${workspaceDirectory}': ${toErrorMessage(error)}`);
   }
+}
+
+function isHttpsRepositoryUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function normalizeThreadGitSkillDirectoryPath(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  if (trimmed.startsWith("/")) {
+    return null;
+  }
+  if (trimmed.includes("\\")) {
+    return null;
+  }
+
+  const segments = trimmed.split("/").map((segment) => segment.trim()).filter((segment) => segment.length > 0);
+  if (segments.length === 0) {
+    return null;
+  }
+  if (segments.some((segment) => segment === "." || segment === "..")) {
+    return null;
+  }
+
+  return segments.join("/");
+}
+
+function createThreadGitSkillLinkName(rawDirectoryPath: string): string {
+  const fallback = "skill";
+  const segments = rawDirectoryPath.split("/").filter((segment) => segment.length > 0);
+  const lastPathSegment = segments.length > 0 ? segments[segments.length - 1] : fallback;
+  const sanitized = lastPathSegment
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
+    .replace(/^\.+/, "");
+  return sanitized.length > 0 ? sanitized : fallback;
+}
+
+function createThreadGitSkillCheckoutDirectoryName(
+  repositoryUrl: string,
+  commitReference: string,
+  index: number,
+): string {
+  const digest = createHash("sha256")
+    .update(`${repositoryUrl}\n${commitReference}`)
+    .digest("hex")
+    .slice(0, 12);
+  const repoPathPart = repositoryUrl
+    .replace(/^https?:\/\//i, "")
+    .replace(/[^a-zA-Z0-9]+/g, "-")
+    .replace(/^-+/, "")
+    .replace(/-+$/, "")
+    .toLowerCase()
+    .slice(0, 48) || "repo";
+  return `${String(index + 1).padStart(2, "0")}-${repoPathPart}-${digest}`;
+}
+
+function normalizeThreadGitSkillPackagesForThreadConfig(
+  rawPackages: CreateThreadRequest["gitSkillPackages"] | undefined,
+  logger: Logger,
+): ThreadGitSkillPackageConfig[] {
+  if (!Array.isArray(rawPackages) || rawPackages.length === 0) {
+    return [];
+  }
+
+  const normalizedPackages: ThreadGitSkillPackageConfig[] = [];
+  const linkNameAllocations = new Map<string, number>();
+
+  for (const [packageIndex, rawPackage] of rawPackages.entries()) {
+    const repositoryUrl = normalizeNonEmptyString(rawPackage.repositoryUrl);
+    const commitReference = normalizeNonEmptyString(rawPackage.commitReference);
+    if (!repositoryUrl || !isHttpsRepositoryUrl(repositoryUrl)) {
+      logger.warn(`Skipping thread git skill package at index ${packageIndex}: repositoryUrl must be an https URL.`);
+      continue;
+    }
+    if (!commitReference) {
+      logger.warn(`Skipping thread git skill package at index ${packageIndex}: commitReference is required.`);
+      continue;
+    }
+
+    const rawSkills = Array.isArray(rawPackage.skills) ? rawPackage.skills : [];
+    const skills: ThreadGitSkillConfig[] = [];
+
+    for (const rawSkill of rawSkills) {
+      const normalizedDirectoryPath = normalizeThreadGitSkillDirectoryPath(rawSkill.directoryPath ?? "");
+      if (!normalizedDirectoryPath) {
+        logger.warn(
+          `Skipping thread git skill '${rawSkill.directoryPath ?? ""}' in package '${repositoryUrl}': invalid relative directory path.`,
+        );
+        continue;
+      }
+
+      const baseLinkName = createThreadGitSkillLinkName(normalizedDirectoryPath);
+      const allocation = linkNameAllocations.get(baseLinkName) ?? 0;
+      linkNameAllocations.set(baseLinkName, allocation + 1);
+      const linkName = allocation === 0 ? baseLinkName : `${baseLinkName}-${allocation + 1}`;
+
+      skills.push({
+        directoryPath: normalizedDirectoryPath,
+        linkName,
+      });
+    }
+
+    if (skills.length === 0) {
+      logger.warn(
+        `Skipping thread git skill package '${repositoryUrl}@${commitReference}': no valid skill directory paths were provided.`,
+      );
+      continue;
+    }
+
+    normalizedPackages.push({
+      repositoryUrl,
+      commitReference,
+      checkoutDirectoryName: createThreadGitSkillCheckoutDirectoryName(
+        repositoryUrl,
+        commitReference,
+        normalizedPackages.length,
+      ),
+      skills,
+    });
+  }
+
+  return normalizedPackages;
+}
+
+function resolveThreadGitSkillsConfigPath(workspaceDirectory: string): string {
+  return join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY, THREAD_GIT_SKILLS_CONFIG_FILENAME);
+}
+
+function writeWorkspaceThreadGitSkillsConfig(
+  workspaceDirectory: string,
+  gitSkillPackages: ThreadGitSkillPackageConfig[],
+  logger: Logger,
+): void {
+  const configPath = resolveThreadGitSkillsConfigPath(workspaceDirectory);
+  const configDirectory = join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY);
+  const temporaryPath = `${configPath}.tmp`;
+
+  try {
+    mkdirSync(configDirectory, { recursive: true });
+    if (gitSkillPackages.length === 0) {
+      rmSync(configPath, { force: true });
+      rmSync(temporaryPath, { force: true });
+      return;
+    }
+
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify({ packages: gitSkillPackages }, null, 2)}\n`,
+      "utf8",
+    );
+    renameSync(temporaryPath, configPath);
+  } catch (error: unknown) {
+    logger.warn(`Failed writing thread git skills config for workspace '${workspaceDirectory}': ${toErrorMessage(error)}`);
+  }
+}
+
+function parseThreadGitSkillsConfig(content: unknown): ThreadGitSkillPackageConfig[] | null {
+  if (!isRecord(content) || !Array.isArray(content.packages)) {
+    return null;
+  }
+
+  const parsedPackages: ThreadGitSkillPackageConfig[] = [];
+
+  for (const rawPackage of content.packages) {
+    if (!isRecord(rawPackage)) {
+      return null;
+    }
+
+    const repositoryUrl = normalizeNonEmptyString(rawPackage.repositoryUrl);
+    const commitReference = normalizeNonEmptyString(rawPackage.commitReference);
+    const checkoutDirectoryName = normalizeNonEmptyString(rawPackage.checkoutDirectoryName);
+    const rawSkills = rawPackage.skills;
+    if (
+      !repositoryUrl ||
+      !isHttpsRepositoryUrl(repositoryUrl) ||
+      !commitReference ||
+      !checkoutDirectoryName ||
+      checkoutDirectoryName.includes("/") ||
+      checkoutDirectoryName.includes("\\") ||
+      !Array.isArray(rawSkills)
+    ) {
+      return null;
+    }
+
+    const parsedSkills: ThreadGitSkillConfig[] = [];
+    for (const rawSkill of rawSkills) {
+      if (!isRecord(rawSkill)) {
+        return null;
+      }
+      const directoryPath = normalizeThreadGitSkillDirectoryPath(normalizeNonEmptyString(rawSkill.directoryPath) ?? "");
+      const linkName = normalizeNonEmptyString(rawSkill.linkName);
+      if (
+        !directoryPath ||
+        !linkName ||
+        linkName.includes("/") ||
+        linkName.includes("\\") ||
+        linkName.trim().length === 0 ||
+        linkName.trim() === "." ||
+        linkName.trim() === ".."
+      ) {
+        return null;
+      }
+      parsedSkills.push({ directoryPath, linkName });
+    }
+
+    if (parsedSkills.length === 0) {
+      continue;
+    }
+
+    parsedPackages.push({
+      repositoryUrl,
+      commitReference,
+      checkoutDirectoryName,
+      skills: parsedSkills,
+    });
+  }
+
+  return parsedPackages;
+}
+
+function readWorkspaceThreadGitSkillsConfig(workspaceDirectory: string, logger: Logger): ThreadGitSkillPackageConfig[] {
+  const configPath = resolveThreadGitSkillsConfigPath(workspaceDirectory);
+
+  try {
+    const rawContent = readFileSync(configPath, "utf8");
+    const parsedContent = JSON.parse(rawContent) as unknown;
+    const parsedPackages = parseThreadGitSkillsConfig(parsedContent);
+    if (!parsedPackages) {
+      logger.warn(`Thread git skills config has invalid shape at '${configPath}'.`);
+      return [];
+    }
+    return parsedPackages;
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      return [];
+    }
+    logger.warn(`Failed reading thread git skills config at '${configPath}': ${toErrorMessage(error)}`);
+    return [];
+  }
+}
+
+async function ensureThreadGitSkillsInRuntime(
+  cfg: Config,
+  threadState: ThreadMessageExecutionState,
+  containerService: ThreadContainerService,
+  logger: Logger,
+): Promise<void> {
+  const packages = readWorkspaceThreadGitSkillsConfig(threadState.workspace, logger);
+  if (packages.length === 0) {
+    return;
+  }
+
+  await containerService.ensureRuntimeContainerThreadGitSkills(
+    threadState.runtimeContainer,
+    {
+      uid: threadState.uid,
+      gid: threadState.gid,
+      agentUser: cfg.agent_user,
+      agentHomeDirectory: threadState.homeDirectory,
+    },
+    {
+      cloneRootDirectory: cfg.thread_git_skills_directory,
+      packages,
+    },
+  );
 }
 
 async function listTrackedThreadWorkspaces(cfg: Config, logger: Logger): Promise<string[]> {
@@ -1138,8 +1417,9 @@ async function handleCreateThreadRequest(
   const normalizedAdditionalModelInstructions = normalizeAdditionalModelInstructions(
     request.additionalModelInstructions,
   );
+  const threadGitSkillPackages = normalizeThreadGitSkillPackagesForThreadConfig(request.gitSkillPackages, logger);
   logger.debug(
-    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}').`,
+    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}').`,
   );
 
   let authMode: ThreadAuthMode;
@@ -1182,6 +1462,7 @@ async function handleCreateThreadRequest(
 
   mkdirSync(threadDirectory, { recursive: true });
   ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
+  writeWorkspaceThreadGitSkillsConfig(threadDirectory, threadGitSkillPackages, logger);
   await syncGithubInstallationsForWorkspaces(
     apiClient,
     apiCallOptions,
@@ -1677,6 +1958,7 @@ async function executeCreateUserMessageRequest(
         agentHomeDirectory: threadState.homeDirectory,
       },
     });
+    await ensureThreadGitSkillsInRuntime(cfg, threadState, containerService, logger);
 
     await ensureThreadAppServerSessionStarted(appServerSession);
 
@@ -1985,6 +2267,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     use_host_docker_runtime: options.useHostDockerRuntime,
     host_docker_path: options.hostDockerPath,
     runtime_dns_servers: options.dns,
+    thread_git_skills_directory: options.threadGitSkillsDirectory,
   });
 
   const configuredSdks = await hasConfiguredSdks(cfg);
@@ -2088,6 +2371,10 @@ export function registerRootCommand(program: Command): void {
     .option(
       "--dns <servers>",
       "Comma-separated DNS servers applied to runtime-related Docker containers (for example: 1.1.1.1,8.8.8.8).",
+    )
+    .option(
+      "--thread-git-skills-directory <path>",
+      "Container path where thread git skill repositories are cloned before linking into ~/.codex/skills.",
     )
     .option("-d, --daemon", "Run in daemon mode and fail fast when no SDK is configured.")
     .option("--log-level <level>", "Log level (DEBUG, INFO, WARN, ERROR).", "INFO")

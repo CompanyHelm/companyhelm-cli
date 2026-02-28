@@ -5,6 +5,7 @@ import { threads } from "../state/schema.js";
 export interface ThreadMessageExecutionState {
   id: string;
   agentId: string;
+  workspace: string;
   sdkThreadId: string | null;
   model: string;
   reasoningLevel: string;
@@ -35,6 +36,7 @@ export async function loadThreadMessageExecutionState(
       .select({
         id: threads.id,
         agentId: threads.agentId,
+        workspace: threads.workspace,
         sdkThreadId: threads.sdkThreadId,
         model: threads.model,
         reasoningLevel: threads.reasoningLevel,

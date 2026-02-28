@@ -21,3 +21,8 @@ test("config parses comma-separated runtime DNS servers", () => {
 
   assert.deepEqual(cfg.runtime_dns_servers, ["9.9.9.9", "8.8.4.4"]);
 });
+
+test("config defaults thread git skills clone directory", () => {
+  const cfg = config.parse({});
+  assert.equal(cfg.thread_git_skills_directory, "/skills");
+});
