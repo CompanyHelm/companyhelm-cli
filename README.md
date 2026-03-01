@@ -69,6 +69,26 @@ Override the migration target database path when needed:
 DRIZZLE_DB_PATH=/absolute/path/to/state.db npm run db:migrate
 ```
 
+## Thread-Level MCP E2E Check
+
+Use the runtime helper to validate thread-level MCP end-to-end behavior for:
+
+- a local known-good stdio MCP server (`local_echo`)
+- Context7 stdio MCP (`resolve-library-id`, `query-docs`)
+
+Prerequisites:
+
+- CompanyHelm API is running and reachable at `http://127.0.0.1:4000/graphql` (or pass `--api-url`)
+- at least one connected runner for the target company with `codex` SDK and an available model
+
+Run:
+
+```bash
+scripts/runtime/e2e-thread-mcp --company-id <company-id>
+```
+
+The script exits non-zero on failed assertions and prints a JSON summary on success, including created MCP/agent/thread IDs.
+
 ---
 
 ## License

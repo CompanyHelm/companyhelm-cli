@@ -704,8 +704,6 @@ function describeGrpcUpdate(message: ClientMessage): string | null {
       const suffix = details.length > 0 ? ` ${details.join(" ")}` : "";
       return `grpc update: item ${item.sdkItemId} status=${formatItemStatus(item.status)} type=${formatItemType(item.itemType)}${suffix}`;
     }
-    case "skillMpUpdate":
-      return `grpc update: skill package=${message.payload.value.packageName} agent=${message.payload.value.agentId}`;
     case "requestError":
       return `grpc update: request_error ${message.payload.value.errorMessage}`;
     case undefined:

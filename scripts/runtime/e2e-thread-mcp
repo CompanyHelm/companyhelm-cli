@@ -1,0 +1,705 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+API_URL_DEFAULT="http://127.0.0.1:4000/graphql"
+TURN_TIMEOUT_SEC_DEFAULT=240
+POLL_INTERVAL_SEC_DEFAULT=2
+
+API_URL="${API_URL_DEFAULT}"
+COMPANY_ID="${COMPANY_ID:-}"
+RUNNER_ID="${RUNNER_ID:-}"
+SDK_ID="${SDK_ID:-}"
+MODEL_ID="${MODEL_ID:-}"
+CONTEXT7_MCP_ID="${CONTEXT7_MCP_ID:-}"
+TURN_TIMEOUT_SEC="${TURN_TIMEOUT_SEC_DEFAULT}"
+POLL_INTERVAL_SEC="${POLL_INTERVAL_SEC_DEFAULT}"
+WORKSPACES_ROOT="${COMPANYHELM_WORKSPACES_ROOT:-${HOME}/.config/companyhelm/workspaces}"
+
+usage() {
+  cat <<'USAGE'
+e2e-thread-mcp: run thread-level MCP e2e against local stdio + Context7 stdio.
+
+Usage:
+  e2e-thread-mcp --company-id <id> [options]
+
+Required:
+  --company-id <id>          Company ID in CompanyHelm API.
+
+Optional:
+  --api-url <url>            GraphQL endpoint URL.
+                             Default: http://127.0.0.1:4000/graphql
+  --runner-id <id>           Runner ID to use. Auto-discovers first connected.
+  --sdk-id <id>              SDK ID to use. Auto-discovers codex SDK on runner.
+  --model-id <id>            Model ID to use. Auto-discovers from codex SDK.
+  --context7-mcp-id <id>     Reuse an existing Context7 stdio MCP server by ID.
+  --turn-timeout-sec <sec>   Timeout for each turn completion poll.
+                             Default: 240
+  --poll-interval-sec <sec>  Poll interval for thread turns.
+                             Default: 2
+  --workspaces-root <path>   Workspaces root path.
+                             Default: $HOME/.config/companyhelm/workspaces
+  -h, --help                 Show help.
+
+Examples:
+  e2e-thread-mcp --company-id e3735a3e-2ff5-4129-86a1-d013def67d17
+  e2e-thread-mcp --company-id <id> --runner-id <runner> --sdk-id <sdk> --model-id <model>
+USAGE
+}
+
+log() {
+  printf '[e2e-thread-mcp] %s\n' "$*" >&2
+}
+
+die() {
+  printf '[e2e-thread-mcp] error: %s\n' "$*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --company-id)
+      COMPANY_ID="${2:-}"
+      shift 2
+      ;;
+    --api-url)
+      API_URL="${2:-}"
+      shift 2
+      ;;
+    --runner-id)
+      RUNNER_ID="${2:-}"
+      shift 2
+      ;;
+    --sdk-id)
+      SDK_ID="${2:-}"
+      shift 2
+      ;;
+    --model-id)
+      MODEL_ID="${2:-}"
+      shift 2
+      ;;
+    --context7-mcp-id)
+      CONTEXT7_MCP_ID="${2:-}"
+      shift 2
+      ;;
+    --turn-timeout-sec)
+      TURN_TIMEOUT_SEC="${2:-}"
+      shift 2
+      ;;
+    --poll-interval-sec)
+      POLL_INTERVAL_SEC="${2:-}"
+      shift 2
+      ;;
+    --workspaces-root)
+      WORKSPACES_ROOT="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ -n "${COMPANY_ID}" ]] || {
+  usage
+  die "--company-id is required"
+}
+
+[[ "${TURN_TIMEOUT_SEC}" =~ ^[0-9]+$ ]] || die "--turn-timeout-sec must be an integer"
+[[ "${POLL_INTERVAL_SEC}" =~ ^[0-9]+$ ]] || die "--poll-interval-sec must be an integer"
+
+need_cmd curl
+need_cmd jq
+need_cmd node
+need_cmd npx
+
+gql() {
+  local query="$1"
+  local variables_json="$2"
+  local payload
+  local response
+  payload="$(jq -cn --arg q "${query}" --argjson v "${variables_json}" '{query: $q, variables: $v}')"
+  response="$(curl -sS "${API_URL}" -H 'content-type: application/json' --data-binary "${payload}")" || {
+    die "GraphQL request failed (transport). URL=${API_URL}"
+  }
+
+  if jq -e '.errors and (.errors | length > 0)' >/dev/null 2>&1 <<<"${response}"; then
+    printf '%s\n' "${response}" >&2
+    die "GraphQL returned errors"
+  fi
+
+  printf '%s\n' "${response}"
+}
+
+discover_runner_sdk_model() {
+  local query
+  local response
+  query='query DiscoverRunner($companyId: ID!, $first: Int!) {
+    agentRunners(companyId: $companyId, first: $first) {
+      edges {
+        node {
+          id
+          status
+          agentSdks {
+            id
+            name
+            models {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+  }'
+
+  response="$(gql "${query}" "$(jq -cn --arg companyId "${COMPANY_ID}" '{companyId: $companyId, first: 100}')")"
+
+  if [[ -z "${RUNNER_ID}" ]]; then
+    RUNNER_ID="$(
+      jq -r '
+        .data.agentRunners.edges[]
+        | .node
+        | select((.status | ascii_downcase) == "connected")
+        | .id
+      ' <<<"${response}" | head -n1
+    )"
+  fi
+
+  [[ -n "${RUNNER_ID}" ]] || die "failed to resolve runner id; pass --runner-id explicitly"
+
+  if [[ -z "${SDK_ID}" ]]; then
+    SDK_ID="$(
+      jq -r --arg runnerId "${RUNNER_ID}" '
+        .data.agentRunners.edges[]
+        | .node
+        | select(.id == $runnerId)
+        | .agentSdks[]
+        | select((.name | ascii_downcase) == "codex")
+        | .id
+      ' <<<"${response}" | head -n1
+    )"
+  fi
+
+  [[ -n "${SDK_ID}" ]] || die "failed to resolve codex sdk id for runner ${RUNNER_ID}; pass --sdk-id explicitly"
+
+  if [[ -z "${MODEL_ID}" ]]; then
+    MODEL_ID="$(
+      jq -r --arg runnerId "${RUNNER_ID}" '
+        [
+          .data.agentRunners.edges[]
+          | .node
+          | select(.id == $runnerId)
+          | .agentSdks[]
+          | select((.name | ascii_downcase) == "codex")
+          | .models[]
+        ] as $models
+        | ($models | map(select(.name == "gpt-5.2-codex"))[0].id)
+          // ($models[0].id // "")
+      ' <<<"${response}"
+    )"
+  fi
+
+  [[ -n "${MODEL_ID}" ]] || die "failed to resolve model id for codex sdk; pass --model-id explicitly"
+}
+
+create_mcp_server() {
+  local name="$1"
+  local command="$2"
+  local args_json="$3"
+  local query
+  local response
+  query='mutation CreateMcpServer(
+    $companyId: ID!,
+    $name: String!,
+    $transportType: String,
+    $command: String,
+    $args: [String!],
+    $enabled: Boolean
+  ) {
+    createMcpServer(
+      companyId: $companyId,
+      name: $name,
+      transportType: $transportType,
+      command: $command,
+      args: $args,
+      enabled: $enabled
+    ) {
+      ok
+      error
+      mcpServer {
+        id
+        name
+      }
+    }
+  }'
+
+  response="$(
+    gql "${query}" "$(
+      jq -cn \
+        --arg companyId "${COMPANY_ID}" \
+        --arg name "${name}" \
+        --arg command "${command}" \
+        --argjson args "${args_json}" \
+        '{companyId: $companyId, name: $name, transportType: "stdio", command: $command, args: $args, enabled: true}'
+    )"
+  )"
+
+  jq -r '.data.createMcpServer.mcpServer.id // empty' <<<"${response}"
+}
+
+ensure_context7_mcp_server() {
+  local query
+  local response
+  local found_id
+  local found_name
+  query='query ListMcpServers($companyId: ID!) {
+    mcpServers(companyId: $companyId) {
+      id
+      name
+      transportType
+      command
+      args
+      enabled
+    }
+  }'
+
+  response="$(gql "${query}" "$(jq -cn --arg companyId "${COMPANY_ID}" '{companyId: $companyId}')")"
+
+  if [[ -n "${CONTEXT7_MCP_ID}" ]]; then
+    found_id="$(jq -r --arg id "${CONTEXT7_MCP_ID}" '.data.mcpServers[] | select(.id == $id) | .id' <<<"${response}" | head -n1)"
+    found_name="$(jq -r --arg id "${CONTEXT7_MCP_ID}" '.data.mcpServers[] | select(.id == $id) | .name' <<<"${response}" | head -n1)"
+    [[ -n "${found_id}" ]] || die "context7 mcp id not found in company: ${CONTEXT7_MCP_ID}"
+    printf '%s\t%s\n' "${found_id}" "${found_name}"
+    return 0
+  fi
+
+  found_id="$(
+    jq -r '
+      .data.mcpServers[]
+      | select(.enabled == true)
+      | select(.transportType == "stdio")
+      | select((.command // "") == "npx")
+      | select((.args // []) | index("@upstash/context7-mcp@latest"))
+      | .id
+    ' <<<"${response}" | head -n1
+  )"
+
+  found_name="$(
+    jq -r '
+      .data.mcpServers[]
+      | select(.enabled == true)
+      | select(.transportType == "stdio")
+      | select((.command // "") == "npx")
+      | select((.args // []) | index("@upstash/context7-mcp@latest"))
+      | .name
+    ' <<<"${response}" | head -n1
+  )"
+
+  if [[ -n "${found_id}" ]]; then
+    printf '%s\t%s\n' "${found_id}" "${found_name}"
+    return 0
+  fi
+
+  local created_name="context7-stdio-e2e-$(date +%s)"
+  local created_id
+  created_id="$(
+    create_mcp_server \
+      "${created_name}" \
+      "npx" \
+      '["-y","@upstash/context7-mcp@latest","--transport","stdio"]'
+  )"
+  [[ -n "${created_id}" ]] || die "failed to create context7 stdio mcp server"
+  printf '%s\t%s\n' "${created_id}" "${created_name}"
+}
+
+create_agent() {
+  local name="$1"
+  local mcp_id="$2"
+  local query
+  local response
+  query='mutation CreateAgent(
+    $name: String!,
+    $companyId: ID!,
+    $agentRunnerId: ID!,
+    $agentRunnerSdkId: ID!,
+    $defaultModelId: ID!,
+    $mcpServerIds: [ID!]
+  ) {
+    createAgent(
+      name: $name,
+      companyId: $companyId,
+      agentRunnerId: $agentRunnerId,
+      agentRunnerSdkId: $agentRunnerSdkId,
+      defaultModelId: $defaultModelId,
+      mcpServerIds: $mcpServerIds
+    ) {
+      id
+      name
+      mcpServerIds
+    }
+  }'
+
+  response="$(
+    gql "${query}" "$(
+      jq -cn \
+        --arg name "${name}" \
+        --arg companyId "${COMPANY_ID}" \
+        --arg runnerId "${RUNNER_ID}" \
+        --arg sdkId "${SDK_ID}" \
+        --arg modelId "${MODEL_ID}" \
+        --arg mcpId "${mcp_id}" \
+        '{name: $name, companyId: $companyId, agentRunnerId: $runnerId, agentRunnerSdkId: $sdkId, defaultModelId: $modelId, mcpServerIds: [$mcpId]}'
+    )"
+  )"
+
+  jq -r '.data.createAgent.id // empty' <<<"${response}"
+}
+
+create_thread() {
+  local agent_id="$1"
+  local title="$2"
+  local query
+  local response
+  query='mutation CreateThread($companyId: ID!, $agentId: ID!, $title: String) {
+    createThread(companyId: $companyId, agentId: $agentId, title: $title) {
+      id
+    }
+  }'
+
+  response="$(
+    gql "${query}" "$(
+      jq -cn \
+        --arg companyId "${COMPANY_ID}" \
+        --arg agentId "${agent_id}" \
+        --arg title "${title}" \
+        '{companyId: $companyId, agentId: $agentId, title: $title}'
+    )"
+  )"
+
+  jq -r '.data.createThread.id // empty' <<<"${response}"
+}
+
+queue_message() {
+  local thread_id="$1"
+  local text="$2"
+  local query
+  local response
+  query='mutation QueueMessage($threadId: ID!, $text: String!, $allowSteer: Boolean!) {
+    queueUserMessage(threadId: $threadId, text: $text, allowSteer: $allowSteer) {
+      id
+    }
+  }'
+
+  response="$(
+    gql "${query}" "$(
+      jq -cn \
+        --arg threadId "${thread_id}" \
+        --arg text "${text}" \
+        '{threadId: $threadId, text: $text, allowSteer: true}'
+    )"
+  )"
+
+  jq -r '.data.queueUserMessage.id // empty' <<<"${response}"
+}
+
+get_latest_turn() {
+  local thread_id="$1"
+  local query
+  local response
+  query='query LatestTurn($threadId: ID!, $first: Int!) {
+    threadTurns(threadId: $threadId, first: $first) {
+      edges {
+        node {
+          id
+          status
+          sdkTurnId
+          startedAt
+          endedAt
+          items {
+            id
+            type
+            status
+            text
+          }
+        }
+      }
+    }
+  }'
+
+  response="$(gql "${query}" "$(jq -cn --arg threadId "${thread_id}" '{threadId: $threadId, first: 1}')")"
+  jq -c '.data.threadTurns.edges[0].node // {}' <<<"${response}"
+}
+
+wait_for_turn_completion() {
+  local thread_id="$1"
+  local deadline
+  local turn_json
+  local status
+  deadline="$(( $(date +%s) + TURN_TIMEOUT_SEC ))"
+
+  while [[ "$(date +%s)" -lt "${deadline}" ]]; do
+    turn_json="$(get_latest_turn "${thread_id}")"
+    status="$(jq -r '.status // ""' <<<"${turn_json}")"
+    if [[ "${status}" == "completed" || "${status}" == "failed" || "${status}" == "cancelled" || "${status}" == "interrupted" ]]; then
+      printf '%s\n' "${turn_json}"
+      return 0
+    fi
+    sleep "${POLL_INTERVAL_SEC}"
+  done
+
+  turn_json="$(get_latest_turn "${thread_id}")"
+  printf '%s\n' "${turn_json}" >&2
+  die "timeout waiting for turn completion on thread ${thread_id}"
+}
+
+wait_for_thread_workspace() {
+  local agent_id="$1"
+  local thread_id="$2"
+  local dir="${WORKSPACES_ROOT}/agent-${agent_id}/thread-${thread_id}"
+  local deadline
+  deadline="$(( $(date +%s) + 40 ))"
+
+  while [[ "$(date +%s)" -lt "${deadline}" ]]; do
+    if [[ -d "${dir}" ]]; then
+      printf '%s\n' "${dir}"
+      return 0
+    fi
+    sleep 1
+  done
+
+  die "thread workspace not found after timeout: ${dir}"
+}
+
+write_local_jsonl_mcp_server() {
+  local output_file="$1"
+  cat >"${output_file}" <<'EOF'
+#!/usr/bin/env node
+
+let pending = "";
+
+function send(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function handle(request) {
+  if (!request || request.jsonrpc !== "2.0") {
+    return;
+  }
+
+  const id = request.id;
+  const method = request.method;
+  const params = request.params || {};
+
+  if (method === "initialize") {
+    send({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        protocolVersion: params.protocolVersion || "2025-06-18",
+        capabilities: { tools: { listChanged: false } },
+        serverInfo: { name: "local-jsonl-e2e", version: "1.0.0" },
+      },
+    });
+    return;
+  }
+
+  if (method === "notifications/initialized") {
+    return;
+  }
+
+  if (method === "tools/list") {
+    send({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        tools: [
+          {
+            name: "local_echo",
+            description: "Echoes the provided text.",
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string" } },
+              required: ["text"],
+            },
+          },
+        ],
+      },
+    });
+    return;
+  }
+
+  if (method === "tools/call") {
+    const text = typeof params.arguments?.text === "string" ? params.arguments.text : "";
+    send({
+      jsonrpc: "2.0",
+      id,
+      result: {
+        content: [{ type: "text", text: `ECHO:${text}` }],
+        isError: false,
+      },
+    });
+    return;
+  }
+
+  if (id !== undefined) {
+    send({
+      jsonrpc: "2.0",
+      id,
+      error: { code: -32601, message: `Method not found: ${String(method || "")}` },
+    });
+  }
+}
+
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  pending += chunk;
+  while (true) {
+    const newline = pending.indexOf("\n");
+    if (newline === -1) {
+      return;
+    }
+    const line = pending.slice(0, newline).trim();
+    pending = pending.slice(newline + 1);
+    if (!line) {
+      continue;
+    }
+    try {
+      handle(JSON.parse(line));
+    } catch {
+      // Ignore malformed lines.
+    }
+  }
+});
+
+process.stdin.resume();
+EOF
+  chmod +x "${output_file}"
+}
+
+assert_json_true() {
+  local json="$1"
+  local jq_filter="$2"
+  local message="$3"
+  if ! jq -e "${jq_filter}" >/dev/null <<<"${json}"; then
+    printf '%s\n' "${json}" >&2
+    die "${message}"
+  fi
+}
+
+timestamp="$(date +%s)"
+
+log "discovering runner/sdk/model"
+discover_runner_sdk_model
+log "using runner=${RUNNER_ID} sdk=${SDK_ID} model=${MODEL_ID}"
+
+log "phase 1/2: local stdio MCP validation"
+local_mcp_name="local-jsonl-e2e-${timestamp}"
+local_mcp_id="$(create_mcp_server "${local_mcp_name}" "node" '["/workspace/local-mcp-e2e.js"]')"
+[[ -n "${local_mcp_id}" ]] || die "failed to create local mcp server"
+
+local_agent_id="$(create_agent "e2e-local-jsonl-${timestamp}" "${local_mcp_id}")"
+[[ -n "${local_agent_id}" ]] || die "failed to create local agent"
+
+local_thread_id="$(create_thread "${local_agent_id}" "e2e local jsonl ${timestamp}")"
+[[ -n "${local_thread_id}" ]] || die "failed to create local thread"
+
+local_workspace="$(wait_for_thread_workspace "${local_agent_id}" "${local_thread_id}")"
+write_local_jsonl_mcp_server "${local_workspace}/local-mcp-e2e.js"
+
+local_prompt="Use ${local_mcp_name}/local_echo with text=\"hello-jsonl\" and output exactly the tool result only."
+local_queue_id="$(queue_message "${local_thread_id}" "${local_prompt}")"
+[[ -n "${local_queue_id}" ]] || die "failed to queue local validation message"
+
+local_turn_json="$(wait_for_turn_completion "${local_thread_id}")"
+assert_json_true "${local_turn_json}" '.status == "completed"' "local turn did not complete successfully"
+assert_json_true "${local_turn_json}" "
+  any(.items[]?; .type == \"mcp_tool_call\" and (.text | contains(\"MCP ${local_mcp_name}/local_echo\")))
+" "local mcp_tool_call item not found"
+assert_json_true "${local_turn_json}" '
+  any(.items[]?; .type == "agent_message" and (.text | contains("ECHO:hello-jsonl")))
+' "local agent response did not include ECHO output"
+
+log "phase 2/2: Context7 stdio MCP validation"
+context7_result="$(ensure_context7_mcp_server)"
+context7_mcp_id="${context7_result%%$'\t'*}"
+context7_mcp_name="${context7_result#*$'\t'}"
+[[ -n "${context7_mcp_id}" ]] || die "failed to resolve context7 mcp id"
+[[ -n "${context7_mcp_name}" ]] || die "failed to resolve context7 mcp name"
+
+context7_agent_id="$(create_agent "e2e-context7-stdio-${timestamp}" "${context7_mcp_id}")"
+[[ -n "${context7_agent_id}" ]] || die "failed to create context7 agent"
+
+context7_thread_id="$(create_thread "${context7_agent_id}" "e2e context7 stdio ${timestamp}")"
+[[ -n "${context7_thread_id}" ]] || die "failed to create context7 thread"
+
+context7_prompt='Use the Context7 MCP tools. First resolve library id for "react" then fetch docs for useEffect hooks. Summarize in 2 bullets and include the library id you used.'
+context7_queue_id="$(queue_message "${context7_thread_id}" "${context7_prompt}")"
+[[ -n "${context7_queue_id}" ]] || die "failed to queue context7 validation message"
+
+context7_turn_json="$(wait_for_turn_completion "${context7_thread_id}")"
+assert_json_true "${context7_turn_json}" '.status == "completed"' "context7 turn did not complete successfully"
+assert_json_true "${context7_turn_json}" "
+  any(.items[]?; .type == \"mcp_tool_call\" and (.text | contains(\"MCP ${context7_mcp_name}/resolve-library-id\")))
+" "context7 resolve-library-id mcp_tool_call not found"
+assert_json_true "${context7_turn_json}" "
+  any(.items[]?; .type == \"mcp_tool_call\" and (.text | contains(\"MCP ${context7_mcp_name}/query-docs\")))
+" "context7 query-docs mcp_tool_call not found"
+
+context7_agent_message="$(
+  jq -r '
+    [
+      .items[]?
+      | select(.type == "agent_message")
+      | .text
+    ][0] // ""
+  ' <<<"${context7_turn_json}"
+)"
+
+jq -n \
+  --arg apiUrl "${API_URL}" \
+  --arg companyId "${COMPANY_ID}" \
+  --arg runnerId "${RUNNER_ID}" \
+  --arg sdkId "${SDK_ID}" \
+  --arg modelId "${MODEL_ID}" \
+  --arg localMcpId "${local_mcp_id}" \
+  --arg localMcpName "${local_mcp_name}" \
+  --arg localAgentId "${local_agent_id}" \
+  --arg localThreadId "${local_thread_id}" \
+  --arg localQueuedMessageId "${local_queue_id}" \
+  --arg context7McpId "${context7_mcp_id}" \
+  --arg context7McpName "${context7_mcp_name}" \
+  --arg context7AgentId "${context7_agent_id}" \
+  --arg context7ThreadId "${context7_thread_id}" \
+  --arg context7QueuedMessageId "${context7_queue_id}" \
+  --arg context7AgentMessage "${context7_agent_message}" \
+  '{
+    ok: true,
+    apiUrl: $apiUrl,
+    companyId: $companyId,
+    runner: {
+      id: $runnerId,
+      sdkId: $sdkId,
+      modelId: $modelId
+    },
+    localValidation: {
+      mcpServer: { id: $localMcpId, name: $localMcpName },
+      agentId: $localAgentId,
+      threadId: $localThreadId,
+      queuedMessageId: $localQueuedMessageId
+    },
+    context7Validation: {
+      mcpServer: { id: $context7McpId, name: $context7McpName },
+      agentId: $context7AgentId,
+      threadId: $context7ThreadId,
+      queuedMessageId: $context7QueuedMessageId,
+      agentMessage: $context7AgentMessage
+    }
+  }'

@@ -14,6 +14,7 @@ export class RuntimeContainerAppServerTransport implements AppServerTransport {
   constructor(
     private readonly runtimeContainerName: string,
     private readonly appServerCommand = DEFAULT_APP_SERVER_COMMAND,
+    private readonly environment: Record<string, string> = {},
   ) {}
 
   async start(): Promise<void> {
@@ -21,9 +22,10 @@ export class RuntimeContainerAppServerTransport implements AppServerTransport {
       throw new Error("Runtime app-server transport is already running.");
     }
 
+    const environmentArgs = Object.entries(this.environment).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
     const child = spawn(
       "docker",
-      ["exec", "-i", this.runtimeContainerName, "bash", "-lc", this.appServerCommand],
+      ["exec", "-i", ...environmentArgs, this.runtimeContainerName, "bash", "-lc", this.appServerCommand],
       { stdio: ["pipe", "pipe", "pipe"] },
     );
 

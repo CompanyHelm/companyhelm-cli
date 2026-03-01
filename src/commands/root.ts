@@ -89,6 +89,10 @@ const GITHUB_INSTALLATIONS_REFRESH_WINDOW_MS = 15 * 60_000;
 const WORKSPACE_INSTALLATIONS_DIRECTORY = ".companyhelm";
 const WORKSPACE_INSTALLATIONS_FILENAME = "installations.json";
 const THREAD_GIT_SKILLS_CONFIG_FILENAME = "thread-git-skills.json";
+const THREAD_MCP_CONFIG_FILENAME = "thread-mcp.json";
+const THREAD_MCP_BEARER_TOKEN_ENV_PREFIX = "COMPANYHELM_MCP_TOKEN_";
+const THREAD_MCP_AUTH_TYPE_BEARER_TOKEN = 2;
+const THREAD_MCP_STARTUP_TIMEOUT_SECONDS = 60;
 const YOLO_APPROVAL_POLICY: AskForApproval = "never";
 const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
@@ -96,6 +100,7 @@ const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
 interface ThreadAppServerSession {
   runtimeContainer: string;
   appServer: AppServerService;
+  appServerEnv: Record<string, string>;
   sdkThreadId: string | null;
   rolloutPath: string | null;
   started: boolean;
@@ -120,6 +125,28 @@ interface WorkspaceGithubInstallationsPayload {
   }>;
 }
 
+interface ThreadMcpHeaderConfig {
+  key: string;
+  value: string;
+}
+
+interface ThreadMcpServerConfig {
+  name: string;
+  transport: "stdio" | "streamable_http";
+  command?: string;
+  args: string[];
+  envVars: ThreadMcpHeaderConfig[];
+  url?: string;
+  authType: "none" | "bearer_token";
+  bearerToken?: string | null;
+  headers: ThreadMcpHeaderConfig[];
+}
+
+interface ThreadCodexMcpSetup {
+  configToml: string;
+  appServerEnv: Record<string, string>;
+}
+
 const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
 const threadRolloutPaths = new Map<string, string>();
 
@@ -132,6 +159,7 @@ function rememberThreadRolloutPath(threadId: string, rolloutPath: string | null 
 async function getOrCreateThreadAppServerSession(
   threadId: string,
   runtimeContainer: string,
+  appServerEnv: Record<string, string>,
   clientName: string,
   logger: Logger,
 ): Promise<ThreadAppServerSession> {
@@ -145,7 +173,7 @@ async function getOrCreateThreadAppServerSession(
   }
 
   const appServer = new AppServerService(
-    new RuntimeContainerAppServerTransport(runtimeContainer),
+    new RuntimeContainerAppServerTransport(runtimeContainer, undefined, appServerEnv),
     clientName,
     logger,
     () => ({
@@ -156,6 +184,7 @@ async function getOrCreateThreadAppServerSession(
   const newSession: ThreadAppServerSession = {
     runtimeContainer,
     appServer,
+    appServerEnv,
     sdkThreadId: null,
     rolloutPath: threadRolloutPaths.get(threadId) ?? null,
     started: false,
@@ -678,6 +707,340 @@ function normalizeThreadGitSkillPackagesForThreadConfig(
   }
 
   return normalizedPackages;
+}
+
+function normalizeThreadMcpHeaderEntries(
+  rawEntries: Array<{ key?: string; value?: string }> | undefined,
+  context: string,
+  logger: Logger,
+): ThreadMcpHeaderConfig[] {
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
+    return [];
+  }
+
+  const seenKeys = new Set<string>();
+  const normalizedEntries: ThreadMcpHeaderConfig[] = [];
+  for (const rawEntry of rawEntries) {
+    const key = normalizeNonEmptyString(rawEntry.key);
+    if (!key) {
+      logger.warn(`Skipping ${context} entry with empty key.`);
+      continue;
+    }
+
+    const dedupeKey = key.toLowerCase();
+    if (seenKeys.has(dedupeKey)) {
+      logger.warn(`Skipping duplicate ${context} key '${key}'.`);
+      continue;
+    }
+    seenKeys.add(dedupeKey);
+
+    normalizedEntries.push({
+      key,
+      value: typeof rawEntry.value === "string" ? rawEntry.value : "",
+    });
+  }
+
+  return normalizedEntries;
+}
+
+function normalizeThreadMcpServersForThreadConfig(
+  rawServers: CreateThreadRequest["mcpServers"] | undefined,
+  logger: Logger,
+): ThreadMcpServerConfig[] {
+  if (!Array.isArray(rawServers) || rawServers.length === 0) {
+    return [];
+  }
+
+  const nameAllocations = new Map<string, number>();
+  const normalizedServers: ThreadMcpServerConfig[] = [];
+
+  for (const [serverIndex, rawServer] of rawServers.entries()) {
+    const rawName = normalizeNonEmptyString(rawServer.name);
+    if (!rawName) {
+      logger.warn(`Skipping thread MCP server at index ${serverIndex}: name is required.`);
+      continue;
+    }
+
+    const normalizedNameKey = rawName.toLowerCase();
+    const allocation = nameAllocations.get(normalizedNameKey) ?? 0;
+    nameAllocations.set(normalizedNameKey, allocation + 1);
+    const resolvedName = allocation === 0 ? rawName : `${rawName}-${allocation + 1}`;
+    if (resolvedName !== rawName) {
+      logger.warn(`Renaming duplicate thread MCP server '${rawName}' to '${resolvedName}'.`);
+    }
+
+    if (rawServer.transportConfig.case === "stdio") {
+      const command = normalizeNonEmptyString(rawServer.transportConfig.value.command);
+      if (!command) {
+        logger.warn(`Skipping thread MCP stdio server '${resolvedName}': command is required.`);
+        continue;
+      }
+
+      const args = Array.isArray(rawServer.transportConfig.value.args)
+        ? rawServer.transportConfig.value.args.filter((arg): arg is string => typeof arg === "string")
+        : [];
+      const envVars = normalizeThreadMcpHeaderEntries(
+        rawServer.transportConfig.value.envVars,
+        `thread MCP stdio env var for '${resolvedName}'`,
+        logger,
+      );
+
+      normalizedServers.push({
+        name: resolvedName,
+        transport: "stdio",
+        command,
+        args,
+        envVars,
+        authType: "none",
+        headers: [],
+      });
+      continue;
+    }
+
+    if (rawServer.transportConfig.case !== "streamableHttp") {
+      logger.warn(`Skipping thread MCP server '${resolvedName}': transport is missing.`);
+      continue;
+    }
+
+    const url = normalizeNonEmptyString(rawServer.transportConfig.value.url);
+    if (!url) {
+      logger.warn(`Skipping thread MCP streamable_http server '${resolvedName}': url is required.`);
+      continue;
+    }
+
+    const authType = rawServer.transportConfig.value.authType === THREAD_MCP_AUTH_TYPE_BEARER_TOKEN
+      ? "bearer_token"
+      : "none";
+    const bearerToken = authType === "bearer_token"
+      ? normalizeNonEmptyString(rawServer.transportConfig.value.bearerToken)
+      : null;
+    if (authType === "bearer_token" && !bearerToken) {
+      logger.warn(`Skipping thread MCP streamable_http server '${resolvedName}': bearer token is required.`);
+      continue;
+    }
+
+    const headers = normalizeThreadMcpHeaderEntries(
+      rawServer.transportConfig.value.headers,
+      `thread MCP streamable_http header for '${resolvedName}'`,
+      logger,
+    );
+
+    normalizedServers.push({
+      name: resolvedName,
+      transport: "streamable_http",
+      args: [],
+      envVars: [],
+      url,
+      authType,
+      bearerToken,
+      headers,
+    });
+  }
+
+  return normalizedServers;
+}
+
+function resolveThreadMcpConfigPath(workspaceDirectory: string): string {
+  return join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY, THREAD_MCP_CONFIG_FILENAME);
+}
+
+function writeWorkspaceThreadMcpConfig(
+  workspaceDirectory: string,
+  mcpServers: ThreadMcpServerConfig[],
+  logger: Logger,
+): void {
+  const configPath = resolveThreadMcpConfigPath(workspaceDirectory);
+  const configDirectory = join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY);
+  const temporaryPath = `${configPath}.tmp`;
+
+  try {
+    mkdirSync(configDirectory, { recursive: true });
+    if (mcpServers.length === 0) {
+      rmSync(configPath, { force: true });
+      rmSync(temporaryPath, { force: true });
+      return;
+    }
+
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify({ servers: mcpServers }, null, 2)}\n`,
+      "utf8",
+    );
+    renameSync(temporaryPath, configPath);
+  } catch (error: unknown) {
+    logger.warn(`Failed writing thread MCP config for workspace '${workspaceDirectory}': ${toErrorMessage(error)}`);
+  }
+}
+
+function parseThreadMcpConfig(content: unknown): ThreadMcpServerConfig[] | null {
+  if (!isRecord(content) || !Array.isArray(content.servers)) {
+    return null;
+  }
+
+  const parsedServers: ThreadMcpServerConfig[] = [];
+  for (const rawServer of content.servers) {
+    if (!isRecord(rawServer)) {
+      return null;
+    }
+
+    const name = normalizeNonEmptyString(rawServer.name);
+    const transport = rawServer.transport;
+    const authType = rawServer.authType;
+    if (
+      !name ||
+      (transport !== "stdio" && transport !== "streamable_http") ||
+      (authType !== "none" && authType !== "bearer_token")
+    ) {
+      return null;
+    }
+
+    const args = Array.isArray(rawServer.args) && rawServer.args.every((arg) => typeof arg === "string")
+      ? rawServer.args as string[]
+      : [];
+    const envVars = Array.isArray(rawServer.envVars)
+      ? rawServer.envVars
+        .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+        .map((entry) => ({
+          key: normalizeNonEmptyString(entry.key) ?? "",
+          value: typeof entry.value === "string" ? entry.value : "",
+        }))
+        .filter((entry) => entry.key.length > 0)
+      : [];
+    const headers = Array.isArray(rawServer.headers)
+      ? rawServer.headers
+        .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+        .map((entry) => ({
+          key: normalizeNonEmptyString(entry.key) ?? "",
+          value: typeof entry.value === "string" ? entry.value : "",
+        }))
+        .filter((entry) => entry.key.length > 0)
+      : [];
+
+    if (transport === "stdio") {
+      const command = normalizeNonEmptyString(rawServer.command);
+      if (!command) {
+        return null;
+      }
+
+      parsedServers.push({
+        name,
+        transport,
+        command,
+        args,
+        envVars,
+        authType,
+        headers: [],
+      });
+      continue;
+    }
+
+    const url = normalizeNonEmptyString(rawServer.url);
+    const bearerToken = authType === "bearer_token"
+      ? normalizeNonEmptyString(rawServer.bearerToken)
+      : null;
+    if (!url) {
+      return null;
+    }
+    if (authType === "bearer_token" && !bearerToken) {
+      return null;
+    }
+
+    parsedServers.push({
+      name,
+      transport,
+      args: [],
+      envVars: [],
+      url,
+      authType,
+      bearerToken,
+      headers,
+    });
+  }
+
+  return parsedServers;
+}
+
+function readWorkspaceThreadMcpConfig(workspaceDirectory: string, logger: Logger): ThreadMcpServerConfig[] {
+  const configPath = resolveThreadMcpConfigPath(workspaceDirectory);
+  try {
+    const rawContent = readFileSync(configPath, "utf8");
+    const parsedContent = JSON.parse(rawContent) as unknown;
+    const parsedConfig = parseThreadMcpConfig(parsedContent);
+    if (!parsedConfig) {
+      logger.warn(`Thread MCP config has invalid shape at '${configPath}'.`);
+      return [];
+    }
+    return parsedConfig;
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      return [];
+    }
+    logger.warn(`Failed reading thread MCP config at '${configPath}': ${toErrorMessage(error)}`);
+    return [];
+  }
+}
+
+function escapeTomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
+function formatTomlKey(value: string): string {
+  return /^[A-Za-z0-9_-]+$/.test(value) ? value : escapeTomlString(value);
+}
+
+function buildThreadMcpBearerTokenEnvVarName(serverName: string, serverIndex: number): string {
+  const normalized = serverName
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "_")
+    .replace(/^_+/, "")
+    .replace(/_+$/, "");
+  const suffix = normalized.length > 0 ? normalized : `SERVER_${serverIndex + 1}`;
+  return `${THREAD_MCP_BEARER_TOKEN_ENV_PREFIX}${suffix}`;
+}
+
+function buildThreadCodexMcpSetup(mcpServers: ThreadMcpServerConfig[]): ThreadCodexMcpSetup {
+  const lines = [
+    "# Generated by CompanyHelm. Thread-scoped MCP server configuration for Codex.",
+  ];
+  const appServerEnv: Record<string, string> = {};
+
+  for (const [serverIndex, server] of mcpServers.entries()) {
+    const serverTableName = escapeTomlString(server.name);
+    lines.push("", `[mcp_servers.${serverTableName}]`);
+    lines.push(`startup_timeout_sec = ${THREAD_MCP_STARTUP_TIMEOUT_SECONDS}`);
+
+    if (server.transport === "stdio") {
+      lines.push(`command = ${escapeTomlString(server.command ?? "")}`);
+      if (server.args.length > 0) {
+        lines.push(`args = [${server.args.map((arg) => escapeTomlString(arg)).join(", ")}]`);
+      }
+      if (server.envVars.length > 0) {
+        lines.push("", `[mcp_servers.${serverTableName}.env]`);
+        for (const envVar of server.envVars) {
+          lines.push(`${formatTomlKey(envVar.key)} = ${escapeTomlString(envVar.value)}`);
+        }
+      }
+      continue;
+    }
+
+    lines.push(`url = ${escapeTomlString(server.url ?? "")}`);
+    if (server.authType === "bearer_token" && server.bearerToken) {
+      const envVarName = buildThreadMcpBearerTokenEnvVarName(server.name, serverIndex);
+      lines.push(`bearer_token_env_var = ${escapeTomlString(envVarName)}`);
+      appServerEnv[envVarName] = server.bearerToken;
+    }
+    if (server.headers.length > 0) {
+      const renderedHeaders = server.headers
+        .map((header) => `${formatTomlKey(header.key)} = ${escapeTomlString(header.value)}`)
+        .join(", ");
+      lines.push(`http_headers = { ${renderedHeaders} }`);
+    }
+  }
+
+  return {
+    configToml: `${lines.join("\n").trimEnd()}\n`,
+    appServerEnv,
+  };
 }
 
 function resolveThreadGitSkillsConfigPath(workspaceDirectory: string): string {
@@ -1418,8 +1781,9 @@ async function handleCreateThreadRequest(
     request.additionalModelInstructions,
   );
   const threadGitSkillPackages = normalizeThreadGitSkillPackagesForThreadConfig(request.gitSkillPackages, logger);
+  const threadMcpServers = normalizeThreadMcpServersForThreadConfig(request.mcpServers, logger);
   logger.debug(
-    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}').`,
+    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
   );
 
   let authMode: ThreadAuthMode;
@@ -1463,6 +1827,7 @@ async function handleCreateThreadRequest(
   mkdirSync(threadDirectory, { recursive: true });
   ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
   writeWorkspaceThreadGitSkillsConfig(threadDirectory, threadGitSkillPackages, logger);
+  writeWorkspaceThreadMcpConfig(threadDirectory, threadMcpServers, logger);
   await syncGithubInstallationsForWorkspaces(
     apiClient,
     apiCallOptions,
@@ -1784,6 +2149,7 @@ async function handleInterruptTurnRequest(
   const appServerSession = await getOrCreateThreadAppServerSession(
     request.threadId,
     threadState.runtimeContainer,
+    {},
     cfg.codex.app_server_client_name,
     logger,
   );
@@ -1930,9 +2296,13 @@ async function executeCreateUserMessageRequest(
   logger: Logger,
 ): Promise<void> {
   const containerService = new ThreadContainerService();
+  const threadMcpSetup = buildThreadCodexMcpSetup(
+    readWorkspaceThreadMcpConfig(threadState.workspace, logger),
+  );
   const appServerSession = await getOrCreateThreadAppServerSession(
     request.threadId,
     threadState.runtimeContainer,
+    threadMcpSetup.appServerEnv,
     cfg.codex.app_server_client_name,
     logger,
   );
@@ -1959,6 +2329,18 @@ async function executeCreateUserMessageRequest(
       },
     });
     await ensureThreadGitSkillsInRuntime(cfg, threadState, containerService, logger);
+    if (!appServerSession.started) {
+      await containerService.ensureRuntimeContainerCodexConfig(
+        threadState.runtimeContainer,
+        {
+          uid: threadState.uid,
+          gid: threadState.gid,
+          agentUser: cfg.agent_user,
+          agentHomeDirectory: threadState.homeDirectory,
+        },
+        threadMcpSetup.configToml,
+      );
+    }
 
     await ensureThreadAppServerSessionStarted(appServerSession);
 
