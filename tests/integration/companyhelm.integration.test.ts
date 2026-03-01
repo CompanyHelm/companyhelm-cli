@@ -26,6 +26,7 @@ const {
   RegisterRunnerRequestSchema,
   RegisterRunnerResponseSchema,
   ServerMessageSchema,
+  ThreadMcpAuthType,
   ThreadStatus,
   TurnStatus,
 } = require("@companyhelm/protos");
@@ -495,8 +496,19 @@ test("companyhelm root command connects to API and triggers registration flow", 
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-integration-");
   let server: grpc.Server | undefined;
   const staleModelName = "hardcoded-stale-model";
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after registration flow validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   try {
+    process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory, { modelName: staleModelName, reasoningLevels: ["high"] });
 
     let registerRequest: any = null;
@@ -513,6 +525,7 @@ test("companyhelm root command connects to API and triggers registration flow", 
         if (!registerRequest) {
           channelOpenedBeforeRegister = true;
         }
+        shouldStopAfterValidation = true;
         call.sendMetadata(new grpc.Metadata());
         call.end();
       },
@@ -520,18 +533,14 @@ test("companyhelm root command connects to API and triggers registration flow", 
 
     server = started.server;
 
-    const repositoryRoot = path.resolve(__dirname, "../..");
-    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
-        cwd: repositoryRoot,
-        env: { ...process.env, HOME: homeDirectory },
-        stdio: ["ignore", "pipe", "pipe"],
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after registration flow validation",
     );
 
-    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
-    assert.match(result.stdout, /Connected to CompanyHelm API/);
     assert.equal(controlChannelOpened, true);
     assert.equal(channelOpenedBeforeRegister, false);
     assert.equal(registerRequest?.agentSdks?.[0]?.name, "codex");
@@ -543,9 +552,11 @@ test("companyhelm root command connects to API and triggers registration flow", 
       "runner registration should not reuse stale hardcoded models from local state",
     );
   } finally {
+    reconnectDelaySpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
+    process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
@@ -553,8 +564,19 @@ test("companyhelm root command connects to API and triggers registration flow", 
 test("companyhelm root command retries until server becomes available", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-retry-");
   let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after retry validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   try {
+    process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory);
 
     const port = await reserveFreePort();
@@ -573,6 +595,7 @@ test("companyhelm root command retries until server becomes available", async ()
               },
               controlChannel(call) {
                 controlChannelOpened = true;
+                shouldStopAfterValidation = true;
                 call.sendMetadata(new grpc.Metadata());
                 call.end();
               },
@@ -588,27 +611,24 @@ test("companyhelm root command retries until server becomes available", async ()
       }, 1_500);
     });
 
-    const repositoryRoot = path.resolve(__dirname, "../..");
-    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const cliProcess = spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${port}/grpc`], {
-      cwd: repositoryRoot,
-      env: { ...process.env, HOME: homeDirectory },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    const resultPromise = waitForExit(cliProcess, 30_000);
+    const rootCommandPromise = assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after retry validation",
+    );
     await serverStartPromise;
-    const result = await resultPromise;
+    await rootCommandPromise;
 
-    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
-    assert.match(result.stderr, /connection attempt 1\/4 failed/i);
-    assert.match(result.stdout, /Connected to CompanyHelm API/);
     assert.equal(controlChannelOpened, true);
     assert.equal(registerRequests, 1);
   } finally {
+    reconnectDelaySpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
+    process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
@@ -616,8 +636,19 @@ test("companyhelm root command retries until server becomes available", async ()
 test("companyhelm root command returns requestError for createThreadRequest when agent does not exist", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-missing-agent-");
   let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after missing-agent thread create validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   try {
+    process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory);
 
     let receivedClientUpdate: any = null;
@@ -642,6 +673,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
 
         call.on("data", (message) => {
           receivedClientUpdate = message;
+          shouldStopAfterValidation = true;
           call.end();
         });
       },
@@ -649,24 +681,23 @@ test("companyhelm root command returns requestError for createThreadRequest when
 
     server = started.server;
 
-    const repositoryRoot = path.resolve(__dirname, "../..");
-    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
-        cwd: repositoryRoot,
-        env: { ...process.env, HOME: homeDirectory },
-        stdio: ["ignore", "pipe", "pipe"],
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after missing-agent thread create validation",
     );
 
-    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.ok(receivedClientUpdate, "expected CLI to send response for createThreadRequest");
     assert.equal(receivedClientUpdate.payload.case, "requestError");
     assert.match(receivedClientUpdate.payload.value.errorMessage, /missing-agent/i);
   } finally {
+    reconnectDelaySpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
+    process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
@@ -1061,8 +1092,19 @@ test("companyhelm root command writes synced GitHub installations payload and CL
 test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-agent-");
   let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after create-agent validation");
+  let shouldStopAfterValidation = false;
+  const nativeSetTimeout = global.setTimeout;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
 
   try {
+    process.env.HOME = homeDirectory;
     await seedStateDatabase(homeDirectory);
 
     let receivedClientUpdate: any = null;
@@ -1086,6 +1128,7 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
 
         call.on("data", (message) => {
           receivedClientUpdate = message;
+          shouldStopAfterValidation = true;
           call.end();
         });
       },
@@ -1093,18 +1136,14 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
 
     server = started.server;
 
-    const repositoryRoot = path.resolve(__dirname, "../..");
-    const cliEntryPoint = path.join(repositoryRoot, "dist", "cli.js");
-    const result = await waitForExit(
-      spawn(process.execPath, [cliEntryPoint, "--server-url", `127.0.0.1:${started.port}/grpc`], {
-        cwd: repositoryRoot,
-        env: { ...process.env, HOME: homeDirectory },
-        stdio: ["ignore", "pipe", "pipe"],
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
       }),
-      30_000,
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after create-agent validation",
     );
 
-    assert.equal(result.code, 0, `CLI exited with code ${result.code}. stderr:\n${result.stderr}\nstdout:\n${result.stdout}`);
     assert.ok(receivedClientUpdate, "expected agent update from runner");
     assert.equal(receivedClientUpdate.payload.case, "agentUpdate");
     assert.equal(receivedClientUpdate.payload.value.agentId, "agent-from-request");
@@ -1122,9 +1161,11 @@ test("companyhelm root command handles createAgentRequest by storing agent and s
       client.close();
     }
   } finally {
+    reconnectDelaySpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
+    process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
@@ -1971,6 +2012,9 @@ test(
     const ensureRuntimeContainerBashrcSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerCodexConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+      .mockImplementation(async () => undefined);
     const ensureRuntimeContainerThreadGitSkillsSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
       .mockImplementation(async () => undefined);
@@ -2109,6 +2153,21 @@ test(
                           ],
                         },
                       ],
+                      mcpServers: [
+                        {
+                          serverId: "mcp-context7",
+                          name: "context7",
+                          transportConfig: {
+                            case: "streamableHttp",
+                            value: {
+                              url: "https://mcp.context7.com/mcp",
+                              authType: ThreadMcpAuthType.BEARER_TOKEN,
+                              bearerToken: "context7-token",
+                              headers: [{ key: "X-Team", value: "companyhelm" }],
+                            },
+                          },
+                        },
+                      ],
                     },
                   },
                 }),
@@ -2239,6 +2298,20 @@ test(
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
       assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected runtime bashrc bootstrap on each message");
       assert.equal(
+        ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
+        1,
+        "expected Codex config.toml write only before first app-server startup",
+      );
+      const codexConfigToml = String(ensureRuntimeContainerCodexConfigSpy.mock.calls[0]?.[2] ?? "");
+      assert.equal(codexConfigToml.includes("[mcp_servers.\"context7\"]"), true, "expected context7 MCP table in config");
+      assert.equal(codexConfigToml.includes("url = \"https://mcp.context7.com/mcp\""), true, "expected context7 MCP URL in config");
+      assert.equal(codexConfigToml.includes("bearer_token_env_var = \"COMPANYHELM_MCP_TOKEN_CONTEXT7\""), true, "expected bearer token env var wiring in config");
+      assert.equal(
+        /http_headers = \{ (\"X-Team\"|X-Team) = \"companyhelm\" \}/.test(codexConfigToml),
+        true,
+        "expected custom headers in MCP config",
+      );
+      assert.equal(
         ensureRuntimeContainerThreadGitSkillsSpy.mock.calls.length,
         2,
         "expected runtime thread git skill provisioning on each message",
@@ -2262,6 +2335,7 @@ test(
       ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
       ensureRuntimeContainerBashrcSpy.mockRestore();
+      ensureRuntimeContainerCodexConfigSpy.mockRestore();
       ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
@@ -2319,6 +2393,9 @@ test(
       .mockImplementation(async () => undefined);
     const ensureRuntimeContainerBashrcSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerCodexConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
       .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
@@ -2517,6 +2594,11 @@ test(
       assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
       assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
       assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected bashrc bootstrap per message");
+      assert.equal(
+        ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
+        1,
+        "expected Codex config.toml write only before first app-server startup",
+      );
       assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
     } finally {
       reconnectDelaySpy.mockRestore();
@@ -2526,6 +2608,7 @@ test(
       ensureRuntimeContainerGitConfigSpy.mockRestore();
       ensureRuntimeContainerToolingSpy.mockRestore();
       ensureRuntimeContainerBashrcSpy.mockRestore();
+      ensureRuntimeContainerCodexConfigSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();

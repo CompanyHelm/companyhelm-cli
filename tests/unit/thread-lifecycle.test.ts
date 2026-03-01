@@ -689,6 +689,45 @@ test("ThreadContainerService provisions runtime bashrc with nvm bootstrap in age
   assert.match(invocation.args[6], /nvm use --silent default/);
 });
 
+test("ThreadContainerService writes thread-scoped Codex config.toml into runtime home", async () => {
+  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
+    invocation = { command, args: [...args], options };
+    return {
+      pid: 1,
+      output: [null, "", ""],
+      stdout: "",
+      stderr: "",
+      status: 0,
+      signal: null,
+    } as any;
+  };
+
+  const service = new ThreadContainerService({} as any, runCommand as any);
+  await service.ensureRuntimeContainerCodexConfig(
+    "companyhelm-runtime-thread-codex-config",
+    {
+      uid: 501,
+      gid: 20,
+      agentUser: "agent",
+      agentHomeDirectory: "/home/agent",
+    },
+    "[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n",
+  );
+
+  assert.ok(invocation);
+  assert.equal(invocation.command, "docker");
+  assert.deepEqual(
+    invocation.args.slice(0, 6),
+    ["exec", "-u", "0", "companyhelm-runtime-thread-codex-config", "bash", "-lc"],
+  );
+  assert.equal(invocation.options.encoding, "utf8");
+  assert.match(invocation.args[6], /CONFIG_CONTENT='/);
+  assert.match(invocation.args[6], /printf '%s' "\$CONFIG_CONTENT" > "\$AGENT_HOME\/\.codex\/config\.toml"/);
+  assert.match(invocation.args[6], /chown "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME\/\.codex\/config\.toml"/);
+  assert.match(invocation.args[6], /mcp_servers\.context7/);
+});
+
 test("ThreadContainerService validates playwright chromium availability in runtime tooling bootstrap", async () => {
   let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
   const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
@@ -862,6 +901,34 @@ test("ThreadContainerService surfaces runtime identity bootstrap failures", asyn
         agentHomeDirectory: "/home/agent",
       }),
     /Failed to provision runtime user 'agent' in container 'companyhelm-runtime-thread-def' \(exit 7\): permission denied/,
+  );
+});
+
+test("ThreadContainerService surfaces runtime Codex config write failures", async () => {
+  const runCommand = () =>
+    ({
+      pid: 1,
+      output: [null, "", "write failed"],
+      stdout: "",
+      stderr: "write failed",
+      status: 11,
+      signal: null,
+    }) as any;
+  const service = new ThreadContainerService({} as any, runCommand as any);
+
+  await assert.rejects(
+    () =>
+      service.ensureRuntimeContainerCodexConfig(
+        "companyhelm-runtime-thread-codex-config-error",
+        {
+          uid: 501,
+          gid: 20,
+          agentUser: "agent",
+          agentHomeDirectory: "/home/agent",
+        },
+        "[mcp_servers.context7]\nurl = \"https://mcp.context7.com/mcp\"\n",
+      ),
+    /Failed to write runtime Codex config\.toml in container 'companyhelm-runtime-thread-codex-config-error' \(exit 11\): write failed/,
   );
 });
 

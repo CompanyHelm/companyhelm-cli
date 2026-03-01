@@ -761,6 +761,29 @@ export class ThreadContainerService {
     );
   }
 
+  async ensureRuntimeContainerCodexConfig(
+    name: string,
+    user: ThreadContainerUser,
+    configToml: string,
+  ): Promise<void> {
+    const script = [
+      "set -euo pipefail",
+      `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
+      `AGENT_UID=${shellQuote(String(user.uid))}`,
+      `AGENT_GID=${shellQuote(String(user.gid))}`,
+      `CONFIG_CONTENT=${shellQuote(configToml)}`,
+      "",
+      'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME/.codex"',
+      'printf \'%s\' "$CONFIG_CONTENT" > "$AGENT_HOME/.codex/config.toml"',
+      'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME/.codex/config.toml"',
+      'chmod 0644 "$AGENT_HOME/.codex/config.toml"',
+    ].join("\n");
+    this.runDockerExecScript(
+      ["exec", "-u", "0", name, "bash", "-lc", script],
+      `Failed to write runtime Codex config.toml in container '${name}'`,
+    );
+  }
+
   async ensureRuntimeContainerGitConfig(
     name: string,
     user: ThreadContainerUser,
