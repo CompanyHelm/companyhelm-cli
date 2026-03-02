@@ -44,6 +44,13 @@ import {
   type ThreadMessageExecutionState,
 } from "../service/thread_turn_state.js";
 import {
+  assignPendingUserMessageRequestIdForItem,
+  clearPendingUserMessageRequestIdsForTurn,
+  consumePendingUserMessageRequestIdForItem,
+  enqueuePendingUserMessageRequestIdForTurn,
+  removePendingUserMessageRequestIdForTurn,
+} from "../service/thread_user_message_request_store.js";
+import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
   resolveThreadDirectory,
@@ -149,116 +156,6 @@ interface ThreadCodexMcpSetup {
 
 const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
 const threadRolloutPaths = new Map<string, string>();
-const pendingUserMessageRequestIdsByTurnKey = new Map<string, string[]>();
-const userMessageRequestIdByTurnItemKey = new Map<string, string>();
-
-function buildTurnKey(threadId: string, sdkTurnId: string): string {
-  return `${threadId}:${sdkTurnId}`;
-}
-
-function buildTurnItemKey(threadId: string, sdkTurnId: string, sdkItemId: string): string {
-  return `${threadId}:${sdkTurnId}:${sdkItemId}`;
-}
-
-function enqueuePendingUserMessageRequestIdForTurn(
-  threadId: string,
-  sdkTurnId: string,
-  requestId?: string,
-): void {
-  if (!requestId) {
-    return;
-  }
-  const turnKey = buildTurnKey(threadId, sdkTurnId);
-  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey) ?? [];
-  pendingRequestIds.push(requestId);
-  pendingUserMessageRequestIdsByTurnKey.set(turnKey, pendingRequestIds);
-}
-
-function removePendingUserMessageRequestIdForTurn(
-  threadId: string,
-  sdkTurnId: string,
-  requestId?: string,
-): void {
-  if (!requestId) {
-    return;
-  }
-  const turnKey = buildTurnKey(threadId, sdkTurnId);
-  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
-  if (!pendingRequestIds || pendingRequestIds.length === 0) {
-    return;
-  }
-  const requestIndex = pendingRequestIds.indexOf(requestId);
-  if (requestIndex < 0) {
-    return;
-  }
-  pendingRequestIds.splice(requestIndex, 1);
-  if (pendingRequestIds.length === 0) {
-    pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
-  }
-}
-
-function assignPendingUserMessageRequestIdForItem(
-  threadId: string,
-  sdkTurnId: string,
-  sdkItemId: string,
-): string | undefined {
-  const turnItemKey = buildTurnItemKey(threadId, sdkTurnId, sdkItemId);
-  const existingRequestId = userMessageRequestIdByTurnItemKey.get(turnItemKey);
-  if (existingRequestId) {
-    return existingRequestId;
-  }
-
-  const turnKey = buildTurnKey(threadId, sdkTurnId);
-  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
-  const nextPendingRequestId = pendingRequestIds?.[0];
-  if (!nextPendingRequestId) {
-    return undefined;
-  }
-
-  userMessageRequestIdByTurnItemKey.set(turnItemKey, nextPendingRequestId);
-  return nextPendingRequestId;
-}
-
-function consumePendingUserMessageRequestIdForItem(
-  threadId: string,
-  sdkTurnId: string,
-  sdkItemId: string,
-): string | undefined {
-  const turnKey = buildTurnKey(threadId, sdkTurnId);
-  const turnItemKey = buildTurnItemKey(threadId, sdkTurnId, sdkItemId);
-  const requestIdByItem = userMessageRequestIdByTurnItemKey.get(turnItemKey);
-  if (requestIdByItem) {
-    userMessageRequestIdByTurnItemKey.delete(turnItemKey);
-    removePendingUserMessageRequestIdForTurn(threadId, sdkTurnId, requestIdByItem);
-    return requestIdByItem;
-  }
-
-  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
-  if (!pendingRequestIds || pendingRequestIds.length === 0) {
-    return undefined;
-  }
-  const nextPendingRequestId = pendingRequestIds.shift();
-  if (!nextPendingRequestId) {
-    return undefined;
-  }
-  if (pendingRequestIds.length === 0) {
-    pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
-  }
-  return nextPendingRequestId;
-}
-
-function clearPendingUserMessageRequestIdsForTurn(threadId: string, sdkTurnId: string): void {
-  const turnKey = buildTurnKey(threadId, sdkTurnId);
-  pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
-
-  const turnItemPrefix = `${turnKey}:`;
-  for (const turnItemKey of userMessageRequestIdByTurnItemKey.keys()) {
-    if (!turnItemKey.startsWith(turnItemPrefix)) {
-      continue;
-    }
-    userMessageRequestIdByTurnItemKey.delete(turnItemKey);
-  }
-}
 
 function rememberThreadRolloutPath(threadId: string, rolloutPath: string | null | undefined): void {
   if (rolloutPath && rolloutPath.trim().length > 0) {
@@ -2321,6 +2218,7 @@ async function updateThreadTurnState(
 }
 
 async function waitForThreadTurnCompletion(
+  stateDbPath: string,
   appServer: AppServerService,
   commandChannel: ClientMessageSink,
   threadId: string,
@@ -2347,7 +2245,12 @@ async function waitForThreadTurnCompletion(
           notification.params.turnId === sdkTurnId
         ) {
           const itemRequestId = notification.params.item.type === "userMessage"
-            ? (assignPendingUserMessageRequestIdForItem(threadId, sdkTurnId, notification.params.item.id) ?? requestId)
+            ? (await assignPendingUserMessageRequestIdForItem(
+              stateDbPath,
+              threadId,
+              sdkTurnId,
+              notification.params.item.id,
+            ) ?? requestId)
             : requestId;
           await sendItemExecutionUpdate(
             commandChannel,
@@ -2366,7 +2269,12 @@ async function waitForThreadTurnCompletion(
           notification.params.turnId === sdkTurnId
         ) {
           const itemRequestId = notification.params.item.type === "userMessage"
-            ? (consumePendingUserMessageRequestIdForItem(threadId, sdkTurnId, notification.params.item.id) ?? requestId)
+            ? (await consumePendingUserMessageRequestIdForItem(
+              stateDbPath,
+              threadId,
+              sdkTurnId,
+              notification.params.item.id,
+            ) ?? requestId)
             : requestId;
           await sendItemExecutionUpdate(
             commandChannel,
@@ -2401,7 +2309,7 @@ async function waitForThreadTurnCompletion(
 
     return terminalStatus;
   } finally {
-    clearPendingUserMessageRequestIdsForTurn(threadId, sdkTurnId);
+    await clearPendingUserMessageRequestIdsForTurn(stateDbPath, threadId, sdkTurnId);
   }
 }
 
@@ -2566,7 +2474,7 @@ async function executeCreateUserMessageRequest(
     }
 
     turnAccepted = true;
-    enqueuePendingUserMessageRequestIdForTurn(request.threadId, sdkTurnId, requestId);
+    await enqueuePendingUserMessageRequestIdForTurn(cfg.state_db_path, request.threadId, sdkTurnId, requestId);
     enqueuedRequestTurnId = requestId ? sdkTurnId : null;
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       sdkThreadId,
@@ -2581,6 +2489,7 @@ async function executeCreateUserMessageRequest(
     }
 
     const terminalStatus = await waitForThreadTurnCompletion(
+      cfg.state_db_path,
       appServer,
       commandChannel,
       request.threadId,
@@ -2611,7 +2520,12 @@ async function executeCreateUserMessageRequest(
     }
   } catch (error: unknown) {
     if (enqueuedRequestTurnId && requestId) {
-      removePendingUserMessageRequestIdForTurn(request.threadId, enqueuedRequestTurnId, requestId);
+      await removePendingUserMessageRequestIdForTurn(
+        cfg.state_db_path,
+        request.threadId,
+        enqueuedRequestTurnId,
+        requestId,
+      );
     }
     if (startedFromIdle && !turnAccepted) {
       await updateThreadTurnState(cfg, request.agentId, request.threadId, {

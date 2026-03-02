@@ -53,3 +53,15 @@ export const threads = sqliteTable("threads", {
   // gid of the user within the container
   gid: integer("gid").notNull(),
 });
+
+// -- thread_user_message_request_store ----------------------------------------
+
+export const threadUserMessageRequestStore = sqliteTable("thread_user_message_request_store", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  threadId: text("thread_id")
+    .notNull()
+    .references(() => threads.id, { onDelete: "cascade" }),
+  sdkTurnId: text("sdk_turn_id").notNull(),
+  requestId: text("request_id").notNull(),
+  sdkItemId: text("sdk_item_id"),
+});
