@@ -149,6 +149,116 @@ interface ThreadCodexMcpSetup {
 
 const threadAppServerSessions = new Map<string, ThreadAppServerSession>();
 const threadRolloutPaths = new Map<string, string>();
+const pendingUserMessageRequestIdsByTurnKey = new Map<string, string[]>();
+const userMessageRequestIdByTurnItemKey = new Map<string, string>();
+
+function buildTurnKey(threadId: string, sdkTurnId: string): string {
+  return `${threadId}:${sdkTurnId}`;
+}
+
+function buildTurnItemKey(threadId: string, sdkTurnId: string, sdkItemId: string): string {
+  return `${threadId}:${sdkTurnId}:${sdkItemId}`;
+}
+
+function enqueuePendingUserMessageRequestIdForTurn(
+  threadId: string,
+  sdkTurnId: string,
+  requestId?: string,
+): void {
+  if (!requestId) {
+    return;
+  }
+  const turnKey = buildTurnKey(threadId, sdkTurnId);
+  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey) ?? [];
+  pendingRequestIds.push(requestId);
+  pendingUserMessageRequestIdsByTurnKey.set(turnKey, pendingRequestIds);
+}
+
+function removePendingUserMessageRequestIdForTurn(
+  threadId: string,
+  sdkTurnId: string,
+  requestId?: string,
+): void {
+  if (!requestId) {
+    return;
+  }
+  const turnKey = buildTurnKey(threadId, sdkTurnId);
+  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
+  if (!pendingRequestIds || pendingRequestIds.length === 0) {
+    return;
+  }
+  const requestIndex = pendingRequestIds.indexOf(requestId);
+  if (requestIndex < 0) {
+    return;
+  }
+  pendingRequestIds.splice(requestIndex, 1);
+  if (pendingRequestIds.length === 0) {
+    pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
+  }
+}
+
+function assignPendingUserMessageRequestIdForItem(
+  threadId: string,
+  sdkTurnId: string,
+  sdkItemId: string,
+): string | undefined {
+  const turnItemKey = buildTurnItemKey(threadId, sdkTurnId, sdkItemId);
+  const existingRequestId = userMessageRequestIdByTurnItemKey.get(turnItemKey);
+  if (existingRequestId) {
+    return existingRequestId;
+  }
+
+  const turnKey = buildTurnKey(threadId, sdkTurnId);
+  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
+  const nextPendingRequestId = pendingRequestIds?.[0];
+  if (!nextPendingRequestId) {
+    return undefined;
+  }
+
+  userMessageRequestIdByTurnItemKey.set(turnItemKey, nextPendingRequestId);
+  return nextPendingRequestId;
+}
+
+function consumePendingUserMessageRequestIdForItem(
+  threadId: string,
+  sdkTurnId: string,
+  sdkItemId: string,
+): string | undefined {
+  const turnKey = buildTurnKey(threadId, sdkTurnId);
+  const turnItemKey = buildTurnItemKey(threadId, sdkTurnId, sdkItemId);
+  const requestIdByItem = userMessageRequestIdByTurnItemKey.get(turnItemKey);
+  if (requestIdByItem) {
+    userMessageRequestIdByTurnItemKey.delete(turnItemKey);
+    removePendingUserMessageRequestIdForTurn(threadId, sdkTurnId, requestIdByItem);
+    return requestIdByItem;
+  }
+
+  const pendingRequestIds = pendingUserMessageRequestIdsByTurnKey.get(turnKey);
+  if (!pendingRequestIds || pendingRequestIds.length === 0) {
+    return undefined;
+  }
+  const nextPendingRequestId = pendingRequestIds.shift();
+  if (!nextPendingRequestId) {
+    return undefined;
+  }
+  if (pendingRequestIds.length === 0) {
+    pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
+  }
+  return nextPendingRequestId;
+}
+
+function clearPendingUserMessageRequestIdsForTurn(threadId: string, sdkTurnId: string): void {
+  const turnKey = buildTurnKey(threadId, sdkTurnId);
+  pendingUserMessageRequestIdsByTurnKey.delete(turnKey);
+
+  const turnItemPrefix = `${turnKey}:`;
+  for (const turnItemKey of userMessageRequestIdByTurnItemKey.keys()) {
+    if (!turnItemKey.startsWith(turnItemPrefix)) {
+      continue;
+    }
+    userMessageRequestIdByTurnItemKey.delete(turnItemKey);
+  }
+}
 
 function rememberThreadRolloutPath(threadId: string, rolloutPath: string | null | undefined): void {
   if (rolloutPath && rolloutPath.trim().length > 0) {
@@ -2220,69 +2330,79 @@ async function waitForThreadTurnCompletion(
   requestId?: string,
 ): Promise<"completed" | "interrupted" | "failed"> {
   let receivedThreadNameUpdate = false;
-  const terminalStatus = await appServer.waitForTurnCompletion(
-    sdkThreadId,
-    sdkTurnId,
-    async (notification: ServerNotification) => {
-      const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
-      if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
-        receivedThreadNameUpdate = true;
-        await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
-      }
+  try {
+    const terminalStatus = await appServer.waitForTurnCompletion(
+      sdkThreadId,
+      sdkTurnId,
+      async (notification: ServerNotification) => {
+        const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
+        if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
+          receivedThreadNameUpdate = true;
+          await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
+        }
 
-      if (
-        notification.method === "item/started" &&
-        notification.params.threadId === sdkThreadId &&
-        notification.params.turnId === sdkTurnId
-      ) {
-        await sendItemExecutionUpdate(
-          commandChannel,
-          threadId,
-          sdkTurnId,
-          notification.params.item.id,
-          ItemStatus.RUNNING,
-          notification.params.item,
-          requestId,
+        if (
+          notification.method === "item/started" &&
+          notification.params.threadId === sdkThreadId &&
+          notification.params.turnId === sdkTurnId
+        ) {
+          const itemRequestId = notification.params.item.type === "userMessage"
+            ? (assignPendingUserMessageRequestIdForItem(threadId, sdkTurnId, notification.params.item.id) ?? requestId)
+            : requestId;
+          await sendItemExecutionUpdate(
+            commandChannel,
+            threadId,
+            sdkTurnId,
+            notification.params.item.id,
+            ItemStatus.RUNNING,
+            notification.params.item,
+            itemRequestId,
+          );
+        }
+
+        if (
+          notification.method === "item/completed" &&
+          notification.params.threadId === sdkThreadId &&
+          notification.params.turnId === sdkTurnId
+        ) {
+          const itemRequestId = notification.params.item.type === "userMessage"
+            ? (consumePendingUserMessageRequestIdForItem(threadId, sdkTurnId, notification.params.item.id) ?? requestId)
+            : requestId;
+          await sendItemExecutionUpdate(
+            commandChannel,
+            threadId,
+            sdkTurnId,
+            notification.params.item.id,
+            ItemStatus.COMPLETED,
+            notification.params.item,
+            itemRequestId,
+          );
+        }
+      },
+      TURN_COMPLETION_TIMEOUT_MS,
+    );
+
+    if (!receivedThreadNameUpdate) {
+      try {
+        const threadReadResponse = await appServer.readThread({
+          threadId: sdkThreadId,
+          includeTurns: false,
+        });
+        const fallbackThreadName = normalizeNonEmptyString(threadReadResponse.thread.preview);
+        if (fallbackThreadName) {
+          await sendThreadNameUpdate(commandChannel, threadId, fallbackThreadName);
+        }
+      } catch (error: unknown) {
+        logger.debug(
+          `Failed to read SDK thread '${sdkThreadId}' for fallback thread title inference: ${toErrorMessage(error)}`,
         );
       }
-
-      if (
-        notification.method === "item/completed" &&
-        notification.params.threadId === sdkThreadId &&
-        notification.params.turnId === sdkTurnId
-      ) {
-        await sendItemExecutionUpdate(
-          commandChannel,
-          threadId,
-          sdkTurnId,
-          notification.params.item.id,
-          ItemStatus.COMPLETED,
-          notification.params.item,
-          requestId,
-        );
-      }
-    },
-    TURN_COMPLETION_TIMEOUT_MS,
-  );
-
-  if (!receivedThreadNameUpdate) {
-    try {
-      const threadReadResponse = await appServer.readThread({
-        threadId: sdkThreadId,
-        includeTurns: false,
-      });
-      const fallbackThreadName = normalizeNonEmptyString(threadReadResponse.thread.preview);
-      if (fallbackThreadName) {
-        await sendThreadNameUpdate(commandChannel, threadId, fallbackThreadName);
-      }
-    } catch (error: unknown) {
-      logger.debug(
-        `Failed to read SDK thread '${sdkThreadId}' for fallback thread title inference: ${toErrorMessage(error)}`,
-      );
     }
-  }
 
-  return terminalStatus;
+    return terminalStatus;
+  } finally {
+    clearPendingUserMessageRequestIdsForTurn(threadId, sdkTurnId);
+  }
 }
 
 async function executeCreateUserMessageRequest(
@@ -2313,6 +2433,7 @@ async function executeCreateUserMessageRequest(
   let turnAccepted = false;
   let keepRuntimeWarm = false;
   let shouldTrackTurnCompletion = trackTurnCompletion;
+  let enqueuedRequestTurnId: string | null = null;
 
   try {
     await ensureThreadRuntimeReady({
@@ -2445,6 +2566,8 @@ async function executeCreateUserMessageRequest(
     }
 
     turnAccepted = true;
+    enqueuePendingUserMessageRequestIdForTurn(request.threadId, sdkTurnId, requestId);
+    enqueuedRequestTurnId = requestId ? sdkTurnId : null;
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       sdkThreadId,
       currentSdkTurnId: sdkTurnId,
@@ -2487,6 +2610,9 @@ async function executeCreateUserMessageRequest(
       keepRuntimeWarm = true;
     }
   } catch (error: unknown) {
+    if (enqueuedRequestTurnId && requestId) {
+      removePendingUserMessageRequestIdForTurn(request.threadId, enqueuedRequestTurnId, requestId);
+    }
     if (startedFromIdle && !turnAccepted) {
       await updateThreadTurnState(cfg, request.agentId, request.threadId, {
         isCurrentTurnRunning: false,
