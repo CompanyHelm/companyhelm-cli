@@ -44,6 +44,13 @@ import {
   type ThreadMessageExecutionState,
 } from "../service/thread_turn_state.js";
 import {
+  assignPendingUserMessageRequestIdForItem,
+  clearPendingUserMessageRequestIdsForTurn,
+  consumePendingUserMessageRequestIdForItem,
+  enqueuePendingUserMessageRequestIdForTurn,
+  removePendingUserMessageRequestIdForTurn,
+} from "../service/thread_user_message_request_store.js";
+import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
   resolveThreadDirectory,
@@ -2211,6 +2218,7 @@ async function updateThreadTurnState(
 }
 
 async function waitForThreadTurnCompletion(
+  stateDbPath: string,
   appServer: AppServerService,
   commandChannel: ClientMessageSink,
   threadId: string,
@@ -2220,69 +2228,89 @@ async function waitForThreadTurnCompletion(
   requestId?: string,
 ): Promise<"completed" | "interrupted" | "failed"> {
   let receivedThreadNameUpdate = false;
-  const terminalStatus = await appServer.waitForTurnCompletion(
-    sdkThreadId,
-    sdkTurnId,
-    async (notification: ServerNotification) => {
-      const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
-      if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
-        receivedThreadNameUpdate = true;
-        await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
-      }
+  try {
+    const terminalStatus = await appServer.waitForTurnCompletion(
+      sdkThreadId,
+      sdkTurnId,
+      async (notification: ServerNotification) => {
+        const threadNameUpdate = extractThreadNameUpdateFromNotification(notification);
+        if (threadNameUpdate && threadNameUpdate.sdkThreadId === sdkThreadId) {
+          receivedThreadNameUpdate = true;
+          await sendThreadNameUpdate(commandChannel, threadId, threadNameUpdate.threadName);
+        }
 
-      if (
-        notification.method === "item/started" &&
-        notification.params.threadId === sdkThreadId &&
-        notification.params.turnId === sdkTurnId
-      ) {
-        await sendItemExecutionUpdate(
-          commandChannel,
-          threadId,
-          sdkTurnId,
-          notification.params.item.id,
-          ItemStatus.RUNNING,
-          notification.params.item,
-          requestId,
+        if (
+          notification.method === "item/started" &&
+          notification.params.threadId === sdkThreadId &&
+          notification.params.turnId === sdkTurnId
+        ) {
+          const itemRequestId = notification.params.item.type === "userMessage"
+            ? (await assignPendingUserMessageRequestIdForItem(
+              stateDbPath,
+              threadId,
+              sdkTurnId,
+              notification.params.item.id,
+            ) ?? requestId)
+            : requestId;
+          await sendItemExecutionUpdate(
+            commandChannel,
+            threadId,
+            sdkTurnId,
+            notification.params.item.id,
+            ItemStatus.RUNNING,
+            notification.params.item,
+            itemRequestId,
+          );
+        }
+
+        if (
+          notification.method === "item/completed" &&
+          notification.params.threadId === sdkThreadId &&
+          notification.params.turnId === sdkTurnId
+        ) {
+          const itemRequestId = notification.params.item.type === "userMessage"
+            ? (await consumePendingUserMessageRequestIdForItem(
+              stateDbPath,
+              threadId,
+              sdkTurnId,
+              notification.params.item.id,
+            ) ?? requestId)
+            : requestId;
+          await sendItemExecutionUpdate(
+            commandChannel,
+            threadId,
+            sdkTurnId,
+            notification.params.item.id,
+            ItemStatus.COMPLETED,
+            notification.params.item,
+            itemRequestId,
+          );
+        }
+      },
+      TURN_COMPLETION_TIMEOUT_MS,
+    );
+
+    if (!receivedThreadNameUpdate) {
+      try {
+        const threadReadResponse = await appServer.readThread({
+          threadId: sdkThreadId,
+          includeTurns: false,
+        });
+        const fallbackThreadName = normalizeNonEmptyString(threadReadResponse.thread.preview);
+        if (fallbackThreadName) {
+          await sendThreadNameUpdate(commandChannel, threadId, fallbackThreadName);
+        }
+      } catch (error: unknown) {
+        logger.debug(
+          `Failed to read SDK thread '${sdkThreadId}' for fallback thread title inference: ${toErrorMessage(error)}`,
         );
       }
-
-      if (
-        notification.method === "item/completed" &&
-        notification.params.threadId === sdkThreadId &&
-        notification.params.turnId === sdkTurnId
-      ) {
-        await sendItemExecutionUpdate(
-          commandChannel,
-          threadId,
-          sdkTurnId,
-          notification.params.item.id,
-          ItemStatus.COMPLETED,
-          notification.params.item,
-          requestId,
-        );
-      }
-    },
-    TURN_COMPLETION_TIMEOUT_MS,
-  );
-
-  if (!receivedThreadNameUpdate) {
-    try {
-      const threadReadResponse = await appServer.readThread({
-        threadId: sdkThreadId,
-        includeTurns: false,
-      });
-      const fallbackThreadName = normalizeNonEmptyString(threadReadResponse.thread.preview);
-      if (fallbackThreadName) {
-        await sendThreadNameUpdate(commandChannel, threadId, fallbackThreadName);
-      }
-    } catch (error: unknown) {
-      logger.debug(
-        `Failed to read SDK thread '${sdkThreadId}' for fallback thread title inference: ${toErrorMessage(error)}`,
-      );
     }
-  }
 
-  return terminalStatus;
+    return terminalStatus;
+  } finally {
+    await clearPendingUserMessageRequestIdsForTurn(stateDbPath, threadId, sdkTurnId);
+  }
 }
 
 async function executeCreateUserMessageRequest(
@@ -2313,6 +2341,7 @@ async function executeCreateUserMessageRequest(
   let turnAccepted = false;
   let keepRuntimeWarm = false;
   let shouldTrackTurnCompletion = trackTurnCompletion;
+  let enqueuedRequestTurnId: string | null = null;
 
   try {
     await ensureThreadRuntimeReady({
@@ -2445,6 +2474,8 @@ async function executeCreateUserMessageRequest(
     }
 
     turnAccepted = true;
+    await enqueuePendingUserMessageRequestIdForTurn(cfg.state_db_path, request.threadId, sdkTurnId, requestId);
+    enqueuedRequestTurnId = requestId ? sdkTurnId : null;
     await updateThreadTurnState(cfg, request.agentId, request.threadId, {
       sdkThreadId,
       currentSdkTurnId: sdkTurnId,
@@ -2458,6 +2489,7 @@ async function executeCreateUserMessageRequest(
     }
 
     const terminalStatus = await waitForThreadTurnCompletion(
+      cfg.state_db_path,
       appServer,
       commandChannel,
       request.threadId,
@@ -2487,6 +2519,14 @@ async function executeCreateUserMessageRequest(
       keepRuntimeWarm = true;
     }
   } catch (error: unknown) {
+    if (enqueuedRequestTurnId && requestId) {
+      await removePendingUserMessageRequestIdForTurn(
+        cfg.state_db_path,
+        request.threadId,
+        enqueuedRequestTurnId,
+        requestId,
+      );
+    }
     if (startedFromIdle && !turnAccepted) {
       await updateThreadTurnState(cfg, request.agentId, request.threadId, {
         isCurrentTurnRunning: false,
