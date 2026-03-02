@@ -1,0 +1,1 @@
+ALTER TABLE `threads` ADD `cli_secret` text;

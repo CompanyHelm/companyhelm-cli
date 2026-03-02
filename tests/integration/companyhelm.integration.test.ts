@@ -971,6 +971,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
                     threadId: "thread-github-installations",
                     model: "gpt-5.3-codex",
                     reasoningLevel: "high",
+                    cliSecret: "thread-secret-github-installations",
                     gitSkillPackages: [
                       {
                         repositoryUrl: "https://github.com/obra/superpowers.git",
@@ -1021,6 +1022,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
     try {
       const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
       assert.ok(threadRow, "expected thread row to exist");
+      assert.equal(threadRow?.cliSecret, "thread-secret-github-installations");
       const agentsPath = path.join(threadRow!.workspace, "AGENTS.md");
       assert.equal(existsSync(agentsPath), true, "expected AGENTS.md to be created in thread workspace");
       agentsMdContents = await readFile(agentsPath, "utf8");

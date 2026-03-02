@@ -37,6 +37,7 @@ export const threads = sqliteTable("threads", {
     .notNull()
     .references(() => agents.id),
   sdkThreadId: text("sdk_thread_id"),
+  cliSecret: text("cli_secret"),
   model: text("model").notNull(),
   reasoningLevel: text("reasoning_level").notNull(),
   additionalModelInstructions: text("additional_model_instructions"),
