@@ -20,3 +20,11 @@ Docker is available, the docker host runs in a separate container. The network i
 - `list-installations`: list synced GitHub installations with repositories, access tokens, and expirations.
 - `gh-use-installation <installation-id>`: configure `gh` authentication for a selected GitHub installation token.
 - DO NOT INSTALL PLAYWRIGHT IN THE RUNTIME IMAGE. Playwright CLI is already installed and available for browser automation tasks with Chromium pre-installed: `playwright open --browser=chromium ...`
+
+## CompanyHelm Agent CLI
+
+- `companyhelm-agent` is pre-installed in the runtime image.
+- Example commands:
+  - `companyhelm-agent task get --task-id <id>`
+  - `companyhelm-agent task dependencies --task-id <id>`
+  - `companyhelm-agent task update-status --task-id <id> --status <draft|pending|in_progress|completed>`

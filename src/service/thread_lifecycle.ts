@@ -62,6 +62,11 @@ export interface ThreadGitSkillProvisionOptions {
   packages: ThreadGitSkillPackageConfig[];
 }
 
+export interface RuntimeAgentCliConfig {
+  agent_api_url: string;
+  token: string;
+}
+
 const CONTAINER_START_TIMEOUT_MS = 30_000;
 const CONTAINER_START_POLL_MS = 500;
 const DEFAULT_HOST_DOCKER_PATH = "unix:///var/run/docker.sock";
@@ -259,6 +264,12 @@ function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string 
   return [
     bootstrap,
     "",
+    'if ! command -v companyhelm-agent >/dev/null 2>&1; then',
+    '  echo "companyhelm-agent CLI is not available after sourcing nvm." >&2',
+    '  echo "Fix: install @companyhelm/agent-cli in the runtime image." >&2',
+    "  exit 1",
+    "fi",
+    "",
     'if ! command -v playwright >/dev/null 2>&1; then',
     '  echo "playwright CLI is not available after sourcing nvm." >&2',
     '  echo "Fix: install playwright in the runtime image (for example: npm install --global playwright)." >&2',
@@ -401,6 +412,28 @@ function buildRuntimeThreadGitSkillsProvisionScript(
   }
 
   return scriptLines.join("\n");
+}
+
+function buildRuntimeAgentCliConfigScript(
+  user: ThreadContainerUser,
+  config: RuntimeAgentCliConfig,
+): string {
+  const configDirectory = join(user.agentHomeDirectory, ".config", "companyhelm-agent-cli");
+  const configPath = join(configDirectory, "config.json");
+  const configContent = `${JSON.stringify(config, null, 2)}\n`;
+  return [
+    "set -euo pipefail",
+    `AGENT_UID=${shellQuote(String(user.uid))}`,
+    `AGENT_GID=${shellQuote(String(user.gid))}`,
+    `CONFIG_DIR=${shellQuote(configDirectory)}`,
+    `CONFIG_PATH=${shellQuote(configPath)}`,
+    `CONFIG_CONTENT=${shellQuote(configContent)}`,
+    "",
+    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$CONFIG_DIR"',
+    'printf \'%s\' "$CONFIG_CONTENT" > "$CONFIG_PATH"',
+    'chown "$AGENT_UID:$AGENT_GID" "$CONFIG_PATH"',
+    'chmod 0600 "$CONFIG_PATH"',
+  ].join("\n");
 }
 
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
@@ -749,7 +782,7 @@ export class ThreadContainerService {
     const script = buildRuntimeToolingValidationScript(user);
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
-      `Failed to validate runtime tooling (nvm/codex/playwright) in container '${name}'`,
+      `Failed to validate runtime tooling (nvm/codex/companyhelm-agent/playwright) in container '${name}'`,
     );
   }
 
@@ -781,6 +814,18 @@ export class ThreadContainerService {
     this.runDockerExecScript(
       ["exec", "-u", "0", name, "bash", "-lc", script],
       `Failed to write runtime Codex config.toml in container '${name}'`,
+    );
+  }
+
+  async ensureRuntimeContainerAgentCliConfig(
+    name: string,
+    user: ThreadContainerUser,
+    config: RuntimeAgentCliConfig,
+  ): Promise<void> {
+    const script = buildRuntimeAgentCliConfigScript(user, config);
+    this.runDockerExecScript(
+      ["exec", "-u", "0", name, "bash", "-lc", script],
+      `Failed to write runtime companyhelm-agent CLI config in container '${name}'`,
     );
   }
 
