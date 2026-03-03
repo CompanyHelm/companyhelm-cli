@@ -652,14 +652,16 @@ test("companyhelm root command returns requestError for createThreadRequest when
     await seedStateDatabase(homeDirectory);
 
     let receivedClientUpdate: any = null;
+    const requestId = "request-missing-agent-create-thread";
 
     const started = await startFakeServer("/grpc", {
       registerRunner(call, callback) {
         callback(null, create(RegisterRunnerResponseSchema, {}));
       },
       controlChannel(call) {
-        call.write(
-          create(ServerMessageSchema, {
+        const createThreadMessage = create(
+          ServerMessageSchema,
+          {
             request: {
               case: "createThreadRequest",
               value: {
@@ -668,7 +670,19 @@ test("companyhelm root command returns requestError for createThreadRequest when
                 model: "gpt-5.3-codex",
               },
             },
-          }),
+          },
+        ) as {
+          $unknown?: Array<{ no: number; wireType: number; data: Buffer }>;
+        };
+        createThreadMessage.$unknown = [
+          {
+            no: 1,
+            wireType: 2,
+            data: Buffer.concat([Buffer.from([requestId.length]), Buffer.from(requestId, "utf8")]),
+          },
+        ];
+        call.write(
+          createThreadMessage,
         );
 
         call.on("data", (message) => {
@@ -691,6 +705,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
 
     assert.ok(receivedClientUpdate, "expected CLI to send response for createThreadRequest");
     assert.equal(receivedClientUpdate.payload.case, "requestError");
+    assert.equal(receivedClientUpdate.requestId, requestId);
     assert.match(receivedClientUpdate.payload.value.errorMessage, /missing-agent/i);
   } finally {
     reconnectDelaySpy.mockRestore();
