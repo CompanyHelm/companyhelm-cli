@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  AGENTS_MD_AGENT_CLI_SECTION,
   AGENTS_MD_CLI_TOOLS_SECTION,
   AGENTS_MD_GITHUB_INSTALLATIONS_SECTION,
   AGENTS_MD_WORKSPACE_SECTION,
@@ -21,6 +22,9 @@ test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
   assert.equal(rendered.includes("Playwright CLI is already installed and available"), true);
+  assert.equal(rendered.includes("## CompanyHelm Agent CLI"), true);
+  assert.equal(rendered.includes("companyhelm-agent"), true);
+  assert.equal(rendered.includes("host.docker.internal"), true);
   assert.equal(rendered.includes("/home/agent/.codex/auth.json"), true);
   assert.equal(rendered.includes("{{"), false);
 });
@@ -36,6 +40,7 @@ test("ensureWorkspaceAgentsMd creates AGENTS.md from the runtime template", () =
     assert.equal(contents.includes("## Workspace Structure"), true);
     assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
+    assert.equal(contents.includes("## CompanyHelm Agent CLI"), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
   }
@@ -54,8 +59,10 @@ test("ensureWorkspaceAgentsMd appends missing sections to existing AGENTS.md", (
     assert.equal(contents.includes("## Workspace Structure"), true);
     assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
+    assert.equal(contents.includes("## CompanyHelm Agent CLI"), true);
     assert.equal(contents.includes(AGENTS_MD_GITHUB_INSTALLATIONS_SECTION.trim()), true);
     assert.equal(contents.includes(AGENTS_MD_CLI_TOOLS_SECTION.trim()), true);
+    assert.equal(contents.includes(AGENTS_MD_AGENT_CLI_SECTION.trim()), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
   }

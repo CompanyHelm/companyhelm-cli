@@ -56,6 +56,7 @@ import {
   resolveThreadDirectory,
   resolveThreadsRootDirectory,
   ThreadContainerService,
+  type RuntimeAgentCliConfig,
   type ThreadAuthMode,
   type ThreadGitSkillConfig,
   type ThreadGitSkillPackageConfig,
@@ -78,6 +79,7 @@ import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
   serverUrl?: string;
+  agentApiUrl?: string;
   daemon?: boolean;
   logLevel?: string;
   secret?: string;
@@ -97,12 +99,15 @@ const WORKSPACE_INSTALLATIONS_DIRECTORY = ".companyhelm";
 const WORKSPACE_INSTALLATIONS_FILENAME = "installations.json";
 const THREAD_GIT_SKILLS_CONFIG_FILENAME = "thread-git-skills.json";
 const THREAD_MCP_CONFIG_FILENAME = "thread-mcp.json";
+const THREAD_AGENT_CLI_CONFIG_FILENAME = "thread-agent-cli.json";
 const THREAD_MCP_BEARER_TOKEN_ENV_PREFIX = "COMPANYHELM_MCP_TOKEN_";
 const THREAD_MCP_AUTH_TYPE_BEARER_TOKEN = 2;
 const THREAD_MCP_STARTUP_TIMEOUT_SECONDS = 60;
 const YOLO_APPROVAL_POLICY: AskForApproval = "never";
 const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
+const DOCKER_INTERNAL_HOSTNAME = "host.docker.internal";
+const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
 
 interface ThreadAppServerSession {
   runtimeContainer: string;
@@ -319,6 +324,59 @@ function normalizeNonEmptyString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function rewriteLocalTargetForDockerRuntime(target: string): string {
+  const trimmed = target.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  if (trimmed.startsWith("[")) {
+    const closingBracketIndex = trimmed.indexOf("]");
+    if (closingBracketIndex > 0) {
+      const host = trimmed.slice(1, closingBracketIndex).toLowerCase();
+      if (LOCALHOST_HOSTNAMES.has(host)) {
+        return `${DOCKER_INTERNAL_HOSTNAME}${trimmed.slice(closingBracketIndex + 1)}`;
+      }
+    }
+    return trimmed;
+  }
+
+  const colonIndex = trimmed.indexOf(":");
+  const host = (colonIndex >= 0 ? trimmed.slice(0, colonIndex) : trimmed).toLowerCase();
+  if (!LOCALHOST_HOSTNAMES.has(host)) {
+    return trimmed;
+  }
+
+  return `${DOCKER_INTERNAL_HOSTNAME}${colonIndex >= 0 ? trimmed.slice(colonIndex) : ""}`;
+}
+
+export function normalizeThreadAgentApiUrlForRuntime(agentApiUrl: string): string {
+  const trimmed = agentApiUrl.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  if (trimmed.includes("://")) {
+    try {
+      const parsed = new URL(trimmed);
+      if (LOCALHOST_HOSTNAMES.has(parsed.hostname.toLowerCase())) {
+        parsed.hostname = DOCKER_INTERNAL_HOSTNAME;
+      }
+
+      const pathname = parsed.pathname === "/" ? "" : parsed.pathname;
+      return `${parsed.protocol}//${parsed.host}${pathname}${parsed.search}${parsed.hash}`;
+    } catch {
+      return trimmed;
+    }
+  }
+
+  const firstSlashIndex = trimmed.indexOf("/");
+  const target = firstSlashIndex >= 0 ? trimmed.slice(0, firstSlashIndex) : trimmed;
+  const pathSuffix = firstSlashIndex >= 0 ? trimmed.slice(firstSlashIndex) : "";
+  const rewrittenTarget = rewriteLocalTargetForDockerRuntime(target);
+  return `${rewrittenTarget}${pathSuffix}`;
 }
 
 export function extractThreadNameUpdateFromNotification(
@@ -984,6 +1042,83 @@ function readWorkspaceThreadMcpConfig(workspaceDirectory: string, logger: Logger
     }
     logger.warn(`Failed reading thread MCP config at '${configPath}': ${toErrorMessage(error)}`);
     return [];
+  }
+}
+
+function resolveThreadAgentCliConfigPath(workspaceDirectory: string): string {
+  return join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY, THREAD_AGENT_CLI_CONFIG_FILENAME);
+}
+
+function parseThreadAgentCliConfig(content: unknown): RuntimeAgentCliConfig | null {
+  if (!isRecord(content)) {
+    return null;
+  }
+
+  const agentApiUrl = normalizeNonEmptyString(content.agent_api_url);
+  const token = normalizeNonEmptyString(content.token);
+  if (!agentApiUrl || !token) {
+    return null;
+  }
+
+  return {
+    agent_api_url: agentApiUrl,
+    token,
+  };
+}
+
+function writeWorkspaceThreadAgentCliConfig(
+  workspaceDirectory: string,
+  cliSecret: string,
+  agentApiUrl: string,
+  logger: Logger,
+): void {
+  const configPath = resolveThreadAgentCliConfigPath(workspaceDirectory);
+  const configDirectory = join(workspaceDirectory, WORKSPACE_INSTALLATIONS_DIRECTORY);
+  const temporaryPath = `${configPath}.tmp`;
+
+  try {
+    mkdirSync(configDirectory, { recursive: true });
+    if (cliSecret.length === 0) {
+      rmSync(configPath, { force: true });
+      rmSync(temporaryPath, { force: true });
+      return;
+    }
+
+    const payload: RuntimeAgentCliConfig = {
+      agent_api_url: normalizeThreadAgentApiUrlForRuntime(agentApiUrl),
+      token: cliSecret,
+    };
+    writeFileSync(
+      temporaryPath,
+      `${JSON.stringify(payload, null, 2)}\n`,
+      "utf8",
+    );
+    renameSync(temporaryPath, configPath);
+  } catch (error: unknown) {
+    logger.warn(`Failed writing thread agent CLI config for workspace '${workspaceDirectory}': ${toErrorMessage(error)}`);
+  }
+}
+
+function readWorkspaceThreadAgentCliConfig(
+  workspaceDirectory: string,
+  logger: Logger,
+): RuntimeAgentCliConfig | null {
+  const configPath = resolveThreadAgentCliConfigPath(workspaceDirectory);
+  try {
+    const rawContent = readFileSync(configPath, "utf8");
+    const parsedContent = JSON.parse(rawContent) as unknown;
+    const parsedConfig = parseThreadAgentCliConfig(parsedContent);
+    if (!parsedConfig) {
+      logger.warn(`Thread agent CLI config has invalid shape at '${configPath}'.`);
+      return null;
+    }
+    return parsedConfig;
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && (error as { code?: string }).code === "ENOENT") {
+      return null;
+    }
+    logger.warn(`Failed reading thread agent CLI config at '${configPath}': ${toErrorMessage(error)}`);
+    return null;
   }
 }
 
@@ -1837,6 +1972,7 @@ async function handleCreateThreadRequest(
   ensureWorkspaceAgentsMd(threadDirectory, cfg.agent_home_directory);
   writeWorkspaceThreadGitSkillsConfig(threadDirectory, threadGitSkillPackages, logger);
   writeWorkspaceThreadMcpConfig(threadDirectory, threadMcpServers, logger);
+  writeWorkspaceThreadAgentCliConfig(threadDirectory, cliSecret, cfg.agent_api_url, logger);
   await syncGithubInstallationsForWorkspaces(
     apiClient,
     apiCallOptions,
@@ -2329,6 +2465,7 @@ async function executeCreateUserMessageRequest(
   const threadMcpSetup = buildThreadCodexMcpSetup(
     readWorkspaceThreadMcpConfig(threadState.workspace, logger),
   );
+  const threadAgentCliConfig = readWorkspaceThreadAgentCliConfig(threadState.workspace, logger);
   const appServerSession = await getOrCreateThreadAppServerSession(
     request.threadId,
     threadState.runtimeContainer,
@@ -2337,6 +2474,12 @@ async function executeCreateUserMessageRequest(
     logger,
   );
   const appServer = appServerSession.appServer;
+  const runtimeUser = {
+    uid: threadState.uid,
+    gid: threadState.gid,
+    agentUser: cfg.agent_user,
+    agentHomeDirectory: threadState.homeDirectory,
+  };
 
   let sdkThreadId = threadState.sdkThreadId;
   let sdkTurnId = threadState.currentSdkTurnId;
@@ -2352,23 +2495,20 @@ async function executeCreateUserMessageRequest(
       containerService,
       gitUserName: cfg.git_user_name,
       gitUserEmail: cfg.git_user_email,
-      user: {
-        uid: threadState.uid,
-        gid: threadState.gid,
-        agentUser: cfg.agent_user,
-        agentHomeDirectory: threadState.homeDirectory,
-      },
+      user: runtimeUser,
     });
     await ensureThreadGitSkillsInRuntime(cfg, threadState, containerService, logger);
+    if (threadAgentCliConfig) {
+      await containerService.ensureRuntimeContainerAgentCliConfig(
+        threadState.runtimeContainer,
+        runtimeUser,
+        threadAgentCliConfig,
+      );
+    }
     if (!appServerSession.started) {
       await containerService.ensureRuntimeContainerCodexConfig(
         threadState.runtimeContainer,
-        {
-          uid: threadState.uid,
-          gid: threadState.gid,
-          agentUser: cfg.agent_user,
-          agentHomeDirectory: threadState.homeDirectory,
-        },
+        runtimeUser,
         threadMcpSetup.configToml,
       );
     }
@@ -2688,6 +2828,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   const logger = createLogger(options.logLevel ?? "INFO", { daemonMode: options.daemon ?? false });
   const cfg: Config = configSchema.parse({
     companyhelm_api_url: options.serverUrl,
+    agent_api_url: options.agentApiUrl,
     use_host_docker_runtime: options.useHostDockerRuntime,
     host_docker_path: options.hostDockerPath,
     runtime_dns_servers: options.dns,
@@ -2783,6 +2924,10 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
 export function registerRootCommand(program: Command): void {
   program
     .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
+    .option(
+      "--agent-api-url <url>",
+      "Agent gRPC API URL for companyhelm-agent in runtime containers (localhost is rewritten to host.docker.internal).",
+    )
     .option("--secret <secret>", "Bearer secret used as gRPC Authorization header.")
     .option(
       "--use-host-docker-runtime",

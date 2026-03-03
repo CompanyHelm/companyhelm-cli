@@ -34,9 +34,24 @@ export const AGENTS_MD_CLI_TOOLS_SECTION = `## Available CLI Tools
 - DO NOT INSTALL PLAYWRIGHT IN THE RUNTIME IMAGE. Playwright CLI is already installed and available for browser automation tasks with Chromium pre-installed: \`playwright open --browser=chromium ...\`
 `;
 
+function buildAgentsMdAgentCliSection(homeDirectory: string): string {
+  return `## CompanyHelm Agent CLI
+
+- \`companyhelm-agent\` (\`@companyhelm/agent-cli\`) is pre-installed in the runtime image.
+- Thread bootstrap writes \`${homeDirectory}/.config/companyhelm-agent-cli/config.json\` with:
+  - \`agent_api_url\`: rewritten to \`host.docker.internal:<port>\` for Docker-to-host access.
+  - \`token\`: sourced from the thread secret.
+- Example commands:
+  - \`companyhelm-agent task get --task-id <id>\`
+  - \`companyhelm-agent task dependencies --task-id <id>\`
+  - \`companyhelm-agent task update-status --task-id <id> --status <draft|pending|in_progress|completed>\`
+`;
+}
+
 const AGENTS_MD_GITHUB_SECTION_MARKER = "## GitHub Installations";
 const RUNTIME_AGENTS_TEMPLATE_PATH = "templates/runtime_agents.md.j2";
 const DEFAULT_HOME_DIRECTORY = "/home/agent";
+export const AGENTS_MD_AGENT_CLI_SECTION = buildAgentsMdAgentCliSection(DEFAULT_HOME_DIRECTORY);
 
 function renderJinjaTemplate(template: string, context: Record<string, string>): string {
   return template.replace(/{{\s*([a-zA-Z0-9_]+)\s*}}/g, (_match, key: string) => {
@@ -68,7 +83,9 @@ export function renderRuntimeAgentsMd(homeDirectory = DEFAULT_HOME_DIRECTORY): s
 ${AGENTS_MD_WORKSPACE_SECTION}
 ${AGENTS_MD_GITHUB_INSTALLATIONS_SECTION}
 
-${AGENTS_MD_CLI_TOOLS_SECTION}`;
+${AGENTS_MD_CLI_TOOLS_SECTION}
+
+${buildAgentsMdAgentCliSection(homeDirectory)}`;
 
   try {
     const template = readFileSync(resolveTemplatePath(), "utf8");
@@ -91,6 +108,7 @@ export function ensureWorkspaceAgentsMd(
     { marker: "## Workspace Structure", content: AGENTS_MD_WORKSPACE_SECTION },
     { marker: AGENTS_MD_GITHUB_SECTION_MARKER, content: AGENTS_MD_GITHUB_INSTALLATIONS_SECTION },
     { marker: "## Available CLI Tools", content: AGENTS_MD_CLI_TOOLS_SECTION },
+    { marker: "## CompanyHelm Agent CLI", content: buildAgentsMdAgentCliSection(homeDirectory) },
   ];
 
   let existing = "";

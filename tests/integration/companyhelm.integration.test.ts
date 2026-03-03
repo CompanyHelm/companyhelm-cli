@@ -1019,6 +1019,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
     let agentsMdContents = "";
     let installationsPayload: Record<string, unknown> | null = null;
     let threadGitSkillsPayload: Record<string, unknown> | null = null;
+    let threadAgentCliPayload: Record<string, unknown> | null = null;
     try {
       const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
       assert.ok(threadRow, "expected thread row to exist");
@@ -1034,6 +1035,10 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       const threadGitSkillsPath = path.join(threadRow!.workspace, ".companyhelm", "thread-git-skills.json");
       assert.equal(existsSync(threadGitSkillsPath), true, "expected thread git skills config to be created in thread workspace");
       threadGitSkillsPayload = JSON.parse(await readFile(threadGitSkillsPath, "utf8")) as Record<string, unknown>;
+
+      const threadAgentCliPath = path.join(threadRow!.workspace, ".companyhelm", "thread-agent-cli.json");
+      assert.equal(existsSync(threadAgentCliPath), true, "expected thread agent CLI config to be created in thread workspace");
+      threadAgentCliPayload = JSON.parse(await readFile(threadAgentCliPath, "utf8")) as Record<string, unknown>;
     } finally {
       client.close();
     }
@@ -1080,6 +1085,9 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       threadGitSkills.map((skill) => skill.linkName),
       ["brainstorming", "systematic-debugging"],
     );
+    assert.ok(threadAgentCliPayload, "expected thread agent CLI payload to be parsed");
+    assert.equal(threadAgentCliPayload.agent_api_url, "host.docker.internal:50052");
+    assert.equal(threadAgentCliPayload.token, "thread-secret-github-installations");
   } finally {
     reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
@@ -2017,6 +2025,9 @@ test(
     const ensureRuntimeContainerCodexConfigSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
       .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerAgentCliConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+      .mockImplementation(async () => undefined);
     const ensureRuntimeContainerThreadGitSkillsSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
       .mockImplementation(async () => undefined);
@@ -2144,6 +2155,7 @@ test(
                       agentId: "agent-user-message",
                       threadId: "thread-user-message",
                       model: "gpt-5.3-codex",
+                      cliSecret: "thread-secret-user-message",
                       additionalModelInstructions,
                       gitSkillPackages: [
                         {
@@ -2304,6 +2316,14 @@ test(
         1,
         "expected Codex config.toml write only before first app-server startup",
       );
+      assert.equal(
+        ensureRuntimeContainerAgentCliConfigSpy.mock.calls.length,
+        2,
+        "expected companyhelm-agent config writes on each user message when thread secret exists",
+      );
+      const firstAgentCliConfig = ensureRuntimeContainerAgentCliConfigSpy.mock.calls[0]?.[2];
+      assert.equal(firstAgentCliConfig?.agent_api_url, "host.docker.internal:50052");
+      assert.equal(firstAgentCliConfig?.token, "thread-secret-user-message");
       const codexConfigToml = String(ensureRuntimeContainerCodexConfigSpy.mock.calls[0]?.[2] ?? "");
       assert.equal(codexConfigToml.includes("[mcp_servers.\"context7\"]"), true, "expected context7 MCP table in config");
       assert.equal(codexConfigToml.includes("url = \"https://mcp.context7.com/mcp\""), true, "expected context7 MCP URL in config");
@@ -2338,6 +2358,7 @@ test(
       ensureRuntimeContainerToolingSpy.mockRestore();
       ensureRuntimeContainerBashrcSpy.mockRestore();
       ensureRuntimeContainerCodexConfigSpy.mockRestore();
+      ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
       ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
@@ -2398,6 +2419,9 @@ test(
       .mockImplementation(async () => undefined);
     const ensureRuntimeContainerCodexConfigSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerAgentCliConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
       .mockImplementation(async () => undefined);
     const stopContainerSpy = vi
       .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
@@ -2601,6 +2625,11 @@ test(
         1,
         "expected Codex config.toml write only before first app-server startup",
       );
+      assert.equal(
+        ensureRuntimeContainerAgentCliConfigSpy.mock.calls.length,
+        0,
+        "expected no companyhelm-agent config writes when thread secret is missing",
+      );
       assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
     } finally {
       reconnectDelaySpy.mockRestore();
@@ -2611,6 +2640,7 @@ test(
       ensureRuntimeContainerToolingSpy.mockRestore();
       ensureRuntimeContainerBashrcSpy.mockRestore();
       ensureRuntimeContainerCodexConfigSpy.mockRestore();
+      ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
