@@ -375,6 +375,9 @@ export function normalizeThreadAgentApiUrlForRuntime(agentApiUrl: string): strin
   const target = firstSlashIndex >= 0 ? trimmed.slice(0, firstSlashIndex) : trimmed;
   const pathSuffix = firstSlashIndex >= 0 ? trimmed.slice(firstSlashIndex) : "";
   const rewrittenTarget = rewriteLocalTargetForDockerRuntime(target);
+  if (rewrittenTarget !== target) {
+    return `http://${rewrittenTarget}${pathSuffix}`;
+  }
   return `${rewrittenTarget}${pathSuffix}`;
 }
 
