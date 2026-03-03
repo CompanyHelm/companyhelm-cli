@@ -1906,6 +1906,7 @@ async function handleCreateThreadRequest(
   cfg: Config,
   commandChannel: ClientMessageSink,
   request: CreateThreadRequest,
+  requestId: string | undefined,
   apiClient: CompanyhelmApiClient,
   apiCallOptions: CompanyhelmApiCallOptions | undefined,
   logger: Logger,
@@ -1913,7 +1914,7 @@ async function handleCreateThreadRequest(
   const threadId = (request.threadId ?? "").trim();
   if (!threadId) {
     logger.warn(`Rejecting createThreadRequest for agent '${request.agentId}': threadId is required.`);
-    await sendRequestError(commandChannel, "Thread id is required.");
+    await sendRequestError(commandChannel, "Thread id is required.", requestId);
     return;
   }
 
@@ -1937,7 +1938,7 @@ async function handleCreateThreadRequest(
     const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
     if (!existingAgent) {
       logger.warn(`Cannot create thread '${threadId}': agent '${request.agentId}' does not exist.`);
-      await sendRequestError(commandChannel, `Agent '${request.agentId}' does not exist.`);
+      await sendRequestError(commandChannel, `Agent '${request.agentId}' does not exist.`, requestId);
       return;
     }
 
@@ -1964,7 +1965,11 @@ async function handleCreateThreadRequest(
     logger.debug(`Thread '${threadId}' inserted with status 'pending'.`);
   } catch (error: unknown) {
     logger.warn(`Failed to initialize thread '${threadId}': ${toErrorMessage(error)}`);
-    await sendRequestError(commandChannel, `Failed to initialize thread '${threadId}': ${toErrorMessage(error)}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to initialize thread '${threadId}': ${toErrorMessage(error)}`,
+      requestId,
+    );
     return;
   } finally {
     client.close();
@@ -2020,7 +2025,11 @@ async function handleCreateThreadRequest(
     }
   } catch (error: unknown) {
     logger.warn(`Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
-    await sendRequestError(commandChannel, `Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to create containers for thread '${threadId}': ${toErrorMessage(error)}`,
+      requestId,
+    );
     return;
   }
 
@@ -2035,7 +2044,11 @@ async function handleCreateThreadRequest(
     }
     await containerService.forceRemoveVolume(containerNames.home);
     await containerService.forceRemoveVolume(containerNames.tmp);
-    await sendRequestError(commandChannel, `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
+    await sendRequestError(
+      commandChannel,
+      `Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`,
+      requestId,
+    );
     return;
   } finally {
     updateClient.close();
@@ -2787,7 +2800,15 @@ async function runCommandLoop(
         await handleCreateAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       case "createThreadRequest":
-        await handleCreateThreadRequest(cfg, commandMessageSink, serverMessage.request.value, apiClient, apiCallOptions, logger);
+        await handleCreateThreadRequest(
+          cfg,
+          commandMessageSink,
+          serverMessage.request.value,
+          requestId,
+          apiClient,
+          apiCallOptions,
+          logger,
+        );
         break;
       case "deleteAgentRequest":
         await handleDeleteAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
