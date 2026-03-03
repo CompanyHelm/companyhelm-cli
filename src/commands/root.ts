@@ -2923,7 +2923,7 @@ export function registerRootCommand(program: Command): void {
     .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
     .option(
       "--agent-api-url <url>",
-      "Agent gRPC API URL for companyhelm-agent in runtime containers (localhost is rewritten to host.docker.internal).",
+      "Agent gRPC API URL for companyhelm-agent in runtime containers (localhost is rewritten to http://host.docker.internal).",
     )
     .option("--secret <secret>", "Bearer secret used as gRPC Authorization header.")
     .option(
