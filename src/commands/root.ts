@@ -85,7 +85,6 @@ interface RootCommandOptions {
   secret?: string;
   useHostDockerRuntime?: boolean;
   hostDockerPath?: string;
-  dns?: string;
   threadGitSkillsDirectory?: string;
 }
 
@@ -2007,7 +2006,6 @@ async function handleCreateThreadRequest(
       mounts,
       useHostDockerRuntime: cfg.use_host_docker_runtime,
       hostDockerPath: cfg.host_docker_path,
-      dnsServers: cfg.runtime_dns_servers,
       imageStatusReporter: (message: string) => {
         logger.info(`[thread ${threadId}] ${message}`);
       },
@@ -2831,7 +2829,6 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     agent_api_url: options.agentApiUrl,
     use_host_docker_runtime: options.useHostDockerRuntime,
     host_docker_path: options.hostDockerPath,
-    runtime_dns_servers: options.dns,
     thread_git_skills_directory: options.threadGitSkillsDirectory,
   });
 
@@ -2936,10 +2933,6 @@ export function registerRootCommand(program: Command): void {
     .option(
       "--host-docker-path <path>",
       "Host Docker endpoint when --use-host-docker-runtime is enabled (unix:///<socket-path> or tcp://localhost:<port>).",
-    )
-    .option(
-      "--dns <servers>",
-      "Comma-separated DNS servers applied to runtime-related Docker containers (for example: 1.1.1.1,8.8.8.8).",
     )
     .option(
       "--thread-git-skills-directory <path>",

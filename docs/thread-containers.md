@@ -20,8 +20,6 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
   - `--network=container:companyhelm-dind-thread-{threadId}`
 - Runtime sets Docker host to DinD via localhost:
   - `DOCKER_HOST=tcp://localhost:2375`
-- DNS servers for runtime-related containers come from `runtime_dns_servers` (default: `1.1.1.1,8.8.8.8`).
-- Override DNS servers at runtime with `--dns <server1,server2,...>`.
 
 ## Lifecycle
 

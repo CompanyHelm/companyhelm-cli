@@ -41,7 +41,6 @@ export interface ThreadContainerCreateOptions {
   mounts: MountSettings[];
   useHostDockerRuntime?: boolean;
   hostDockerPath?: string;
-  dnsServers?: string[];
   imageStatusReporter?: (message: string) => void;
 }
 
@@ -211,17 +210,6 @@ function buildCommonContainerEnv(user: ThreadContainerUser): string[] {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-function normalizeDnsServers(dnsServers: string[] | undefined): string[] | undefined {
-  if (!dnsServers) {
-    return undefined;
-  }
-
-  const normalizedServers = dnsServers
-    .map((server) => server.trim())
-    .filter((server) => server.length > 0);
-  return normalizedServers.length > 0 ? normalizedServers : undefined;
 }
 
 function buildRuntimeIdentityProvisionScript(user: ThreadContainerUser): string {
@@ -447,7 +435,6 @@ function buildRuntimeAgentCliConfigScript(
 }
 
 export function buildDindContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
-  const dnsServers = normalizeDnsServers(options.dnsServers);
   return {
     name: options.names.dind,
     Image: options.dindImage,
@@ -458,14 +445,12 @@ export function buildDindContainerOptions(options: ThreadContainerCreateOptions)
     HostConfig: {
       Privileged: true,
       Mounts: options.mounts,
-      ...(dnsServers ? { Dns: dnsServers } : {}),
     },
   };
 }
 
 export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptions): ContainerCreateOptions {
   const hostDocker = options.useHostDockerRuntime ? parseHostDockerPath(options.hostDockerPath) : null;
-  const dnsServers = normalizeDnsServers(options.dnsServers);
   const runtimeMounts =
     hostDocker?.mode === "unix"
       ? [
@@ -493,7 +478,6 @@ export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptio
     HostConfig: {
       NetworkMode: options.useHostDockerRuntime ? undefined : `container:${options.names.dind}`,
       Mounts: runtimeMounts,
-      ...(options.useHostDockerRuntime && dnsServers ? { Dns: dnsServers } : {}),
       ...(hostDocker?.mode === "tcp" ? { ExtraHosts: [HOST_DOCKER_INTERNAL_GATEWAY] } : {}),
     },
   };
