@@ -27,7 +27,7 @@
   "dependencies": {
     "@bufbuild/protobuf": "^2.11.0",
     "@clack/prompts": "^1.0.1",
-    "@companyhelm/protos": "^0.5.5",
+    "@companyhelm/protos": "file:vendor/companyhelm-protos-0.5.8.tgz",
     "@grpc/grpc-js": "^1.14.3",
     "@libsql/client": "^0.17.0",
     "commander": "^14.0.0",

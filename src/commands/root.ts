@@ -1789,6 +1789,7 @@ async function handleCreateThreadRequest(
   );
   const threadGitSkillPackages = normalizeThreadGitSkillPackagesForThreadConfig(request.gitSkillPackages, logger);
   const threadMcpServers = normalizeThreadMcpServersForThreadConfig(request.mcpServers, logger);
+  const cliSecret = String(request.cliSecret ?? "").trim();
   logger.debug(
     `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
   );
@@ -1809,6 +1810,7 @@ async function handleCreateThreadRequest(
       id: threadId,
       agentId: request.agentId,
       sdkThreadId: null,
+      cliSecret: cliSecret.length > 0 ? cliSecret : null,
       model: request.model,
       reasoningLevel: request.reasoningLevel ?? "",
       additionalModelInstructions: normalizedAdditionalModelInstructions,

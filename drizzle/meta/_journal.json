@@ -64,6 +64,13 @@
       "when": 1772491465209,
       "tag": "0008_melted_flatman",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1772495488679,
+      "tag": "0009_powerful_hellcat",
+      "breakpoints": true
     }
   ]
 }
