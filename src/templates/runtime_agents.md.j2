@@ -23,10 +23,7 @@ Docker is available, the docker host runs in a separate container. The network i
 
 ## CompanyHelm Agent CLI
 
-- `companyhelm-agent` (`@companyhelm/agent-cli`) is pre-installed in the runtime image.
-- Thread bootstrap writes `{{home_directory}}/.config/companyhelm-agent-cli/config.json` with:
-  - `agent_api_url`: rewritten to `host.docker.internal:<port>` for Docker-to-host access.
-  - `token`: sourced from the thread secret.
+- `companyhelm-agent` is pre-installed in the runtime image.
 - Example commands:
   - `companyhelm-agent task get --task-id <id>`
   - `companyhelm-agent task dependencies --task-id <id>`
