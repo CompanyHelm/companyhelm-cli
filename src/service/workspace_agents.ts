@@ -39,7 +39,7 @@ function buildAgentsMdAgentCliSection(homeDirectory: string): string {
 
 - \`companyhelm-agent\` (\`@companyhelm/agent-cli\`) is pre-installed in the runtime image.
 - Thread bootstrap writes \`${homeDirectory}/.config/companyhelm-agent-cli/config.json\` with:
-  - \`agent_api_url\`: rewritten to \`host.docker.internal:<port>\` for Docker-to-host access.
+  - \`agent_api_url\`: localhost targets are rewritten to \`host.docker.internal\` (for example \`http://host.docker.internal:<port>\`) for Docker-to-host access.
   - \`token\`: sourced from the thread secret.
 - Example commands:
   - \`companyhelm-agent task get --task-id <id>\`

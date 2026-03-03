@@ -24,7 +24,7 @@ test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   assert.equal(rendered.includes("Playwright CLI is already installed and available"), true);
   assert.equal(rendered.includes("## CompanyHelm Agent CLI"), true);
   assert.equal(rendered.includes("companyhelm-agent"), true);
-  assert.equal(rendered.includes("host.docker.internal"), true);
+  assert.equal(rendered.includes("http://host.docker.internal"), true);
   assert.equal(rendered.includes("/home/agent/.codex/auth.json"), true);
   assert.equal(rendered.includes("{{"), false);
 });
