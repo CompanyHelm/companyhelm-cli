@@ -17,7 +17,6 @@ test("shell exposes daemon CLI overrides except hardcoded daemon/serverUrl/secre
     "agentApiUrl",
     "useHostDockerRuntime",
     "hostDockerPath",
-    "dns",
     "threadGitSkillsDirectory",
     "logLevel",
   ]);
@@ -32,7 +31,6 @@ test("shell builds daemon override args from selected option values", () => {
     agentApiUrl: "localhost:15052",
     useHostDockerRuntime: true,
     hostDockerPath: "unix:///tmp/custom-docker.sock",
-    dns: "1.1.1.1,8.8.8.8",
     threadGitSkillsDirectory: "/tmp/thread-skills",
     logLevel: "DEBUG",
   });
@@ -43,8 +41,6 @@ test("shell builds daemon override args from selected option values", () => {
     "--use-host-docker-runtime",
     "--host-docker-path",
     "unix:///tmp/custom-docker.sock",
-    "--dns",
-    "1.1.1.1,8.8.8.8",
     "--thread-git-skills-directory",
     "/tmp/thread-skills",
     "--log-level",

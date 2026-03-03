@@ -231,8 +231,6 @@ export class AppServerContainerService implements AppServerTransport {
     }
 
     this.containerName = `companyhelm-codex-app-server-${Date.now()}`;
-    const dnsArgs = cfg.runtime_dns_servers.flatMap((server) => ["--dns", server]);
-
     const bootstrapTemplate = readFileSync(resolveTemplatePath(), "utf8");
     const bootstrapScript = renderJinjaTemplate(bootstrapTemplate, {
       agent_user: shellQuote(cfg.agent_user),
@@ -249,7 +247,6 @@ export class AppServerContainerService implements AppServerTransport {
       "-i",
       "--name",
       this.containerName,
-      ...dnsArgs,
       "--entrypoint",
       "bash",
       ...mountArgs,

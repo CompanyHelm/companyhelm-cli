@@ -38,7 +38,6 @@ async function dedicatedAuth(cfg: Config, db: any) {
   const port = cfg.codex.codex_auth_port;
   const socatPort = port + 1;
   const containerName = `companyhelm-codex-auth-${Date.now()}`;
-  const dnsArgs = cfg.runtime_dns_servers.flatMap((server) => ["--dns", server]);
 
   p.log.info("Starting Codex login inside a container...");
   p.log.info("A browser URL will appear -- open it to complete authentication.");
@@ -56,7 +55,6 @@ async function dedicatedAuth(cfg: Config, db: any) {
       "-it",
       "--name",
       containerName,
-      ...dnsArgs,
       "-p",
       `${port}:${socatPort}`,
       "--entrypoint",

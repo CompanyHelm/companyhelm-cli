@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 
-const DEFAULT_RUNTIME_DNS_SERVERS = ["1.1.1.1", "8.8.8.8"] as const;
 const DEFAULT_RUNTIME_IMAGE_REPOSITORY = "companyhelm/runner";
 const FALLBACK_RUNTIME_IMAGE_VERSION = "latest";
 
@@ -20,17 +19,6 @@ function loadRuntimeImageVersion(): string {
 }
 
 const DEFAULT_RUNTIME_IMAGE = `${DEFAULT_RUNTIME_IMAGE_REPOSITORY}:${loadRuntimeImageVersion()}`;
-
-function parseRuntimeDnsServers(value: unknown): unknown {
-    if (typeof value !== "string") {
-        return value;
-    }
-
-    return value
-        .split(",")
-        .map((server) => server.trim())
-        .filter((server) => server.length > 0);
-}
 
 export const codexConfig = z.object({
     codex_auth_file_path: z.string()
@@ -83,12 +71,6 @@ export const config = z.object({
             "Host Docker endpoint when use_host_docker_runtime is enabled. Supported: unix:///<socket-path> or tcp://localhost:<port>.",
         )
         .default("unix:///var/run/docker.sock"),
-    runtime_dns_servers: z.preprocess(
-        parseRuntimeDnsServers,
-        z.array(z.string().min(1)),
-    )
-        .describe("DNS servers applied to runtime-related Docker containers.")
-        .default(() => [...DEFAULT_RUNTIME_DNS_SERVERS]),
     thread_git_skills_directory: z.string()
         .describe("Container directory where thread git skill repositories are cloned.")
         .default("/skills"),
