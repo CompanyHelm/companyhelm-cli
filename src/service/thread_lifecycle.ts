@@ -67,10 +67,19 @@ export interface RuntimeAgentCliConfig {
   token: string;
 }
 
+export interface HostDockerTcpUnixRelayOptions {
+  containerName: string;
+  listenPort: number;
+  socketPath: string;
+  mountSource: string;
+  image?: string;
+}
+
 const CONTAINER_START_TIMEOUT_MS = 30_000;
 const CONTAINER_START_POLL_MS = 500;
 const DEFAULT_HOST_DOCKER_PATH = "unix:///var/run/docker.sock";
 const HOST_DOCKER_INTERNAL_GATEWAY = "host.docker.internal:host-gateway";
+const DEFAULT_TCP_UNIX_RELAY_IMAGE = "alpine/socat";
 
 interface UnixHostDockerPath {
   mode: "unix";
@@ -489,6 +498,28 @@ export function buildRuntimeContainerOptions(options: ThreadContainerCreateOptio
   };
 }
 
+function buildHostDockerTcpUnixRelayContainerOptions(options: HostDockerTcpUnixRelayOptions): ContainerCreateOptions {
+  const relayImage = options.image?.trim().length ? options.image.trim() : DEFAULT_TCP_UNIX_RELAY_IMAGE;
+  return {
+    name: options.containerName,
+    Image: relayImage,
+    Cmd: [
+      `TCP-LISTEN:${String(options.listenPort)},reuseaddr,fork`,
+      `UNIX-CONNECT:${options.socketPath}`,
+    ],
+    HostConfig: {
+      NetworkMode: "host",
+      Mounts: [
+        {
+          Type: "bind",
+          Source: options.mountSource,
+          Target: options.mountSource,
+        },
+      ],
+    },
+  };
+}
+
 function isContainerNotFound(error: unknown): boolean {
   if (typeof error !== "object" || error === null) {
     return false;
@@ -856,6 +887,14 @@ export class ThreadContainerService {
       ["exec", "-u", "0", name, "bash", "-lc", script],
       `Failed to provision thread git skills in runtime container '${name}'`,
     );
+  }
+
+  async ensureHostDockerTcpUnixRelay(options: HostDockerTcpUnixRelayOptions): Promise<void> {
+    const relayImage = options.image?.trim().length ? options.image.trim() : DEFAULT_TCP_UNIX_RELAY_IMAGE;
+    await this.ensureImageAvailable(relayImage);
+    await this.forceRemoveContainer(options.containerName).catch(() => undefined);
+    await this.docker.createContainer(buildHostDockerTcpUnixRelayContainerOptions(options));
+    await this.ensureContainerRunning(options.containerName);
   }
 
   async stopContainer(name: string): Promise<void> {

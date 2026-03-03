@@ -20,8 +20,9 @@ import type { Command } from "commander";
 import { and, eq } from "drizzle-orm";
 import * as grpc from "@grpc/grpc-js";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection, createServer, type Server } from "node:net";
+import { dirname, join } from "node:path";
 import { config as configSchema, type Config } from "../config.js";
 import { startup } from "./startup.js";
 import {
@@ -53,6 +54,7 @@ import {
 import {
   buildSharedThreadMounts,
   buildThreadContainerNames,
+  parseHostDockerPath,
   resolveThreadDirectory,
   resolveThreadsRootDirectory,
   ThreadContainerService,
@@ -75,6 +77,7 @@ import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
 import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
+import { expandHome } from "../utils/path.js";
 import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
@@ -108,6 +111,8 @@ const YOLO_SANDBOX_MODE: SandboxMode = "danger-full-access";
 const YOLO_SANDBOX_POLICY: SandboxPolicy = { type: "dangerFullAccess" };
 const DOCKER_INTERNAL_HOSTNAME = "host.docker.internal";
 const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
+const HOST_DOCKER_AGENT_API_RELAY_CONTAINER_NAME = "companyhelm-agent-api-relay";
+const HOST_DOCKER_AGENT_API_RELAY_SHARED_ROOT = "/workspace";
 
 interface ThreadAppServerSession {
   runtimeContainer: string;
@@ -314,6 +319,15 @@ interface ResolvedThreadNameUpdate {
   threadName?: string;
 }
 
+interface ParsedAgentApiEndpoint {
+  host: string;
+  port: number;
+}
+
+interface HostDockerAgentApiRelayHandle {
+  close: () => Promise<void>;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -376,7 +390,188 @@ export function normalizeThreadAgentApiUrlForRuntime(agentApiUrl: string): strin
   const target = firstSlashIndex >= 0 ? trimmed.slice(0, firstSlashIndex) : trimmed;
   const pathSuffix = firstSlashIndex >= 0 ? trimmed.slice(firstSlashIndex) : "";
   const rewrittenTarget = rewriteLocalTargetForDockerRuntime(target);
+  if (rewrittenTarget !== target) {
+    return `http://${rewrittenTarget}${pathSuffix}`;
+  }
   return `${rewrittenTarget}${pathSuffix}`;
+}
+
+function parseAgentApiEndpoint(agentApiUrl: string): ParsedAgentApiEndpoint | null {
+  const trimmed = agentApiUrl.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  if (trimmed.includes("://")) {
+    try {
+      const parsed = new URL(trimmed);
+      const host = parsed.hostname.trim();
+      if (!host) {
+        return null;
+      }
+
+      const port =
+        parsed.port.length > 0
+          ? Number.parseInt(parsed.port, 10)
+          : parsed.protocol === "https:"
+            ? 443
+            : 80;
+      if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+        return null;
+      }
+
+      return { host, port };
+    } catch {
+      return null;
+    }
+  }
+
+  const firstSlashIndex = trimmed.indexOf("/");
+  const target = firstSlashIndex >= 0 ? trimmed.slice(0, firstSlashIndex) : trimmed;
+  if (!target) {
+    return null;
+  }
+
+  if (target.startsWith("[")) {
+    const closingBracketIndex = target.indexOf("]");
+    if (closingBracketIndex <= 1) {
+      return null;
+    }
+
+    const host = target.slice(1, closingBracketIndex).trim();
+    const portPart = target.slice(closingBracketIndex + 1);
+    if (!portPart.startsWith(":")) {
+      return null;
+    }
+
+    const port = Number.parseInt(portPart.slice(1), 10);
+    if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) {
+      return null;
+    }
+
+    return { host, port };
+  }
+
+  const colonIndex = target.lastIndexOf(":");
+  if (colonIndex <= 0 || colonIndex === target.length - 1) {
+    return null;
+  }
+
+  const host = target.slice(0, colonIndex).trim();
+  const port = Number.parseInt(target.slice(colonIndex + 1), 10);
+  if (!host || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    return null;
+  }
+
+  return { host, port };
+}
+
+function buildHostDockerAgentApiRelayRoot(cfg: Config): string {
+  if (existsSync(HOST_DOCKER_AGENT_API_RELAY_SHARED_ROOT)) {
+    return join(HOST_DOCKER_AGENT_API_RELAY_SHARED_ROOT, WORKSPACE_INSTALLATIONS_DIRECTORY, "relays");
+  }
+
+  return join(expandHome(cfg.config_directory), "relays");
+}
+
+async function startUnixSocketToTcpRelay(
+  socketPath: string,
+  targetHost: string,
+  targetPort: number,
+): Promise<HostDockerAgentApiRelayHandle> {
+  mkdirSync(dirname(socketPath), { recursive: true });
+  rmSync(socketPath, { force: true });
+
+  const server: Server = createServer((clientSocket) => {
+    const upstreamSocket = createConnection({ host: targetHost, port: targetPort });
+
+    const closePair = (): void => {
+      clientSocket.destroy();
+      upstreamSocket.destroy();
+    };
+
+    clientSocket.on("error", closePair);
+    upstreamSocket.on("error", closePair);
+    clientSocket.pipe(upstreamSocket);
+    upstreamSocket.pipe(clientSocket);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    const handleListenError = (error: Error): void => {
+      server.off("listening", handleListening);
+      reject(error);
+    };
+    const handleListening = (): void => {
+      server.off("error", handleListenError);
+      resolve();
+    };
+    server.once("error", handleListenError);
+    server.once("listening", handleListening);
+    server.listen(socketPath);
+  });
+
+  try {
+    chmodSync(socketPath, 0o666);
+  } catch {
+    // Best-effort permission update.
+  }
+
+  return {
+    close: async () => {
+      await new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      });
+      rmSync(socketPath, { force: true });
+    },
+  };
+}
+
+async function setupHostDockerAgentApiRelay(cfg: Config, logger: Logger): Promise<HostDockerAgentApiRelayHandle | null> {
+  if (!cfg.use_host_docker_runtime) {
+    return null;
+  }
+
+  const hostDocker = parseHostDockerPath(cfg.host_docker_path);
+  if (hostDocker.mode !== "tcp") {
+    return null;
+  }
+
+  const runtimeEndpoint = parseAgentApiEndpoint(normalizeThreadAgentApiUrlForRuntime(cfg.agent_api_url));
+  const upstreamEndpoint = parseAgentApiEndpoint(cfg.agent_api_url);
+  if (!runtimeEndpoint || !upstreamEndpoint) {
+    return null;
+  }
+  if (runtimeEndpoint.host.toLowerCase() !== DOCKER_INTERNAL_HOSTNAME) {
+    return null;
+  }
+
+  const relayRoot = buildHostDockerAgentApiRelayRoot(cfg);
+  const relaySocketPath = join(relayRoot, `agent-api-${String(runtimeEndpoint.port)}.sock`);
+  const localRelay = await startUnixSocketToTcpRelay(relaySocketPath, upstreamEndpoint.host, upstreamEndpoint.port);
+  const containerService = new ThreadContainerService();
+
+  try {
+    await containerService.ensureHostDockerTcpUnixRelay({
+      containerName: HOST_DOCKER_AGENT_API_RELAY_CONTAINER_NAME,
+      listenPort: runtimeEndpoint.port,
+      socketPath: relaySocketPath,
+      mountSource: relayRoot,
+    });
+  } catch (error: unknown) {
+    await localRelay.close().catch(() => undefined);
+    throw error;
+  }
+
+  logger.info(
+    `Started host-docker agent API relay '${HOST_DOCKER_AGENT_API_RELAY_CONTAINER_NAME}' on port ${String(runtimeEndpoint.port)}.`,
+  );
+
+  return {
+    close: async () => {
+      await localRelay.close().catch(() => undefined);
+      await containerService.forceRemoveContainer(HOST_DOCKER_AGENT_API_RELAY_CONTAINER_NAME).catch(() => undefined);
+    },
+  };
 }
 
 export function extractThreadNameUpdateFromNotification(
@@ -2851,9 +3046,12 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
     maxBufferedEvents: cfg.client_message_buffer_limit,
     logger,
   });
+  let hostDockerAgentApiRelay: HostDockerAgentApiRelayHandle | null = null;
   let reconnectAttempt = 0;
 
   try {
+    hostDockerAgentApiRelay = await setupHostDockerAgentApiRelay(cfg, logger);
+
     while (true) {
       const apiClient = new CompanyhelmApiClient({ apiUrl: cfg.companyhelm_api_url, logger });
       let commandChannel: CompanyhelmCommandChannel | null = null;
@@ -2912,6 +3110,11 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
       await new Promise((resolve) => setTimeout(resolve, COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS));
     }
   } finally {
+    if (hostDockerAgentApiRelay) {
+      await hostDockerAgentApiRelay.close().catch((error: unknown) => {
+        logger.warn(`Failed to stop host-docker agent API relay: ${toErrorMessage(error)}`);
+      });
+    }
     const droppedMessages = commandMessageSink.getDroppedMessageCount();
     if (droppedMessages > 0) {
       logger.warn(`Dropped ${droppedMessages} outbound client message(s) while command channel was disconnected.`);
