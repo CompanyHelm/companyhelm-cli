@@ -19,6 +19,7 @@ test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   assert.equal(rendered.includes("/workspace/.companyhelm/installations.json"), true);
   assert.equal(rendered.includes("list-installations"), true);
   assert.equal(rendered.includes("gh-use-installation"), true);
+  assert.equal(rendered.includes("gh pr create --body-file"), true);
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
   assert.equal(rendered.includes("AWS CLI is pre-installed and available"), true);
