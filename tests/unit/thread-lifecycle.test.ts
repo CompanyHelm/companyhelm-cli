@@ -779,6 +779,7 @@ test("ThreadContainerService validates playwright chromium availability in runti
   assert.equal(invocation.options.encoding, "utf8");
   assert.match(invocation.args[6], /if ! command -v codex >/);
   assert.match(invocation.args[6], /if ! command -v companyhelm-agent >/);
+  assert.match(invocation.args[6], /if ! command -v aws >/);
   assert.match(invocation.args[6], /if ! command -v playwright >/);
   assert.match(invocation.args[6], /PLAYWRIGHT_CACHE_DIR="\$\{PLAYWRIGHT_BROWSERS_PATH:-\/ms-playwright\}"/);
   assert.match(invocation.args[6], /find "\$PLAYWRIGHT_CACHE_DIR" -type f -path "\*\/chrome-linux\/chrome"/);
@@ -907,7 +908,7 @@ test("ThreadContainerService surfaces runtime tooling validation failures", asyn
         agentUser: "agent",
         agentHomeDirectory: "/home/agent",
       }),
-    /Failed to validate runtime tooling \(nvm\/codex\/companyhelm-agent\/playwright\) in container 'companyhelm-runtime-thread-tooling-error' \(exit 10\): playwright missing/,
+    /Failed to validate runtime tooling \(nvm\/codex\/companyhelm-agent\/aws\/playwright\) in container 'companyhelm-runtime-thread-tooling-error' \(exit 10\): playwright missing/,
   );
 });
 
