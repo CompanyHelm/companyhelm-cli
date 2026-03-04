@@ -13,7 +13,22 @@ Docker is available, the docker host runs in a separate container. The network i
 - Nested DinD is not supported in this environment because the outer runtime already uses rootless DinD.
 - If you need to use Docker in Docker you can mount the docker socket in the container and use this environment DinD to run containers within containers.
 
-{{github_installations_section}}
+## GitHub Installations
+
+- Synced GitHub installation credentials are written to `/workspace/.companyhelm/installations.json`.
+- Use `list-installations` to inspect installation IDs, repository scopes, tokens, and expiration timestamps.
+- Use `gh-use-installation <installation-id>` to configure `gh` authentication for a specific installation.
+
+```bash
+# Inspect synced installation credentials
+list-installations
+
+# Configure gh to use installation 112331765
+gh-use-installation 112331765
+
+# Verify gh is authenticated for github.com
+gh auth status --hostname github.com
+```
 
 ## Available CLI Tools
 
