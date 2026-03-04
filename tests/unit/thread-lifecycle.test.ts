@@ -661,7 +661,7 @@ test("ThreadContainerService provisions runtime bashrc with nvm bootstrap in age
 
   assert.ok(invocation);
   assert.equal(invocation.command, "docker");
-  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-bashrc", "bash", "-lc"]);
+  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "agent", "companyhelm-runtime-thread-bashrc", "bash", "-lc"]);
   assert.equal(invocation.options.encoding, "utf8");
   assert.match(invocation.args[6], /AGENT_HOME='\/home\/agent'/);
   assert.match(invocation.args[6], /BASHRC_CONTENT='/);
@@ -700,12 +700,11 @@ test("ThreadContainerService writes thread-scoped Codex config.toml into runtime
   assert.equal(invocation.command, "docker");
   assert.deepEqual(
     invocation.args.slice(0, 6),
-    ["exec", "-u", "0", "companyhelm-runtime-thread-codex-config", "bash", "-lc"],
+    ["exec", "-u", "agent", "companyhelm-runtime-thread-codex-config", "bash", "-lc"],
   );
   assert.equal(invocation.options.encoding, "utf8");
   assert.match(invocation.args[6], /CONFIG_CONTENT='/);
   assert.match(invocation.args[6], /printf '%s' "\$CONFIG_CONTENT" > "\$AGENT_HOME\/\.codex\/config\.toml"/);
-  assert.match(invocation.args[6], /chown "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME\/\.codex\/config\.toml"/);
   assert.match(invocation.args[6], /mcp_servers\.context7/);
 });
 
@@ -742,7 +741,7 @@ test("ThreadContainerService writes companyhelm-agent CLI config into runtime ho
   assert.equal(invocation.command, "docker");
   assert.deepEqual(
     invocation.args.slice(0, 6),
-    ["exec", "-u", "0", "companyhelm-runtime-thread-agent-cli", "bash", "-lc"],
+    ["exec", "-u", "agent", "companyhelm-runtime-thread-agent-cli", "bash", "-lc"],
   );
   assert.equal(invocation.options.encoding, "utf8");
   assert.match(invocation.args[6], /CONFIG_PATH='\/home\/agent\/\.config\/companyhelm-agent-cli\/config\.json'/);
@@ -827,9 +826,9 @@ test("ThreadContainerService configures default git author values in runtime rep
 });
 
 test("ThreadContainerService provisions thread git skills with shallow clone and codex skill symlinks", async () => {
-  let invocation: { command: string; args: string[]; options: Record<string, unknown> } | null = null;
+  const invocations: Array<{ command: string; args: string[]; options: Record<string, unknown> }> = [];
   const runCommand = (command: string, args: readonly string[], options: Record<string, unknown>) => {
-    invocation = { command, args: [...args], options };
+    invocations.push({ command, args: [...args], options });
     return {
       pid: 1,
       output: [null, "", ""],
@@ -865,20 +864,27 @@ test("ThreadContainerService provisions thread git skills with shallow clone and
     },
   );
 
-  assert.ok(invocation);
-  assert.equal(invocation.command, "docker");
-  assert.deepEqual(invocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-skills", "bash", "-lc"]);
-  assert.equal(invocation.options.encoding, "utf8");
-  assert.match(invocation.args[6], /SKILLS_ROOT='\/skills'/);
-  assert.match(invocation.args[6], /CODEX_SKILLS_ROOT='\/home\/agent\/\.codex\/skills'/);
-  assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$SKILLS_ROOT"/);
-  assert.match(invocation.args[6], /git clone --depth 1 --branch "\$PACKAGE_COMMIT_REF" "\$PACKAGE_REPO_URL" "\$PACKAGE_DIR"/);
-  assert.match(invocation.args[6], /git -C "\$PACKAGE_DIR" fetch --depth 1 origin "\$PACKAGE_COMMIT_REF"/);
-  assert.match(invocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/brainstorming'/);
-  assert.match(invocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/systematic-debugging'/);
-  assert.match(invocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/brainstorming'/);
-  assert.match(invocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/systematic-debugging'/);
-  assert.match(invocation.args[6], /ln -s "\$SKILL_SOURCE" "\$SKILL_LINK"/);
+  assert.equal(invocations.length, 2);
+  const cloneInvocation = invocations[0];
+  const linkInvocation = invocations[1];
+  assert.equal(cloneInvocation.command, "docker");
+  assert.deepEqual(cloneInvocation.args.slice(0, 6), ["exec", "-u", "0", "companyhelm-runtime-thread-skills", "bash", "-lc"]);
+  assert.equal(cloneInvocation.options.encoding, "utf8");
+  assert.match(cloneInvocation.args[6], /SKILLS_ROOT='\/skills'/);
+  assert.match(cloneInvocation.args[6], /install -d -m 0755 "\$SKILLS_ROOT"/);
+  assert.match(cloneInvocation.args[6], /git clone --depth 1 --branch "\$PACKAGE_COMMIT_REF" "\$PACKAGE_REPO_URL" "\$PACKAGE_DIR"/);
+  assert.match(cloneInvocation.args[6], /git -C "\$PACKAGE_DIR" fetch --depth 1 origin "\$PACKAGE_COMMIT_REF"/);
+
+  assert.equal(linkInvocation.command, "docker");
+  assert.deepEqual(linkInvocation.args.slice(0, 6), ["exec", "-u", "agent", "companyhelm-runtime-thread-skills", "bash", "-lc"]);
+  assert.equal(linkInvocation.options.encoding, "utf8");
+  assert.match(linkInvocation.args[6], /SKILLS_ROOT='\/skills'/);
+  assert.match(linkInvocation.args[6], /CODEX_SKILLS_ROOT='\/home\/agent\/\.codex\/skills'/);
+  assert.match(linkInvocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/brainstorming'/);
+  assert.match(linkInvocation.args[6], /SKILL_SOURCE='\/skills\/01-superpowers\/skills\/systematic-debugging'/);
+  assert.match(linkInvocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/brainstorming'/);
+  assert.match(linkInvocation.args[6], /SKILL_LINK='\/home\/agent\/\.codex\/skills\/systematic-debugging'/);
+  assert.match(linkInvocation.args[6], /ln -s "\$SKILL_SOURCE" "\$SKILL_LINK"/);
 });
 
 test("ThreadContainerService surfaces runtime tooling validation failures", async () => {
