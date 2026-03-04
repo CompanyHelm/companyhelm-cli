@@ -634,6 +634,12 @@ test("ThreadContainerService provisions runtime user identity with docker exec a
   assert.match(invocation.args[6], /"\$AGENT_USER ALL=\(ALL\) NOPASSWD:ALL"/);
   assert.match(invocation.args[6], /visudo -cf "\$SUDOERS_FILE"/);
   assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$AGENT_HOME\/\.codex"/);
+  assert.match(invocation.args[6], /install -d -m 0755 -o "\$AGENT_UID" -g "\$AGENT_GID" "\$AGENT_HOME\/\.cache"/);
+  assert.match(invocation.args[6], /PLAYWRIGHT_SHARED_CACHE="\/ms-playwright"/);
+  assert.match(invocation.args[6], /PLAYWRIGHT_DEFAULT_CACHE="\$AGENT_HOME\/\.cache\/ms-playwright"/);
+  assert.match(invocation.args[6], /install -d -m 0755 "\$PLAYWRIGHT_SHARED_CACHE"/);
+  assert.match(invocation.args[6], /chown -R "\$AGENT_UID:\$AGENT_GID" "\$PLAYWRIGHT_SHARED_CACHE"/);
+  assert.match(invocation.args[6], /ln -s "\$PLAYWRIGHT_SHARED_CACHE" "\$PLAYWRIGHT_DEFAULT_CACHE"/);
   assert.match(invocation.args[6], /chown -R "\$AGENT_UID:\$AGENT_GID" "\$AGENT_HOME"/);
 });
 
@@ -781,7 +787,7 @@ test("ThreadContainerService validates playwright chromium availability in runti
   assert.match(invocation.args[6], /if ! command -v companyhelm-agent >/);
   assert.match(invocation.args[6], /if ! command -v aws >/);
   assert.match(invocation.args[6], /if ! command -v playwright >/);
-  assert.match(invocation.args[6], /PLAYWRIGHT_CACHE_DIR="\$\{PLAYWRIGHT_BROWSERS_PATH:-\/ms-playwright\}"/);
+  assert.match(invocation.args[6], /PLAYWRIGHT_CACHE_DIR="\$\{PLAYWRIGHT_BROWSERS_PATH:-\$HOME\/\.cache\/ms-playwright\}"/);
   assert.match(invocation.args[6], /find "\$PLAYWRIGHT_CACHE_DIR" -type f -path "\*\/chrome-linux\/chrome"/);
   assert.match(invocation.args[6], /npx playwright install chromium/);
 });
