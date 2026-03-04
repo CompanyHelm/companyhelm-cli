@@ -51,4 +51,4 @@ The mount definition is shared for DinD and runtime so mount behavior stays cons
 - Runtime startup sets default git author values when missing:
   - Global fallback: `git_user_name` / `git_user_email`.
   - Repository-local fallback: applies the same defaults to any repo found under `/workspace` that is missing local git author settings.
-- Runtime startup validates core tooling (`nvm`, `codex`, `playwright`) and confirms a Chromium browser binary is available under `PLAYWRIGHT_BROWSERS_PATH` (defaults to `/ms-playwright`).
+- Runtime startup validates core tooling (`nvm`, `codex`, `companyhelm-agent`, `aws`, `playwright`) and confirms a Chromium browser binary is available under `PLAYWRIGHT_BROWSERS_PATH` (defaults to `/ms-playwright`).

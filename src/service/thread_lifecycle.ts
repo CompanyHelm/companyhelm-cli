@@ -268,6 +268,12 @@ function buildRuntimeToolingValidationScript(user: ThreadContainerUser): string 
     "  exit 1",
     "fi",
     "",
+    'if ! command -v aws >/dev/null 2>&1; then',
+    '  echo "aws CLI is not available in runtime PATH." >&2',
+    '  echo "Fix: install awscli in the runtime image." >&2',
+    "  exit 1",
+    "fi",
+    "",
     'if ! command -v playwright >/dev/null 2>&1; then',
     '  echo "playwright CLI is not available after sourcing nvm." >&2',
     '  echo "Fix: install playwright in the runtime image (for example: npm install --global playwright)." >&2',
@@ -786,7 +792,7 @@ export class ThreadContainerService {
     const script = buildRuntimeToolingValidationScript(user);
     this.runDockerExecScript(
       ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
-      `Failed to validate runtime tooling (nvm/codex/companyhelm-agent/playwright) in container '${name}'`,
+      `Failed to validate runtime tooling (nvm/codex/companyhelm-agent/aws/playwright) in container '${name}'`,
     );
   }
 
