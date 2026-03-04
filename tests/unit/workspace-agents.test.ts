@@ -3,10 +3,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  AGENTS_MD_AGENT_CLI_SECTION,
-  AGENTS_MD_CLI_TOOLS_SECTION,
-  AGENTS_MD_GITHUB_INSTALLATIONS_SECTION,
-  AGENTS_MD_WORKSPACE_SECTION,
   ensureWorkspaceAgentsMd,
   renderRuntimeAgentsMd,
 } from "../../dist/service/workspace_agents.js";
@@ -19,6 +15,7 @@ test("renderRuntimeAgentsMd includes workspace and CLI sections", () => {
   assert.equal(rendered.includes("/workspace/.companyhelm/installations.json"), true);
   assert.equal(rendered.includes("list-installations"), true);
   assert.equal(rendered.includes("gh-use-installation"), true);
+  assert.equal(rendered.includes("gh pr create --body-file"), true);
   assert.equal(rendered.includes("not initialized as a Git repository"), true);
   assert.equal(rendered.includes("## Available CLI Tools"), true);
   assert.equal(rendered.includes("AWS CLI is pre-installed and available"), true);
@@ -52,7 +49,11 @@ test("ensureWorkspaceAgentsMd appends missing sections to existing AGENTS.md", (
   const agentsPath = join(workspaceDir, "AGENTS.md");
 
   try {
-    writeFileSync(agentsPath, `# Agent Instructions\n\n${AGENTS_MD_WORKSPACE_SECTION}`, "utf8");
+    writeFileSync(
+      agentsPath,
+      "# Agent Instructions\n\n## Workspace Structure\n\nCustom workspace section text.\n",
+      "utf8",
+    );
 
     ensureWorkspaceAgentsMd(workspaceDir);
 
@@ -61,9 +62,10 @@ test("ensureWorkspaceAgentsMd appends missing sections to existing AGENTS.md", (
     assert.equal(contents.includes("## GitHub Installations"), true);
     assert.equal(contents.includes("## Available CLI Tools"), true);
     assert.equal(contents.includes("## CompanyHelm Agent CLI"), true);
-    assert.equal(contents.includes(AGENTS_MD_GITHUB_INSTALLATIONS_SECTION.trim()), true);
-    assert.equal(contents.includes(AGENTS_MD_CLI_TOOLS_SECTION.trim()), true);
-    assert.equal(contents.includes(AGENTS_MD_AGENT_CLI_SECTION.trim()), true);
+    assert.equal(contents.includes("list-installations"), true);
+    assert.equal(contents.includes("gh-use-installation"), true);
+    assert.equal(contents.includes("gh pr create --body-file"), true);
+    assert.equal(contents.includes("companyhelm-agent"), true);
   } finally {
     rmSync(workspaceDir, { recursive: true, force: true });
   }
