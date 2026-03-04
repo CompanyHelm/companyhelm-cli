@@ -300,13 +300,10 @@ function buildRuntimeBashrcProvisionScript(user: ThreadContainerUser): string {
   return [
     "set -euo pipefail",
     `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
-    `AGENT_UID=${shellQuote(String(user.uid))}`,
-    `AGENT_GID=${shellQuote(String(user.gid))}`,
     `BASHRC_CONTENT=${shellQuote(bashrcContent)}`,
     "",
-    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME"',
+    'install -d -m 0755 "$AGENT_HOME"',
     'printf \'%s\' "$BASHRC_CONTENT" > "$AGENT_HOME/.bashrc"',
-    'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME/.bashrc"',
     'chmod 0644 "$AGENT_HOME/.bashrc"',
   ].join("\n");
 }
@@ -344,23 +341,19 @@ function buildRuntimeGitConfigScript(gitUserName: string, gitUserEmail: string):
   ].join("\n");
 }
 
-function buildRuntimeThreadGitSkillsProvisionScript(
-  user: ThreadContainerUser,
-  options: ThreadGitSkillProvisionOptions,
-): string {
-  const cloneRootDirectory = options.cloneRootDirectory.trim().length > 0
+function resolveThreadGitSkillsCloneRootDirectory(options: ThreadGitSkillProvisionOptions): string {
+  return options.cloneRootDirectory.trim().length > 0
     ? options.cloneRootDirectory.trim()
     : "/skills";
-  const codexSkillsDirectory = join(user.agentHomeDirectory, ".codex", "skills");
+}
+
+function buildRuntimeThreadGitSkillsCloneScript(options: ThreadGitSkillProvisionOptions): string {
+  const cloneRootDirectory = resolveThreadGitSkillsCloneRootDirectory(options);
   const scriptLines = [
     "set -euo pipefail",
-    `AGENT_UID=${shellQuote(String(user.uid))}`,
-    `AGENT_GID=${shellQuote(String(user.gid))}`,
     `SKILLS_ROOT=${shellQuote(cloneRootDirectory)}`,
-    `CODEX_SKILLS_ROOT=${shellQuote(codexSkillsDirectory)}`,
     "",
-    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$SKILLS_ROOT"',
-    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$CODEX_SKILLS_ROOT"',
+    'install -d -m 0755 "$SKILLS_ROOT"',
     "",
     "if ! command -v git >/dev/null 2>&1; then",
     '  echo "git is not available in the runtime container." >&2',
@@ -389,7 +382,27 @@ function buildRuntimeThreadGitSkillsProvisionScript(
       "fi",
       'chmod -R a+rX "$PACKAGE_DIR" || true',
     );
+  }
 
+  return scriptLines.join("\n");
+}
+
+function buildRuntimeThreadGitSkillsLinkScript(
+  user: ThreadContainerUser,
+  options: ThreadGitSkillProvisionOptions,
+): string {
+  const cloneRootDirectory = resolveThreadGitSkillsCloneRootDirectory(options);
+  const codexSkillsDirectory = join(user.agentHomeDirectory, ".codex", "skills");
+  const scriptLines = [
+    "set -euo pipefail",
+    `SKILLS_ROOT=${shellQuote(cloneRootDirectory)}`,
+    `CODEX_SKILLS_ROOT=${shellQuote(codexSkillsDirectory)}`,
+    "",
+    'install -d -m 0755 "$CODEX_SKILLS_ROOT"',
+  ];
+
+  for (const pkg of options.packages) {
+    const checkoutPath = join(cloneRootDirectory, pkg.checkoutDirectoryName);
     for (const skill of pkg.skills) {
       scriptLines.push(
         "",
@@ -421,15 +434,12 @@ function buildRuntimeAgentCliConfigScript(
   const configContent = `${JSON.stringify(config, null, 2)}\n`;
   return [
     "set -euo pipefail",
-    `AGENT_UID=${shellQuote(String(user.uid))}`,
-    `AGENT_GID=${shellQuote(String(user.gid))}`,
     `CONFIG_DIR=${shellQuote(configDirectory)}`,
     `CONFIG_PATH=${shellQuote(configPath)}`,
     `CONFIG_CONTENT=${shellQuote(configContent)}`,
     "",
-    'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$CONFIG_DIR"',
+    'install -d -m 0755 "$CONFIG_DIR"',
     'printf \'%s\' "$CONFIG_CONTENT" > "$CONFIG_PATH"',
-    'chown "$AGENT_UID:$AGENT_GID" "$CONFIG_PATH"',
     'chmod 0600 "$CONFIG_PATH"',
   ].join("\n");
 }
@@ -783,7 +793,7 @@ export class ThreadContainerService {
   async ensureRuntimeContainerBashrc(name: string, user: ThreadContainerUser): Promise<void> {
     const script = buildRuntimeBashrcProvisionScript(user);
     this.runDockerExecScript(
-      ["exec", "-u", "0", name, "bash", "-lc", script],
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to provision runtime .bashrc in container '${name}'`,
     );
   }
@@ -796,17 +806,14 @@ export class ThreadContainerService {
     const script = [
       "set -euo pipefail",
       `AGENT_HOME=${shellQuote(user.agentHomeDirectory)}`,
-      `AGENT_UID=${shellQuote(String(user.uid))}`,
-      `AGENT_GID=${shellQuote(String(user.gid))}`,
       `CONFIG_CONTENT=${shellQuote(configToml)}`,
       "",
-      'install -d -m 0755 -o "$AGENT_UID" -g "$AGENT_GID" "$AGENT_HOME/.codex"',
+      'install -d -m 0755 "$AGENT_HOME/.codex"',
       'printf \'%s\' "$CONFIG_CONTENT" > "$AGENT_HOME/.codex/config.toml"',
-      'chown "$AGENT_UID:$AGENT_GID" "$AGENT_HOME/.codex/config.toml"',
       'chmod 0644 "$AGENT_HOME/.codex/config.toml"',
     ].join("\n");
     this.runDockerExecScript(
-      ["exec", "-u", "0", name, "bash", "-lc", script],
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to write runtime Codex config.toml in container '${name}'`,
     );
   }
@@ -818,7 +825,7 @@ export class ThreadContainerService {
   ): Promise<void> {
     const script = buildRuntimeAgentCliConfigScript(user, config);
     this.runDockerExecScript(
-      ["exec", "-u", "0", name, "bash", "-lc", script],
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", script],
       `Failed to write runtime companyhelm-agent CLI config in container '${name}'`,
     );
   }
@@ -845,9 +852,15 @@ export class ThreadContainerService {
       return;
     }
 
-    const script = buildRuntimeThreadGitSkillsProvisionScript(user, options);
+    const cloneScript = buildRuntimeThreadGitSkillsCloneScript(options);
     this.runDockerExecScript(
-      ["exec", "-u", "0", name, "bash", "-lc", script],
+      ["exec", "-u", "0", name, "bash", "-lc", cloneScript],
+      `Failed to provision thread git skills in runtime container '${name}'`,
+    );
+
+    const linkScript = buildRuntimeThreadGitSkillsLinkScript(user, options);
+    this.runDockerExecScript(
+      ["exec", "-u", user.agentUser, name, "bash", "-lc", linkScript],
       `Failed to provision thread git skills in runtime container '${name}'`,
     );
   }
