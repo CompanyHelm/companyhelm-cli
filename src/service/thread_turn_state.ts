@@ -4,7 +4,6 @@ import { threads } from "../state/schema.js";
 
 export interface ThreadMessageExecutionState {
   id: string;
-  agentId: string;
   workspace: string;
   sdkThreadId: string | null;
   model: string;
@@ -27,7 +26,6 @@ export interface ThreadTurnStateUpdate {
 
 export async function loadThreadMessageExecutionState(
   stateDbPath: string,
-  agentId: string,
   threadId: string,
 ): Promise<ThreadMessageExecutionState | undefined> {
   const { db, client } = await initDb(stateDbPath);
@@ -35,7 +33,6 @@ export async function loadThreadMessageExecutionState(
     return await db
       .select({
         id: threads.id,
-        agentId: threads.agentId,
         workspace: threads.workspace,
         sdkThreadId: threads.sdkThreadId,
         model: threads.model,
@@ -50,7 +47,7 @@ export async function loadThreadMessageExecutionState(
         gid: threads.gid,
       })
       .from(threads)
-      .where(and(eq(threads.id, threadId), eq(threads.agentId, agentId)))
+      .where(eq(threads.id, threadId))
       .get();
   } finally {
     client.close();
@@ -59,7 +56,6 @@ export async function loadThreadMessageExecutionState(
 
 export async function updateThreadTurnState(
   stateDbPath: string,
-  agentId: string,
   threadId: string,
   update: ThreadTurnStateUpdate,
 ): Promise<void> {
@@ -68,7 +64,7 @@ export async function updateThreadTurnState(
     await db
       .update(threads)
       .set(update)
-      .where(and(eq(threads.id, threadId), eq(threads.agentId, agentId)));
+      .where(eq(threads.id, threadId));
   } finally {
     client.close();
   }

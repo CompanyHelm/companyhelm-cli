@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import type { Command } from "commander";
-import { and, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
 import { buildNvmCodexBootstrapScript } from "../../service/runtime_shell.js";
 import { ensureThreadRuntimeReady } from "../../service/thread_runtime.js";
@@ -8,7 +8,6 @@ import { initDb } from "../../state/db.js";
 import { threads } from "../../state/schema.js";
 
 interface ThreadDockerCommandOptions {
-  agentId: string;
   threadId: string;
 }
 
@@ -42,14 +41,14 @@ export async function runThreadDockerCommand(options: ThreadDockerCommandOptions
     threadState = await db
       .select()
       .from(threads)
-      .where(and(eq(threads.id, options.threadId), eq(threads.agentId, options.agentId)))
+      .where(eq(threads.id, options.threadId))
       .get();
   } finally {
     client.close();
   }
 
   if (!threadState) {
-    throw new Error(`Thread '${options.threadId}' was not found for agent '${options.agentId}'.`);
+    throw new Error(`Thread '${options.threadId}' was not found.`);
   }
 
   await ensureThreadRuntimeReady({
@@ -91,7 +90,6 @@ export function registerThreadDockerCommand(threadCommand: Command): void {
     .description(
       "Start the thread containers when needed, then open an interactive bash session in the runtime container.",
     )
-    .requiredOption("--agent-id <id>", "Agent id that owns the thread.")
     .requiredOption("--thread-id <id>", "Thread id to open in Docker.")
     .action(runThreadDockerCommand);
 }

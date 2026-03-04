@@ -10,7 +10,7 @@ import {
   removePendingUserMessageRequestIdForTurn,
 } from "../../dist/service/thread_user_message_request_store.js";
 import { initDb } from "../../dist/state/db.js";
-import { agents, agentSdks, llmModels, threads } from "../../dist/state/schema.js";
+import { agentSdks, llmModels, threads } from "../../dist/state/schema.js";
 
 function createTempStateDbPath(): { rootDir: string; stateDbPath: string } {
   const rootDir = mkdtempSync(join(tmpdir(), "companyhelm-request-store-"));
@@ -20,15 +20,13 @@ function createTempStateDbPath(): { rootDir: string; stateDbPath: string } {
   };
 }
 
-async function seedThread(stateDbPath: string, agentId: string, threadId: string): Promise<void> {
+async function seedThread(stateDbPath: string, threadId: string): Promise<void> {
   const { db, client } = await initDb(stateDbPath);
   try {
     await db.insert(agentSdks).values({ name: "codex", authentication: "host" });
     await db.insert(llmModels).values({ name: "gpt-5", sdkName: "codex", reasoningLevels: ["high"] });
-    await db.insert(agents).values({ id: agentId, name: "Agent", sdk: "codex" });
     await db.insert(threads).values({
       id: threadId,
-      agentId,
       sdkThreadId: "sdk-thread",
       model: "gpt-5",
       reasoningLevel: "high",
@@ -52,7 +50,7 @@ test("request store assigns and consumes per item in FIFO order", async () => {
   const { rootDir, stateDbPath } = createTempStateDbPath();
 
   try {
-    await seedThread(stateDbPath, "agent-1", "thread-1");
+    await seedThread(stateDbPath, "thread-1");
 
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-1", "turn-1", "req-1");
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-1", "turn-1", "req-2");
@@ -92,7 +90,7 @@ test("request store falls back to FIFO consume when item assignment is missing",
   const { rootDir, stateDbPath } = createTempStateDbPath();
 
   try {
-    await seedThread(stateDbPath, "agent-2", "thread-2");
+    await seedThread(stateDbPath, "thread-2");
 
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-2", "turn-2", "req-10");
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-2", "turn-2", "req-11");
@@ -114,7 +112,7 @@ test("request store supports targeted removal and full turn cleanup", async () =
   const { rootDir, stateDbPath } = createTempStateDbPath();
 
   try {
-    await seedThread(stateDbPath, "agent-3", "thread-3");
+    await seedThread(stateDbPath, "thread-3");
 
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-3", "turn-3", "req-20");
     await enqueuePendingUserMessageRequestIdForTurn(stateDbPath, "thread-3", "turn-3", "req-21");

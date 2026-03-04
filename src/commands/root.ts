@@ -1,15 +1,12 @@
 import { create } from "@bufbuild/protobuf";
 import {
-  AgentStatus,
   ItemStatus,
   ItemType,
   ClientMessageSchema,
   ThreadStatus,
   TurnStatus,
-  type CreateAgentRequest,
   type CreateThreadRequest,
   type CreateUserMessageRequest,
-  type DeleteAgentRequest,
   type DeleteThreadRequest,
   type InterruptTurnRequest,
   type ClientMessage,
@@ -73,7 +70,7 @@ import type { TurnStartParams } from "../generated/codex-app-server/v2/TurnStart
 import type { TurnSteerParams } from "../generated/codex-app-server/v2/TurnSteerParams.js";
 import type { UserInput } from "../generated/codex-app-server/v2/UserInput.js";
 import { initDb } from "../state/db.js";
-import { agents, agentSdks, llmModels, threads } from "../state/schema.js";
+import { agentSdks, llmModels, threads } from "../state/schema.js";
 import { createLogger, type Logger } from "../utils/logger.js";
 import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
@@ -1658,10 +1655,6 @@ function removeWorkspaceDirectory(workspacePath: string): void {
   rmSync(workspacePath, { recursive: true, force: true });
 }
 
-function resolveAgentWorkspaceDirectory(cfg: Config, agentId: string): string {
-  return join(resolveThreadsRootDirectory(cfg.config_directory, cfg.workspaces_directory), `agent-${agentId}`);
-}
-
 async function sendRequestError(
   commandChannel: ClientMessageSink,
   errorMessage: string,
@@ -1673,23 +1666,6 @@ async function sendRequestError(
       case: "requestError",
       value: {
         errorMessage,
-      },
-    },
-  }) as ClientMessage;
-  await commandChannel.send(message);
-}
-
-async function sendAgentUpdate(
-  commandChannel: ClientMessageSink,
-  agentId: string,
-  status: AgentStatus,
-): Promise<void> {
-  const message = create(ClientMessageSchema, {
-    payload: {
-      case: "agentUpdate",
-      value: {
-        agentId,
-        status,
       },
     },
   }) as ClientMessage;
@@ -1846,26 +1822,6 @@ async function refreshCodexModelsForRegistration(cfg: Config, logger: Logger): P
   }
 }
 
-async function createAgentInDb(cfg: Config, command: CreateAgentRequest): Promise<string | null> {
-  if (command.agentSdk !== "codex") {
-    return `Unsupported agent SDK '${command.agentSdk}'.`;
-  }
-
-  const { db, client } = await initDb(cfg.state_db_path);
-  try {
-    await db.insert(agents).values({
-      id: command.agentId,
-      name: command.agentId,
-      sdk: "codex",
-    });
-    return null;
-  } catch (error: unknown) {
-    return toErrorMessage(error);
-  } finally {
-    client.close();
-  }
-}
-
 async function resolveThreadAuthMode(cfg: Config): Promise<ThreadAuthMode> {
   const { db, client } = await initDb(cfg.state_db_path);
   try {
@@ -1884,24 +1840,6 @@ async function resolveThreadAuthMode(cfg: Config): Promise<ThreadAuthMode> {
   }
 }
 
-async function handleCreateAgentRequest(
-  cfg: Config,
-  commandChannel: ClientMessageSink,
-  request: CreateAgentRequest,
-  logger: Logger,
-): Promise<void> {
-  logger.debug(`Received createAgentRequest for agent '${request.agentId}' using sdk '${request.agentSdk}'.`);
-  const failureMessage = await createAgentInDb(cfg, request);
-  if (failureMessage) {
-    logger.warn(`Failed to create agent '${request.agentId}': ${failureMessage}`);
-    await sendRequestError(commandChannel, failureMessage);
-    return;
-  }
-
-  logger.info(`Agent '${request.agentId}' created.`);
-  await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.READY);
-}
-
 async function handleCreateThreadRequest(
   cfg: Config,
   commandChannel: ClientMessageSink,
@@ -1913,13 +1851,13 @@ async function handleCreateThreadRequest(
 ): Promise<void> {
   const threadId = (request.threadId ?? "").trim();
   if (!threadId) {
-    logger.warn(`Rejecting createThreadRequest for agent '${request.agentId}': threadId is required.`);
+    logger.warn("Rejecting createThreadRequest: threadId is required.");
     await sendRequestError(commandChannel, "Thread id is required.", requestId);
     return;
   }
 
   const { db, client } = await initDb(cfg.state_db_path);
-  const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, request.agentId, threadId);
+  const threadDirectory = resolveThreadDirectory(cfg.config_directory, cfg.workspaces_directory, threadId);
   const containerNames = buildThreadContainerNames(threadId);
   const hostInfo = getHostInfo(cfg.codex.codex_auth_path);
   const normalizedAdditionalModelInstructions = normalizeAdditionalModelInstructions(
@@ -1929,24 +1867,16 @@ async function handleCreateThreadRequest(
   const threadMcpServers = normalizeThreadMcpServersForThreadConfig(request.mcpServers, logger);
   const cliSecret = String(request.cliSecret ?? "").trim();
   logger.debug(
-    `Received createThreadRequest for agent '${request.agentId}' (thread '${threadId}', model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
+    `Received createThreadRequest for thread '${threadId}' (model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
   );
 
   let authMode: ThreadAuthMode;
 
   try {
-    const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
-    if (!existingAgent) {
-      logger.warn(`Cannot create thread '${threadId}': agent '${request.agentId}' does not exist.`);
-      await sendRequestError(commandChannel, `Agent '${request.agentId}' does not exist.`, requestId);
-      return;
-    }
-
     authMode = await resolveThreadAuthMode(cfg);
 
     await db.insert(threads).values({
       id: threadId,
-      agentId: request.agentId,
       sdkThreadId: null,
       cliSecret: cliSecret.length > 0 ? cliSecret : null,
       model: request.model,
@@ -2054,78 +1984,8 @@ async function handleCreateThreadRequest(
     updateClient.close();
   }
 
-  logger.info(`Thread '${threadId}' created and ready for agent '${request.agentId}'.`);
+  logger.info(`Thread '${threadId}' created and ready.`);
   await sendThreadUpdate(commandChannel, threadId, ThreadStatus.READY);
-}
-
-async function handleDeleteAgentRequest(
-  cfg: Config,
-  commandChannel: ClientMessageSink,
-  request: DeleteAgentRequest,
-  logger: Logger,
-): Promise<void> {
-  const { db, client } = await initDb(cfg.state_db_path);
-
-  let threadIds: string[] = [];
-
-  try {
-    const existingAgent = await db.select().from(agents).where(eq(agents.id, request.agentId)).get();
-    if (!existingAgent) {
-      logger.warn(`Delete requested for missing agent '${request.agentId}'. Treating as deleted.`);
-      await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.DELETED);
-      return;
-    }
-
-    const threadRows = await db
-      .select({
-        id: threads.id,
-      })
-      .from(threads)
-      .where(eq(threads.agentId, request.agentId))
-      .orderBy(threads.id)
-      .all();
-
-    threadIds = threadRows.map((thread) => thread.id);
-  } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to load agent '${request.agentId}': ${toErrorMessage(error)}`);
-    return;
-  } finally {
-    client.close();
-  }
-
-  for (const threadId of threadIds) {
-    const deleteResult = await deleteThreadWithCleanup(cfg, {
-      agentId: request.agentId,
-      threadId,
-    });
-    if (deleteResult.kind === "error") {
-      await sendRequestError(
-        commandChannel,
-        `Failed to delete thread '${threadId}' while deleting agent '${request.agentId}': ${deleteResult.message}`,
-      );
-      return;
-    }
-    if (deleteResult.kind === "not_found") {
-      logger.warn(
-        `Thread '${threadId}' was already missing while deleting agent '${request.agentId}'. Treating as deleted.`,
-      );
-    }
-    await sendThreadUpdate(commandChannel, threadId, ThreadStatus.DELETED);
-  }
-
-  removeWorkspaceDirectory(resolveAgentWorkspaceDirectory(cfg, request.agentId));
-
-  const { db: deleteDb, client: deleteClient } = await initDb(cfg.state_db_path);
-  try {
-    await deleteDb.delete(agents).where(eq(agents.id, request.agentId));
-  } catch (error: unknown) {
-    await sendRequestError(commandChannel, `Failed to delete agent '${request.agentId}': ${toErrorMessage(error)}`);
-    return;
-  } finally {
-    deleteClient.close();
-  }
-
-  await sendAgentUpdate(commandChannel, request.agentId, AgentStatus.DELETED);
 }
 
 type ExistingThreadResource = {
@@ -2141,7 +2001,6 @@ type DeleteThreadWithCleanupResult =
   | { kind: "error"; message: string };
 
 type ThreadDeletionRequest = {
-  agentId: string;
   threadId: string;
 };
 
@@ -2161,7 +2020,7 @@ async function deleteThreadWithCleanup(
         workspace: threads.workspace,
       })
       .from(threads)
-      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)))
+      .where(eq(threads.id, request.threadId))
       .get();
   } catch (error: unknown) {
     return {
@@ -2199,7 +2058,7 @@ async function deleteThreadWithCleanup(
   try {
     await deleteDb
       .delete(threads)
-      .where(and(eq(threads.id, request.threadId), eq(threads.agentId, request.agentId)));
+      .where(eq(threads.id, request.threadId));
   } catch (error: unknown) {
     return {
       kind: "error",
@@ -2221,7 +2080,7 @@ async function handleDeleteThreadRequest(
   const deleteResult = await deleteThreadWithCleanup(cfg, request);
   if (deleteResult.kind === "not_found") {
     logger.warn(
-      `Delete requested for missing thread '${request.threadId}' for agent '${request.agentId}'. Treating as deleted.`,
+      `Delete requested for missing thread '${request.threadId}'. Treating as deleted.`,
     );
     await sendThreadUpdate(commandChannel, request.threadId, ThreadStatus.DELETED);
     return;
@@ -2243,7 +2102,7 @@ async function reportNoRunningInterruptAsReady(
   logMessage: string,
 ): Promise<void> {
   try {
-    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+    await updateThreadTurnState(cfg, request.threadId, {
       isCurrentTurnRunning: false,
     });
   } catch (error: unknown) {
@@ -2272,7 +2131,7 @@ async function handleInterruptTurnRequest(
 ): Promise<void> {
   let threadState: ThreadMessageExecutionState | undefined;
   try {
-    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.agentId, request.threadId);
+    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.threadId);
   } catch (error: unknown) {
     await sendRequestError(commandChannel, `Failed to load thread '${request.threadId}': ${toErrorMessage(error)}`);
     return;
@@ -2358,7 +2217,6 @@ async function handleInterruptTurnRequest(
 
 async function updateThreadTurnState(
   cfg: Config,
-  agentId: string,
   threadId: string,
   update: {
     sdkThreadId?: string | null;
@@ -2366,7 +2224,7 @@ async function updateThreadTurnState(
     isCurrentTurnRunning?: boolean;
   },
 ): Promise<void> {
-  await updateThreadTurnStateInDb(cfg.state_db_path, agentId, threadId, update);
+  await updateThreadTurnStateInDb(cfg.state_db_path, threadId, update);
 }
 
 async function waitForThreadTurnCompletion(
@@ -2544,7 +2402,7 @@ async function executeCreateUserMessageRequest(
       }
     } else if (appServerSession.sdkThreadId) {
       sdkThreadId = appServerSession.sdkThreadId;
-      await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
+      await updateThreadTurnState(cfg, request.threadId, { sdkThreadId });
     } else {
       const developerInstructions = buildThreadDeveloperInstructions(threadState.additionalModelInstructions);
       const threadStartParams: ThreadStartParams = {
@@ -2570,7 +2428,7 @@ async function executeCreateUserMessageRequest(
       appServerSession.sdkThreadId = sdkThreadId;
       appServerSession.rolloutPath = threadStartResult.thread.path;
       rememberThreadRolloutPath(request.threadId, threadStartResult.thread.path);
-      await updateThreadTurnState(cfg, request.agentId, request.threadId, { sdkThreadId });
+      await updateThreadTurnState(cfg, request.threadId, { sdkThreadId });
     }
 
     if (!sdkThreadId) {
@@ -2632,7 +2490,7 @@ async function executeCreateUserMessageRequest(
     turnAccepted = true;
     await enqueuePendingUserMessageRequestIdForTurn(cfg.state_db_path, request.threadId, sdkTurnId, requestId);
     enqueuedRequestTurnId = requestId ? sdkTurnId : null;
-    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+    await updateThreadTurnState(cfg, request.threadId, {
       sdkThreadId,
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: true,
@@ -2655,7 +2513,7 @@ async function executeCreateUserMessageRequest(
       requestId,
     );
 
-    await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+    await updateThreadTurnState(cfg, request.threadId, {
       currentSdkTurnId: sdkTurnId,
       isCurrentTurnRunning: false,
     });
@@ -2684,13 +2542,13 @@ async function executeCreateUserMessageRequest(
       );
     }
     if (startedFromIdle && !turnAccepted) {
-      await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+      await updateThreadTurnState(cfg, request.threadId, {
         isCurrentTurnRunning: false,
       }).catch(() => undefined);
     }
 
     logger.warn(
-      `Failed to create user message turn for thread '${request.threadId}' (agent '${request.agentId}'): ${toErrorMessage(error)}`,
+      `Failed to create user message turn for thread '${request.threadId}': ${toErrorMessage(error)}`,
     );
     await sendRequestError(commandChannel, toErrorMessage(error), requestId);
   } finally {
@@ -2718,7 +2576,7 @@ async function handleCreateUserMessageRequest(
   let threadState: ThreadMessageExecutionState | undefined;
 
   try {
-    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.agentId, request.threadId);
+    threadState = await loadThreadMessageExecutionState(cfg.state_db_path, request.threadId);
 
     if (!threadState) {
       await sendRequestError(commandChannel, `Thread '${request.threadId}' does not exist.`, requestId);
@@ -2758,7 +2616,7 @@ async function handleCreateUserMessageRequest(
   const startedFromIdle = !threadState.isCurrentTurnRunning;
   if (startedFromIdle) {
     try {
-      await updateThreadTurnState(cfg, request.agentId, request.threadId, {
+      await updateThreadTurnState(cfg, request.threadId, {
         isCurrentTurnRunning: true,
       });
       threadState.isCurrentTurnRunning = true;
@@ -2796,9 +2654,6 @@ async function runCommandLoop(
   for await (const serverMessage of commandChannel) {
     const requestId = extractServerMessageRequestId(serverMessage);
     switch (serverMessage.request.case) {
-      case "createAgentRequest":
-        await handleCreateAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
-        break;
       case "createThreadRequest":
         await handleCreateThreadRequest(
           cfg,
@@ -2809,9 +2664,6 @@ async function runCommandLoop(
           apiCallOptions,
           logger,
         );
-        break;
-      case "deleteAgentRequest":
-        await handleDeleteAgentRequest(cfg, commandMessageSink, serverMessage.request.value, logger);
         break;
       case "deleteThreadRequest":
         await handleDeleteThreadRequest(cfg, commandMessageSink, serverMessage.request.value, logger);

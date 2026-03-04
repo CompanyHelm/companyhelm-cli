@@ -1,14 +1,9 @@
 import type { Command } from "commander";
-import { eq } from "drizzle-orm";
 import { config as configSchema, type Config } from "../../config.js";
 import { initDb } from "../../state/db.js";
 import { threads } from "../../state/schema.js";
 
-interface ThreadListCommandOptions {
-  agentId: string;
-}
-
-export async function runThreadListCommand(options: ThreadListCommandOptions): Promise<void> {
+export async function runThreadListCommand(): Promise<void> {
   const cfg: Config = configSchema.parse({});
   const { db, client } = await initDb(cfg.state_db_path);
 
@@ -16,16 +11,15 @@ export async function runThreadListCommand(options: ThreadListCommandOptions): P
     const rows = await db
       .select()
       .from(threads)
-      .where(eq(threads.agentId, options.agentId))
       .orderBy(threads.id)
       .all();
 
     if (rows.length === 0) {
-      console.log(`No threads found for agent '${options.agentId}'.`);
+      console.log("No threads found.");
       return;
     }
 
-    console.log(`Threads for agent '${options.agentId}':`);
+    console.log("Threads:");
     for (const row of rows) {
       const dindLabel = row.dindContainer && row.dindContainer.trim().length > 0 ? row.dindContainer : "(none)";
       console.log(
@@ -41,7 +35,6 @@ export async function runThreadListCommand(options: ThreadListCommandOptions): P
 export function registerThreadListCommand(threadCommand: Command): void {
   threadCommand
     .command("list")
-    .description("List threads for a specific agent from the local state database.")
-    .requiredOption("--agent-id <id>", "Agent id used to filter threads.")
+    .description("List threads from the local state database.")
     .action(runThreadListCommand);
 }

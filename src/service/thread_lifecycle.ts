@@ -153,12 +153,10 @@ export function resolveThreadsRootDirectory(configDirectory: string, threadsDire
 export function resolveThreadDirectory(
   configDirectory: string,
   threadsDirectory: string,
-  agentId: string,
   threadId: string,
 ): string {
   return join(
     resolveThreadsRootDirectory(configDirectory, threadsDirectory),
-    `agent-${agentId}`,
     `thread-${threadId}`,
   );
 }
