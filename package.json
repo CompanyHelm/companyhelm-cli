@@ -1,5 +1,5 @@
 {
-  "name": "companyhelm-runner",
+  "name": "@companyhelm/cli",
   "version": "0.0.2",
   "description": "Run coding agents in fully isolated Docker sandboxes, locally.",
   "license": "Apache-2.0",
