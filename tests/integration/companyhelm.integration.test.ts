@@ -987,7 +987,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       ["brainstorming", "systematic-debugging"],
     );
     assert.ok(threadAgentCliPayload, "expected thread agent CLI payload to be parsed");
-    assert.equal(threadAgentCliPayload.agent_api_url, "http://host.docker.internal:50052");
+    assert.equal(threadAgentCliPayload.agent_api_url, "api.companyhelm.com:50052");
     assert.equal(threadAgentCliPayload.token, "thread-secret-github-installations");
   } finally {
     reconnectDelaySpy.mockRestore();
@@ -1537,7 +1537,7 @@ test(
         "expected companyhelm-agent config writes on each user message when thread secret exists",
       );
       const firstAgentCliConfig = ensureRuntimeContainerAgentCliConfigSpy.mock.calls[0]?.[2];
-      assert.equal(firstAgentCliConfig?.agent_api_url, "http://host.docker.internal:50052");
+      assert.equal(firstAgentCliConfig?.agent_api_url, "api.companyhelm.com:50052");
       assert.equal(firstAgentCliConfig?.token, "thread-secret-user-message");
       const codexConfigToml = String(ensureRuntimeContainerCodexConfigSpy.mock.calls[0]?.[2] ?? "");
       assert.equal(codexConfigToml.includes("[mcp_servers.\"context7\"]"), true, "expected context7 MCP table in config");

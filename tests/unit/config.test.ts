@@ -14,9 +14,14 @@ test("config defaults thread git skills clone directory", () => {
   assert.equal(cfg.thread_git_skills_directory, "/skills");
 });
 
+test("config defaults CompanyHelm server URL", () => {
+  const cfg = config.parse({});
+  assert.equal(cfg.companyhelm_api_url, "api.companyhelm.com:50051");
+});
+
 test("config defaults agent API URL for companyhelm-agent", () => {
   const cfg = config.parse({});
-  assert.equal(cfg.agent_api_url, "127.0.0.1:50052");
+  assert.equal(cfg.agent_api_url, "api.companyhelm.com:50052");
 });
 
 test("config accepts explicit agent API URL override", () => {
