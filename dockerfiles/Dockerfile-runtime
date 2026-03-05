@@ -118,29 +118,7 @@ RUN mkdir -p "$NVM_DIR" \
          @openai/codex \
          @playwright/cli@"${PLAYWRIGHT_CLI_VERSION}" \
          playwright@"${PLAYWRIGHT_VERSION}" \
-    # Install @companyhelm/agent-cli from npm tarball. If published package is not runnable,
-    # fall back to building from source repository.
-    && AGENT_CLI_TMP_DIR="$(mktemp -d)" \
-    && AGENT_CLI_TARBALL="$(npm pack @companyhelm/agent-cli --pack-destination "$AGENT_CLI_TMP_DIR" --silent)" \
-    && tar -xzf "$AGENT_CLI_TMP_DIR/$AGENT_CLI_TARBALL" -C "$AGENT_CLI_TMP_DIR" \
-    && ( \
-         cd "$AGENT_CLI_TMP_DIR/package" \
-         && npm install --omit=dev \
-         && AGENT_CLI_BUILT_TARBALL="$(npm pack --silent)" \
-         && npm install --global "$AGENT_CLI_BUILT_TARBALL" \
-       ) \
-    && if ! command -v companyhelm-agent >/dev/null 2>&1; then \
-         npm uninstall --global @companyhelm/agent-cli || true; \
-         git clone --depth 1 https://github.com/CompanyHelm/companyhelm-agent-cli.git "$AGENT_CLI_TMP_DIR/source"; \
-         ( \
-           cd "$AGENT_CLI_TMP_DIR/source" \
-           && npm install \
-           && npm run build \
-           && AGENT_CLI_SOURCE_TARBALL="$(npm pack --silent)" \
-           && npm install --global "$AGENT_CLI_SOURCE_TARBALL" \
-         ); \
-       fi \
-    && rm -rf "$AGENT_CLI_TMP_DIR" \
+         @companyhelm/agent-cli \
     && npx playwright install --no-shell chromium \
     && CHROMIUM_BIN="$(find "${PLAYWRIGHT_BROWSERS_PATH}" -type f -path "*/chrome-linux/chrome" | head -n 1)" \
     && [[ -n "${CHROMIUM_BIN}" ]] \
