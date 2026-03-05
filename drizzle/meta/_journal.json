@@ -71,6 +71,13 @@
       "when": 1772495488679,
       "tag": "0009_powerful_hellcat",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1772664695504,
+      "tag": "0010_wealthy_dorian_gray",
+      "breakpoints": true
     }
   ]
 }

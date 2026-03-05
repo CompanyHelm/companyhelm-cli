@@ -16,7 +16,6 @@ import { eq } from "drizzle-orm";
 
 const require = createRequire(import.meta.url);
 const {
-  AgentStatus,
   ClientMessageSchema,
   GithubInstallationAccessTokenResponseSchema: GetGithubInstallationAccessTokenForRunnerResponseSchema,
   GithubInstallationSchema: GithubInstallationForRunnerSchema,
@@ -39,7 +38,7 @@ const { config } = require("../../dist/config.js");
 const { AppServerService } = require("../../dist/service/app_server.js");
 const threadLifecycle = require("../../dist/service/thread_lifecycle.js");
 const { initDb } = require("../../dist/state/db.js");
-const { agents, agentSdks, llmModels, threads } = require("../../dist/state/schema.js");
+const { agentSdks, llmModels, threads } = require("../../dist/state/schema.js");
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -292,10 +291,10 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
         call.write(
           create(ServerMessageSchema, {
             request: {
-              case: "createAgentRequest",
+              case: "createThreadRequest",
               value: {
-                agentId: "agent-1",
-                agentSdk: "codex",
+                threadId: "thread-1",
+                model: "gpt-5.3-codex",
               },
             },
           }),
@@ -324,8 +323,8 @@ test("CompanyhelmApiClient registers first and streams messages both directions"
     );
 
     const firstServerMessage = await channel.nextMessage();
-    assert.equal(firstServerMessage?.request.case, "createAgentRequest");
-    assert.equal(firstServerMessage?.request.value.agentId, "agent-1");
+    assert.equal(firstServerMessage?.request.case, "createThreadRequest");
+    assert.equal(firstServerMessage?.request.value.threadId, "thread-1");
 
     await channel.send(
       create(ClientMessageSchema, {
@@ -633,11 +632,11 @@ test("companyhelm root command retries until server becomes available", async ()
   }
 });
 
-test("companyhelm root command returns requestError for createThreadRequest when agent does not exist", async () => {
-  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-missing-agent-");
+test("companyhelm root command returns requestError for createThreadRequest when model is not configured", async () => {
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-missing-model-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
-  const reconnectStopError = new Error("stop root command after missing-agent thread create validation");
+  const reconnectStopError = new Error("stop root command after missing-model thread create validation");
   let shouldStopAfterValidation = false;
   const nativeSetTimeout = global.setTimeout;
   const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
@@ -652,7 +651,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
     await seedStateDatabase(homeDirectory);
 
     let receivedClientUpdate: any = null;
-    const requestId = "request-missing-agent-create-thread";
+    const requestId = "request-missing-model-create-thread";
 
     const started = await startFakeServer("/grpc", {
       registerRunner(call, callback) {
@@ -663,14 +662,13 @@ test("companyhelm root command returns requestError for createThreadRequest when
           ServerMessageSchema,
           {
             request: {
-              case: "createThreadRequest",
-              value: {
-                agentId: "missing-agent",
-                threadId: "thread-missing-agent",
-                model: "gpt-5.3-codex",
+                case: "createThreadRequest",
+                value: {
+                threadId: "thread-missing-model",
+                model: "gpt-5.3-missing-model",
+                },
               },
             },
-          },
         ) as {
           $unknown?: Array<{ no: number; wireType: number; data: Buffer }>;
         };
@@ -700,13 +698,13 @@ test("companyhelm root command returns requestError for createThreadRequest when
         serverUrl: `127.0.0.1:${started.port}/grpc`,
       }),
       (error: unknown) => error === reconnectStopError,
-      "expected root command to stop after missing-agent thread create validation",
+      "expected root command to stop after missing-model thread create validation",
     );
 
     assert.ok(receivedClientUpdate, "expected CLI to send response for createThreadRequest");
     assert.equal(receivedClientUpdate.payload.case, "requestError");
     assert.equal(receivedClientUpdate.requestId, requestId);
-    assert.match(receivedClientUpdate.payload.value.errorMessage, /missing-agent/i);
+    assert.match(receivedClientUpdate.payload.value.errorMessage, /model/i);
   } finally {
     reconnectDelaySpy.mockRestore();
     if (server) {
@@ -749,7 +747,6 @@ test("companyhelm root command returns threadUpdate deleted for deleteThreadRequ
             request: {
               case: "deleteThreadRequest",
               value: {
-                agentId: "missing-agent",
                 threadId: "thread-missing-delete",
               },
             },
@@ -791,99 +788,11 @@ test("companyhelm root command returns threadUpdate deleted for deleteThreadRequ
     assert.equal(
       warnSpy.mock.calls.some((call) =>
         String(call[0]).includes(
-          "Delete requested for missing thread 'thread-missing-delete' for agent 'missing-agent'. Treating as deleted.",
+          "Delete requested for missing thread 'thread-missing-delete'. Treating as deleted.",
         ),
       ),
       true,
       "expected warning log for missing thread delete",
-    );
-  } finally {
-    reconnectDelaySpy.mockRestore();
-    warnSpy.mockRestore();
-    if (server) {
-      await shutdownServer(server);
-    }
-    process.env.HOME = previousHome;
-    await rm(homeDirectory, { recursive: true, force: true });
-  }
-});
-
-test("companyhelm root command returns agentUpdate deleted for deleteAgentRequest when agent does not exist", async () => {
-  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-delete-agent-missing-agent-");
-  let server: grpc.Server | undefined;
-  const previousHome = process.env.HOME;
-  const reconnectStopError = new Error("stop root command after missing-agent delete validation");
-  let shouldStopAfterValidation = false;
-  const nativeSetTimeout = global.setTimeout;
-  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
-    if (shouldStopAfterValidation && timeout === 1_000) {
-      throw reconnectStopError;
-    }
-    return nativeSetTimeout(handler, timeout, ...args);
-  }) as typeof global.setTimeout);
-  const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-
-  try {
-    process.env.HOME = homeDirectory;
-    await seedStateDatabase(homeDirectory);
-
-    let receivedRequestError: any = null;
-    let receivedDeletedAgentUpdate = false;
-
-    const started = await startFakeServer("/grpc", {
-      registerRunner(call, callback) {
-        callback(null, create(RegisterRunnerResponseSchema, {}));
-      },
-      controlChannel(call) {
-        call.write(
-          create(ServerMessageSchema, {
-            request: {
-              case: "deleteAgentRequest",
-              value: {
-                agentId: "missing-agent-delete",
-              },
-            },
-          }),
-        );
-
-        call.on("data", (message) => {
-          if (message.payload.case === "requestError") {
-            receivedRequestError = message;
-            call.end();
-            return;
-          }
-
-          if (
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "missing-agent-delete" &&
-            message.payload.value.status === AgentStatus.DELETED
-          ) {
-            receivedDeletedAgentUpdate = true;
-            shouldStopAfterValidation = true;
-            call.end();
-          }
-        });
-      },
-    });
-
-    server = started.server;
-
-    await assert.rejects(
-      runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      }),
-      (error: unknown) => error === reconnectStopError,
-      "expected root command to stop after missing-agent delete validation",
-    );
-
-    assert.equal(receivedRequestError, null, "did not expect requestError for missing agent delete");
-    assert.equal(receivedDeletedAgentUpdate, true, "expected deleted update for missing agent delete");
-    assert.equal(
-      warnSpy.mock.calls.some((call) =>
-        String(call[0]).includes("Delete requested for missing agent 'missing-agent-delete'. Treating as deleted."),
-      ),
-      true,
-      "expected warning log for missing agent delete",
     );
   } finally {
     reconnectDelaySpy.mockRestore();
@@ -921,7 +830,6 @@ test("companyhelm root command writes synced GitHub installations payload and CL
 
     let receivedRequestError: any = null;
     let createdThreadId: string | null = null;
-    let sentCreateThreadRequest = false;
 
     const started = await startFakeServer("/grpc", {
       registerRunner(call, callback) {
@@ -954,10 +862,22 @@ test("companyhelm root command writes synced GitHub installations payload and CL
         call.write(
           create(ServerMessageSchema, {
             request: {
-              case: "createAgentRequest",
+              case: "createThreadRequest",
               value: {
-                agentId: "agent-github-installations",
-                agentSdk: "codex",
+                threadId: "thread-github-installations",
+                model: "gpt-5.3-codex",
+                reasoningLevel: "high",
+                cliSecret: "thread-secret-github-installations",
+                gitSkillPackages: [
+                  {
+                    repositoryUrl: "https://github.com/obra/superpowers.git",
+                    commitReference: "main",
+                    skills: [
+                      { directoryPath: "skills/brainstorming" },
+                      { directoryPath: "skills/systematic-debugging" },
+                    ],
+                  },
+                ],
               },
             },
           }),
@@ -967,40 +887,6 @@ test("companyhelm root command writes synced GitHub installations payload and CL
           if (message.payload.case === "requestError") {
             receivedRequestError = message;
             call.end();
-            return;
-          }
-
-          if (
-            !sentCreateThreadRequest &&
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-github-installations" &&
-            message.payload.value.status === AgentStatus.READY
-          ) {
-            sentCreateThreadRequest = true;
-            call.write(
-              create(ServerMessageSchema, {
-                request: {
-                  case: "createThreadRequest",
-                  value: {
-                    agentId: "agent-github-installations",
-                    threadId: "thread-github-installations",
-                    model: "gpt-5.3-codex",
-                    reasoningLevel: "high",
-                    cliSecret: "thread-secret-github-installations",
-                    gitSkillPackages: [
-                      {
-                        repositoryUrl: "https://github.com/obra/superpowers.git",
-                        commitReference: "main",
-                        skills: [
-                          { directoryPath: "skills/brainstorming" },
-                          { directoryPath: "skills/systematic-debugging" },
-                        ],
-                      },
-                    ],
-                  },
-                },
-              }),
-            );
             return;
           }
 
@@ -1114,88 +1000,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
   }
 });
 
-test("companyhelm root command handles createAgentRequest by storing agent and sending update", async () => {
-  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-agent-");
-  let server: grpc.Server | undefined;
-  const previousHome = process.env.HOME;
-  const reconnectStopError = new Error("stop root command after create-agent validation");
-  let shouldStopAfterValidation = false;
-  const nativeSetTimeout = global.setTimeout;
-  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
-    if (shouldStopAfterValidation && timeout === 1_000) {
-      throw reconnectStopError;
-    }
-    return nativeSetTimeout(handler, timeout as any, ...args);
-  }) as typeof global.setTimeout);
-
-  try {
-    process.env.HOME = homeDirectory;
-    await seedStateDatabase(homeDirectory);
-
-    let receivedClientUpdate: any = null;
-
-    const started = await startFakeServer("/grpc", {
-      registerRunner(call, callback) {
-        callback(null, create(RegisterRunnerResponseSchema, {}));
-      },
-      controlChannel(call) {
-        call.write(
-          create(ServerMessageSchema, {
-            request: {
-              case: "createAgentRequest",
-              value: {
-                agentId: "agent-from-request",
-                agentSdk: "codex",
-              },
-            },
-          }),
-        );
-
-        call.on("data", (message) => {
-          receivedClientUpdate = message;
-          shouldStopAfterValidation = true;
-          call.end();
-        });
-      },
-    });
-
-    server = started.server;
-
-    await assert.rejects(
-      runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      }),
-      (error: unknown) => error === reconnectStopError,
-      "expected root command to stop after create-agent validation",
-    );
-
-    assert.ok(receivedClientUpdate, "expected agent update from runner");
-    assert.equal(receivedClientUpdate.payload.case, "agentUpdate");
-    assert.equal(receivedClientUpdate.payload.value.agentId, "agent-from-request");
-    assert.equal(receivedClientUpdate.payload.value.status, AgentStatus.READY);
-
-    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
-    const { db, client } = await initDb(stateDbPath);
-    try {
-      const storedAgents = await db.select().from(agents).all();
-      const createdAgent = storedAgents.find((agent) => agent.id === "agent-from-request");
-      assert.ok(createdAgent, "expected agent row to be created from createAgentRequest");
-      assert.equal(createdAgent.name, "agent-from-request");
-      assert.equal(createdAgent.sdk, "codex");
-    } finally {
-      client.close();
-    }
-  } finally {
-    reconnectDelaySpy.mockRestore();
-    if (server) {
-      await shutdownServer(server);
-    }
-    process.env.HOME = previousHome;
-    await rm(homeDirectory, { recursive: true, force: true });
-  }
-});
-
-test("companyhelm root command handles full lifecycle: create agent, create thread, delete thread, delete agent", async () => {
+test("companyhelm root command handles full lifecycle: create thread and delete thread", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-lifecycle-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
@@ -1237,11 +1042,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
     let receivedRequestError: any = null;
     let createdThreadId: string | null = null;
-
-    let sentCreateThreadRequest = false;
     let sentDeleteThreadRequest = false;
-    let sentDeleteAgentRequest = false;
-    let receivedDeleteAgentUpdate = false;
     let runtimeContainerPresentAtReady: boolean | null = null;
     let dindContainerPresentAtReady: boolean | null = null;
     let homeVolumePresentAtReady: boolean | null = null;
@@ -1252,7 +1053,6 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     let tmpVolumePresentAfterThreadDelete: boolean | null = null;
     let threadWorkspacePath: string | null = null;
     let expectedThreadWorkspacePath: string | null = null;
-    let expectedAgentWorkspacePath: string | null = null;
     let threadWorkspacePresentAtReady: boolean | null = null;
 
     const started = await startFakeServer("/grpc", {
@@ -1263,10 +1063,11 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
         call.write(
           create(ServerMessageSchema, {
             request: {
-              case: "createAgentRequest",
+              case: "createThreadRequest",
               value: {
-                agentId: "agent-for-lifecycle",
-                agentSdk: "codex",
+                threadId: "thread-for-lifecycle",
+                model: "gpt-5.3-codex",
+                reasoningLevel: "high",
               },
             },
           }),
@@ -1276,29 +1077,6 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
           if (message.payload.case === "requestError") {
             receivedRequestError = message;
             call.end();
-            return;
-          }
-
-          if (
-            !sentCreateThreadRequest &&
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-for-lifecycle" &&
-            message.payload.value.status === AgentStatus.READY
-          ) {
-            sentCreateThreadRequest = true;
-            call.write(
-              create(ServerMessageSchema, {
-                request: {
-                  case: "createThreadRequest",
-                  value: {
-                    agentId: "agent-for-lifecycle",
-                    threadId: "thread-for-lifecycle",
-                    model: "gpt-5.3-codex",
-                    reasoningLevel: "high",
-                  },
-                },
-              }),
-            );
             return;
           }
 
@@ -1322,10 +1100,8 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
             expectedThreadWorkspacePath = threadLifecycle.resolveThreadDirectory(
               path.join(homeDirectory, ".config", "companyhelm"),
               "workspaces",
-              "agent-for-lifecycle",
               createdThreadId,
             );
-            expectedAgentWorkspacePath = expectedThreadWorkspacePath ? path.dirname(expectedThreadWorkspacePath) : null;
             threadWorkspacePresentAtReady = threadWorkspacePath ? existsSync(threadWorkspacePath) : false;
 
             sentDeleteThreadRequest = true;
@@ -1334,7 +1110,6 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
                 request: {
                   case: "deleteThreadRequest",
                   value: {
-                    agentId: "agent-for-lifecycle",
                     threadId: createdThreadId,
                   },
                 },
@@ -1344,45 +1119,16 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
           }
 
           if (
-            !sentDeleteAgentRequest &&
             message.payload.case === "threadUpdate" &&
-            message.payload.value.status === ThreadStatus.DELETED
+            message.payload.value.status === ThreadStatus.DELETED &&
+            message.payload.value.threadId === createdThreadId
           ) {
             if (createdThreadId) {
-              runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(
-                `companyhelm-runtime-thread-${createdThreadId}`,
-              );
-              dindContainerPresentAfterThreadDelete = activeContainerNames.has(
-                `companyhelm-dind-thread-${createdThreadId}`,
-              );
-              homeVolumePresentAfterThreadDelete = activeVolumeNames.has(
-                `companyhelm-home-thread-${createdThreadId}`,
-              );
-              tmpVolumePresentAfterThreadDelete = activeVolumeNames.has(
-                `companyhelm-tmp-thread-${createdThreadId}`,
-              );
+              runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-runtime-thread-${createdThreadId}`);
+              dindContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-dind-thread-${createdThreadId}`);
+              homeVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-home-thread-${createdThreadId}`);
+              tmpVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-tmp-thread-${createdThreadId}`);
             }
-
-            sentDeleteAgentRequest = true;
-            call.write(
-              create(ServerMessageSchema, {
-                request: {
-                  case: "deleteAgentRequest",
-                  value: {
-                    agentId: "agent-for-lifecycle",
-                  },
-                },
-              }),
-            );
-            return;
-          }
-
-          if (
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-for-lifecycle" &&
-            message.payload.value.status === AgentStatus.DELETED
-          ) {
-            receivedDeleteAgentUpdate = true;
             shouldStopAfterValidation = true;
             call.end();
           }
@@ -1402,46 +1148,21 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
     assert.equal(receivedRequestError, null, "did not expect requestError during lifecycle flow");
     assert.ok(createdThreadId, "expected thread id from thread ready update");
-    assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
     assert.equal(runtimeContainerPresentAtReady, true, "expected runtime container to exist when thread is ready");
     assert.equal(dindContainerPresentAtReady, true, "expected dind container to exist when thread is ready");
     assert.equal(homeVolumePresentAtReady, true, "expected thread home volume to exist when thread is ready");
     assert.equal(tmpVolumePresentAtReady, true, "expected thread tmp volume to exist when thread is ready");
-    assert.equal(
-      runtimeContainerPresentAfterThreadDelete,
-      false,
-      "expected runtime container to be removed after deleteThreadRequest",
-    );
-    assert.equal(
-      dindContainerPresentAfterThreadDelete,
-      false,
-      "expected dind container to be removed after deleteThreadRequest",
-    );
-    assert.equal(
-      homeVolumePresentAfterThreadDelete,
-      false,
-      "expected thread home volume to be removed after deleteThreadRequest",
-    );
-    assert.equal(
-      tmpVolumePresentAfterThreadDelete,
-      false,
-      "expected thread tmp volume to be removed after deleteThreadRequest",
-    );
+    assert.equal(runtimeContainerPresentAfterThreadDelete, false, "expected runtime container to be removed after deleteThreadRequest");
+    assert.equal(dindContainerPresentAfterThreadDelete, false, "expected dind container to be removed after deleteThreadRequest");
+    assert.equal(homeVolumePresentAfterThreadDelete, false, "expected thread home volume to be removed after deleteThreadRequest");
+    assert.equal(tmpVolumePresentAfterThreadDelete, false, "expected thread tmp volume to be removed after deleteThreadRequest");
     assert.equal(threadWorkspacePresentAtReady, true, "expected thread workspace directory to exist when thread is ready");
     assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of lifecycle flow");
     assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home/tmp volumes at end of lifecycle flow");
 
     const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
     const { db, client } = await initDb(stateDbPath);
-
     try {
-      const storedAgents = await db.select().from(agents).all();
-      assert.equal(
-        storedAgents.some((agent) => agent.id === "agent-for-lifecycle"),
-        false,
-        "expected lifecycle agent to be removed",
-      );
-
       const storedThreads = await db.select().from(threads).all();
       assert.equal(
         storedThreads.some((thread) => thread.id === createdThreadId),
@@ -1454,9 +1175,7 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
 
     assert.equal(createThreadContainersSpy.mock.calls.length, 1);
     assert.equal(forceRemoveContainerSpy.mock.calls.length, 2);
-
     const createOptions = createThreadContainersSpy.mock.calls[0][0];
-
     assert.equal(createOptions.names.runtime, `companyhelm-runtime-thread-${createdThreadId}`);
     assert.equal(createOptions.names.dind, `companyhelm-dind-thread-${createdThreadId}`);
     assert.equal(createOptions.names.home, `companyhelm-home-thread-${createdThreadId}`);
@@ -1473,13 +1192,8 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
         mount.Type === "volume" && mount.Source === `companyhelm-tmp-thread-${createdThreadId}`,
     );
     assert.equal(tmpVolumeMount?.Target, "/tmp");
-    assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include agent/thread segmentation");
+    assert.equal(threadWorkspacePath, expectedThreadWorkspacePath, "expected workspace path to include thread segmentation");
     assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
-    assert.equal(
-      expectedAgentWorkspacePath ? existsSync(expectedAgentWorkspacePath) : false,
-      false,
-      "expected agent workspace directory to be removed",
-    );
 
     const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
     assert.deepEqual(removedContainerNames, [
@@ -1496,502 +1210,13 @@ test("companyhelm root command handles full lifecycle: create agent, create thre
     createThreadContainersSpy.mockRestore();
     forceRemoveContainerSpy.mockRestore();
     forceRemoveVolumeSpy.mockRestore();
-
     if (server) {
       await shutdownServer(server);
     }
-
     process.env.HOME = previousHome;
     await rm(homeDirectory, { recursive: true, force: true });
   }
 });
-
-test("companyhelm root command deleteAgentRequest deletes thread resources before deleting the agent", async () => {
-  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-delete-agent-cascade-");
-  let server: grpc.Server | undefined;
-  const previousHome = process.env.HOME;
-  const activeContainerNames = new Set<string>();
-  const activeVolumeNames = new Set<string>();
-  const reconnectStopError = new Error("stop root command after delete-agent cascade validation");
-  let shouldStopAfterValidation = false;
-  const nativeSetTimeout = global.setTimeout;
-  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
-    if (shouldStopAfterValidation && timeout === 1_000) {
-      throw reconnectStopError;
-    }
-    return nativeSetTimeout(handler, timeout, ...args);
-  }) as typeof global.setTimeout);
-
-  const createThreadContainersSpy = vi
-    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
-    .mockImplementation(async (options) => {
-      activeContainerNames.add(options.names.runtime);
-      activeContainerNames.add(options.names.dind);
-      activeVolumeNames.add(options.names.home);
-      activeVolumeNames.add(options.names.tmp);
-    });
-  const forceRemoveContainerSpy = vi
-    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
-    .mockImplementation(async (name) => {
-      activeContainerNames.delete(name);
-    });
-  const forceRemoveVolumeSpy = vi
-    .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveVolume")
-    .mockImplementation(async (name) => {
-      activeVolumeNames.delete(name);
-    });
-
-  try {
-    process.env.HOME = homeDirectory;
-    await seedStateDatabase(homeDirectory);
-    await writeHostAuthFile(homeDirectory);
-
-    let receivedRequestError: any = null;
-    let createdThreadId: string | null = null;
-    let sentCreateThreadRequest = false;
-    let sentDeleteAgentRequest = false;
-    let receivedThreadDeletedUpdate = false;
-    let receivedDeleteAgentUpdate = false;
-    let runtimeContainerPresentAfterThreadDelete: boolean | null = null;
-    let dindContainerPresentAfterThreadDelete: boolean | null = null;
-    let homeVolumePresentAfterThreadDelete: boolean | null = null;
-    let tmpVolumePresentAfterThreadDelete: boolean | null = null;
-    let threadWorkspacePath: string | null = null;
-    let agentWorkspacePath: string | null = null;
-    const deleteSequence: string[] = [];
-
-    const started = await startFakeServer("/grpc", {
-      registerRunner(call, callback) {
-        callback(null, create(RegisterRunnerResponseSchema, {}));
-      },
-      controlChannel(call) {
-        call.write(
-          create(ServerMessageSchema, {
-            request: {
-              case: "createAgentRequest",
-              value: {
-                agentId: "agent-delete-cascade",
-                agentSdk: "codex",
-              },
-            },
-          }),
-        );
-
-        call.on("data", (message) => {
-          if (message.payload.case === "requestError") {
-            receivedRequestError = message;
-            call.end();
-            return;
-          }
-
-          if (
-            !sentCreateThreadRequest &&
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-delete-cascade" &&
-            message.payload.value.status === AgentStatus.READY
-          ) {
-            sentCreateThreadRequest = true;
-            call.write(
-              create(ServerMessageSchema, {
-                request: {
-                  case: "createThreadRequest",
-                  value: {
-                    agentId: "agent-delete-cascade",
-                    threadId: "thread-delete-cascade",
-                    model: "gpt-5.3-codex",
-                    reasoningLevel: "high",
-                  },
-                },
-              }),
-            );
-            return;
-          }
-
-          if (
-            !sentDeleteAgentRequest &&
-            message.payload.case === "threadUpdate" &&
-            message.payload.value.status === ThreadStatus.READY
-          ) {
-            createdThreadId = message.payload.value.threadId;
-            const createOptions = createThreadContainersSpy.mock.calls[0]?.[0];
-            threadWorkspacePath = createOptions?.mounts?.[0]?.Source ?? null;
-            agentWorkspacePath = threadWorkspacePath ? path.dirname(threadWorkspacePath) : null;
-
-            sentDeleteAgentRequest = true;
-            call.write(
-              create(ServerMessageSchema, {
-                request: {
-                  case: "deleteAgentRequest",
-                  value: {
-                    agentId: "agent-delete-cascade",
-                  },
-                },
-              }),
-            );
-            return;
-          }
-
-          if (
-            message.payload.case === "threadUpdate" &&
-            message.payload.value.status === ThreadStatus.DELETED &&
-            message.payload.value.threadId === createdThreadId
-          ) {
-            receivedThreadDeletedUpdate = true;
-            deleteSequence.push("thread");
-
-            if (createdThreadId) {
-              runtimeContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-runtime-thread-${createdThreadId}`);
-              dindContainerPresentAfterThreadDelete = activeContainerNames.has(`companyhelm-dind-thread-${createdThreadId}`);
-              homeVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-home-thread-${createdThreadId}`);
-              tmpVolumePresentAfterThreadDelete = activeVolumeNames.has(`companyhelm-tmp-thread-${createdThreadId}`);
-            }
-            return;
-          }
-
-          if (
-            message.payload.case === "agentUpdate" &&
-            message.payload.value.agentId === "agent-delete-cascade" &&
-            message.payload.value.status === AgentStatus.DELETED
-          ) {
-            receivedDeleteAgentUpdate = true;
-            deleteSequence.push("agent");
-            shouldStopAfterValidation = true;
-            call.end();
-          }
-        });
-      },
-    });
-
-    server = started.server;
-
-    await assert.rejects(
-      runRootCommand({
-        serverUrl: `127.0.0.1:${started.port}/grpc`,
-      }),
-      (error: unknown) => error === reconnectStopError,
-      "expected root command to stop after first validated delete-agent cycle",
-    );
-
-    assert.equal(receivedRequestError, null, "did not expect requestError during delete-agent cascade flow");
-    assert.ok(createdThreadId, "expected thread id from thread ready update");
-    assert.equal(receivedThreadDeletedUpdate, true, "expected thread deleted update before deleting agent");
-    assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
-    assert.deepEqual(deleteSequence, ["thread", "agent"], "expected thread deletion update to arrive before agent deletion");
-    assert.equal(
-      runtimeContainerPresentAfterThreadDelete,
-      false,
-      "expected runtime container to be removed during deleteAgentRequest thread cleanup",
-    );
-    assert.equal(
-      dindContainerPresentAfterThreadDelete,
-      false,
-      "expected dind container to be removed during deleteAgentRequest thread cleanup",
-    );
-    assert.equal(
-      homeVolumePresentAfterThreadDelete,
-      false,
-      "expected thread home volume to be removed during deleteAgentRequest thread cleanup",
-    );
-    assert.equal(
-      tmpVolumePresentAfterThreadDelete,
-      false,
-      "expected thread tmp volume to be removed during deleteAgentRequest thread cleanup",
-    );
-    assert.equal(activeContainerNames.size, 0, "expected no remaining active containers at end of delete-agent cascade flow");
-    assert.equal(activeVolumeNames.size, 0, "expected no remaining active thread home/tmp volumes at end of delete-agent cascade flow");
-    assert.equal(threadWorkspacePath ? existsSync(threadWorkspacePath) : false, false, "expected thread workspace directory to be removed");
-    assert.equal(agentWorkspacePath ? existsSync(agentWorkspacePath) : false, false, "expected agent workspace directory to be removed");
-
-    const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
-    const { db, client } = await initDb(stateDbPath);
-
-    try {
-      const storedAgents = await db.select().from(agents).all();
-      assert.equal(
-        storedAgents.some((agent) => agent.id === "agent-delete-cascade"),
-        false,
-        "expected delete-agent-cascade agent to be removed",
-      );
-
-      const storedThreads = await db.select().from(threads).all();
-      assert.equal(
-        storedThreads.some((thread) => thread.id === createdThreadId),
-        false,
-        "expected delete-agent-cascade thread to be removed",
-      );
-    } finally {
-      client.close();
-    }
-
-    assert.equal(createThreadContainersSpy.mock.calls.length, 1);
-    assert.equal(forceRemoveContainerSpy.mock.calls.length, 2);
-    const removedContainerNames = forceRemoveContainerSpy.mock.calls.map((call) => call[0]);
-    assert.deepEqual(removedContainerNames, [
-      `companyhelm-runtime-thread-${createdThreadId}`,
-      `companyhelm-dind-thread-${createdThreadId}`,
-    ]);
-    const removedVolumeNames = forceRemoveVolumeSpy.mock.calls.map((call) => call[0]);
-    assert.deepEqual(removedVolumeNames, [
-      `companyhelm-home-thread-${createdThreadId}`,
-      `companyhelm-tmp-thread-${createdThreadId}`,
-    ]);
-  } finally {
-    reconnectDelaySpy.mockRestore();
-    createThreadContainersSpy.mockRestore();
-    forceRemoveContainerSpy.mockRestore();
-    forceRemoveVolumeSpy.mockRestore();
-
-    if (server) {
-      await shutdownServer(server);
-    }
-
-    process.env.HOME = previousHome;
-    await rm(homeDirectory, { recursive: true, force: true });
-  }
-});
-
-test(
-  "companyhelm root command creates real docker containers for thread and removes them on delete",
-  async () => {
-    if (!(await isDockerAvailable())) {
-      return;
-    }
-    if (!(await supportsRealThreadContainerLifecycle())) {
-      return;
-    }
-
-    const docker = new Dockerode();
-    const dockerSharedHomeRoot = existsSync("/workspace") ? "/workspace" : TEST_HOME_ROOT;
-    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-real-docker-lifecycle-", dockerSharedHomeRoot);
-    let server: grpc.Server | undefined;
-    const previousHome = process.env.HOME;
-    const reconnectStopError = new Error("stop root command after real docker lifecycle validation");
-    const nativeSetTimeout = global.setTimeout;
-    let shouldStopAfterValidation = false;
-    const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
-      if (shouldStopAfterValidation && timeout === 1_000) {
-        throw reconnectStopError;
-      }
-      return nativeSetTimeout(handler, timeout as any, ...args);
-    }) as typeof global.setTimeout);
-
-    let createdThreadId: string | null = null;
-    let runtimeContainerStatusAtReady: string | null = null;
-    let dindContainerStatusAtReady: string | null = null;
-    let homeVolumePresentAtReady: boolean | null = null;
-    let tmpVolumePresentAtReady: boolean | null = null;
-    let runtimeContainerAbsentAfterDelete: boolean | null = null;
-    let dindContainerAbsentAfterDelete: boolean | null = null;
-    let homeVolumeAbsentAfterDelete: boolean | null = null;
-    let tmpVolumeAbsentAfterDelete: boolean | null = null;
-    let workspacePathAtReady: string | null = null;
-    let workspaceExistsAtReady: boolean | null = null;
-    let workspaceAbsentAfterThreadDelete: boolean | null = null;
-    let agentWorkspacePathAtReady: string | null = null;
-    let agentWorkspaceExistsAfterAgentDelete: boolean | null = null;
-    let receivedRequestError: any = null;
-    let receivedDeleteAgentUpdate = false;
-    let channelHandlerError: Error | null = null;
-
-    try {
-      process.env.HOME = homeDirectory;
-      await seedStateDatabase(homeDirectory);
-      await writeHostAuthFile(homeDirectory);
-
-      let sentCreateThreadRequest = false;
-      let sentDeleteThreadRequest = false;
-      let sentDeleteAgentRequest = false;
-
-      const started = await startFakeServer("/grpc", {
-        registerRunner(call, callback) {
-          callback(null, create(RegisterRunnerResponseSchema, {}));
-        },
-        controlChannel(call) {
-          call.write(
-            create(ServerMessageSchema, {
-              request: {
-                case: "createAgentRequest",
-                value: {
-                  agentId: "agent-real-docker",
-                  agentSdk: "codex",
-                },
-              },
-            }),
-          );
-
-          call.on("data", (message) => {
-            void (async () => {
-              if (message.payload.case === "requestError") {
-                receivedRequestError = message;
-                call.end();
-                return;
-              }
-
-              if (
-                !sentCreateThreadRequest &&
-                message.payload.case === "agentUpdate" &&
-                message.payload.value.agentId === "agent-real-docker" &&
-                message.payload.value.status === AgentStatus.READY
-              ) {
-                sentCreateThreadRequest = true;
-                call.write(
-                  create(ServerMessageSchema, {
-                    request: {
-                      case: "createThreadRequest",
-                      value: {
-                        agentId: "agent-real-docker",
-                        threadId: "thread-real-docker",
-                        model: "gpt-5.3-codex",
-                      },
-                    },
-                  }),
-                );
-                return;
-              }
-
-              if (
-                !sentDeleteThreadRequest &&
-                message.payload.case === "threadUpdate" &&
-                message.payload.value.status === ThreadStatus.READY
-              ) {
-                createdThreadId = message.payload.value.threadId;
-
-                const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
-                const runtimeInspect = await docker.getContainer(names.runtime).inspect();
-                const dindInspect = await docker.getContainer(names.dind).inspect();
-                runtimeContainerStatusAtReady = runtimeInspect.State?.Status ?? null;
-                dindContainerStatusAtReady = dindInspect.State?.Status ?? null;
-                homeVolumePresentAtReady = await volumeExists(docker, names.home);
-                tmpVolumePresentAtReady = await volumeExists(docker, names.tmp);
-
-                const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
-                const { db, client } = await initDb(stateDbPath);
-                try {
-                  const threadRow = await db.select().from(threads).where(eq(threads.id, createdThreadId)).get();
-                  workspacePathAtReady = threadRow?.workspace ?? null;
-                  workspaceExistsAtReady = threadRow ? existsSync(threadRow.workspace) : false;
-                } finally {
-                  client.close();
-                }
-
-                sentDeleteThreadRequest = true;
-                call.write(
-                  create(ServerMessageSchema, {
-                    request: {
-                      case: "deleteThreadRequest",
-                      value: {
-                        agentId: "agent-real-docker",
-                        threadId: createdThreadId,
-                      },
-                    },
-                  }),
-                );
-                return;
-              }
-
-              if (
-                !sentDeleteAgentRequest &&
-                message.payload.case === "threadUpdate" &&
-                message.payload.value.status === ThreadStatus.DELETED
-              ) {
-                if (createdThreadId) {
-                  const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
-                  runtimeContainerAbsentAfterDelete = !(await containerExists(docker, names.runtime));
-                  dindContainerAbsentAfterDelete = !(await containerExists(docker, names.dind));
-                  homeVolumeAbsentAfterDelete = !(await volumeExists(docker, names.home));
-                  tmpVolumeAbsentAfterDelete = !(await volumeExists(docker, names.tmp));
-                }
-                workspaceAbsentAfterThreadDelete = workspacePathAtReady ? !existsSync(workspacePathAtReady) : false;
-                agentWorkspacePathAtReady = workspacePathAtReady ? path.dirname(workspacePathAtReady) : null;
-
-                sentDeleteAgentRequest = true;
-                call.write(
-                  create(ServerMessageSchema, {
-                    request: {
-                      case: "deleteAgentRequest",
-                      value: {
-                        agentId: "agent-real-docker",
-                      },
-                    },
-                  }),
-                );
-                return;
-              }
-
-              if (
-                message.payload.case === "agentUpdate" &&
-                message.payload.value.agentId === "agent-real-docker" &&
-                message.payload.value.status === AgentStatus.DELETED
-              ) {
-                agentWorkspaceExistsAfterAgentDelete = agentWorkspacePathAtReady ? existsSync(agentWorkspacePathAtReady) : false;
-                receivedDeleteAgentUpdate = true;
-                shouldStopAfterValidation = true;
-                call.end();
-              }
-            })().catch((error: unknown) => {
-              channelHandlerError = error instanceof Error ? error : new Error(String(error));
-              call.end();
-            });
-          });
-        },
-      });
-
-      server = started.server;
-
-      await assert.rejects(
-        runRootCommand({
-          serverUrl: `127.0.0.1:${started.port}/grpc`,
-        }),
-        (error: unknown) => error === reconnectStopError,
-        "expected root command to stop after first validated real-docker lifecycle",
-      );
-
-      assert.equal(channelHandlerError, null, channelHandlerError?.message ?? "unexpected channel handler error");
-      assert.equal(receivedRequestError, null, "did not expect requestError during real docker lifecycle");
-      assert.ok(createdThreadId, "expected thread id from thread ready update");
-      assert.equal(receivedDeleteAgentUpdate, true, "expected deleted update for agent");
-      assert.equal(runtimeContainerStatusAtReady, "created", "expected runtime container to be created (not started) when thread is ready");
-      assert.equal(dindContainerStatusAtReady, "created", "expected dind container to be created (not started) when thread is ready");
-      assert.equal(homeVolumePresentAtReady, true, "expected thread home volume to be created when thread is ready");
-      assert.equal(tmpVolumePresentAtReady, true, "expected thread tmp volume to be created when thread is ready");
-      assert.equal(workspaceExistsAtReady, true, "expected thread workspace directory to exist");
-      assert.equal(workspaceAbsentAfterThreadDelete, true, "expected thread workspace directory to be removed on deleteThreadRequest");
-      assert.equal(
-        workspacePathAtReady,
-        threadLifecycle.resolveThreadDirectory(
-          path.join(homeDirectory, ".config", "companyhelm"),
-          "workspaces",
-          "agent-real-docker",
-          createdThreadId!,
-        ),
-        "expected db workspace path to include agent/thread segmentation",
-      );
-      assert.equal(runtimeContainerAbsentAfterDelete, true, "expected runtime container to be removed after deleteThreadRequest");
-      assert.equal(dindContainerAbsentAfterDelete, true, "expected dind container to be removed after deleteThreadRequest");
-      assert.equal(homeVolumeAbsentAfterDelete, true, "expected thread home volume to be removed after deleteThreadRequest");
-      assert.equal(tmpVolumeAbsentAfterDelete, true, "expected thread tmp volume to be removed after deleteThreadRequest");
-      assert.equal(agentWorkspaceExistsAfterAgentDelete, false, "expected agent workspace directory to be removed on deleteAgentRequest");
-    } finally {
-      if (createdThreadId) {
-        const names = threadLifecycle.buildThreadContainerNames(createdThreadId);
-        await forceRemoveContainerIfExists(docker, names.runtime);
-        await forceRemoveContainerIfExists(docker, names.dind);
-        await forceRemoveVolumeIfExists(docker, names.home);
-        await forceRemoveVolumeIfExists(docker, names.tmp);
-      }
-
-      reconnectDelaySpy.mockRestore();
-
-      if (server) {
-        await shutdownServer(server);
-      }
-
-      process.env.HOME = previousHome;
-      await rm(homeDirectory, { recursive: true, force: true });
-    }
-  },
-  180_000,
-);
 
 test(
   "companyhelm root command resumes user-message threads using persisted rollout path after stop/start cycle",
@@ -2104,7 +1329,6 @@ test(
       await seedStateDatabase(homeDirectory);
       await writeHostAuthFile(homeDirectory);
 
-      let sentCreateThreadRequest = false;
       let sentFirstUserMessageRequest = false;
       let sentSecondUserMessageRequest = false;
       let completedTurns = 0;
@@ -2119,10 +1343,37 @@ test(
           call.write(
             create(ServerMessageSchema, {
               request: {
-                case: "createAgentRequest",
+                case: "createThreadRequest",
                 value: {
-                  agentId: "agent-user-message",
-                  agentSdk: "codex",
+                  threadId: "thread-user-message",
+                  model: "gpt-5.3-codex",
+                  cliSecret: "thread-secret-user-message",
+                  additionalModelInstructions,
+                  gitSkillPackages: [
+                    {
+                      repositoryUrl: "https://github.com/obra/superpowers.git",
+                      commitReference: "main",
+                      skills: [
+                        { directoryPath: "skills/brainstorming" },
+                        { directoryPath: "skills/systematic-debugging" },
+                      ],
+                    },
+                  ],
+                  mcpServers: [
+                    {
+                      serverId: "mcp-context7",
+                      name: "context7",
+                      transportConfig: {
+                        case: "streamableHttp",
+                        value: {
+                          url: "https://mcp.context7.com/mcp",
+                          authType: ThreadMcpAuthType.BEARER_TOKEN,
+                          bearerToken: "context7-token",
+                          headers: [{ key: "X-Team", value: "companyhelm" }],
+                        },
+                      },
+                    },
+                  ],
                 },
               },
             }),
@@ -2156,55 +1407,6 @@ test(
             }
 
             if (
-              !sentCreateThreadRequest &&
-              message.payload.case === "agentUpdate" &&
-              message.payload.value.agentId === "agent-user-message" &&
-              message.payload.value.status === AgentStatus.READY
-            ) {
-              sentCreateThreadRequest = true;
-              call.write(
-                create(ServerMessageSchema, {
-                  request: {
-                    case: "createThreadRequest",
-                    value: {
-                      agentId: "agent-user-message",
-                      threadId: "thread-user-message",
-                      model: "gpt-5.3-codex",
-                      cliSecret: "thread-secret-user-message",
-                      additionalModelInstructions,
-                      gitSkillPackages: [
-                        {
-                          repositoryUrl: "https://github.com/obra/superpowers.git",
-                          commitReference: "main",
-                          skills: [
-                            { directoryPath: "skills/brainstorming" },
-                            { directoryPath: "skills/systematic-debugging" },
-                          ],
-                        },
-                      ],
-                      mcpServers: [
-                        {
-                          serverId: "mcp-context7",
-                          name: "context7",
-                          transportConfig: {
-                            case: "streamableHttp",
-                            value: {
-                              url: "https://mcp.context7.com/mcp",
-                              authType: ThreadMcpAuthType.BEARER_TOKEN,
-                              bearerToken: "context7-token",
-                              headers: [{ key: "X-Team", value: "companyhelm" }],
-                            },
-                          },
-                        },
-                      ],
-                    },
-                  },
-                }),
-              );
-              return;
-            }
-
-            if (
               !sentFirstUserMessageRequest &&
               message.payload.case === "threadUpdate" &&
               message.payload.value.status === ThreadStatus.READY
@@ -2216,7 +1418,6 @@ test(
                   request: {
                     case: "createUserMessageRequest",
                     value: {
-                      agentId: "agent-user-message",
                       threadId: createdThreadId,
                       text: "first message",
                       allowSteer: false,
@@ -2236,7 +1437,6 @@ test(
                     request: {
                       case: "createUserMessageRequest",
                       value: {
-                        agentId: "agent-user-message",
                         threadId: createdThreadId!,
                         text: "second message",
                         allowSteer: false,
@@ -2490,7 +1690,6 @@ test(
       await seedStateDatabase(homeDirectory);
       await writeHostAuthFile(homeDirectory);
 
-      let sentCreateThreadRequest = false;
       let sentFirstUserMessageRequest = false;
       let sentSteerRequest = false;
       let runningUpdateCount = 0;
@@ -2503,10 +1702,10 @@ test(
           call.write(
             create(ServerMessageSchema, {
               request: {
-                case: "createAgentRequest",
+                case: "createThreadRequest",
                 value: {
-                  agentId: "agent-steer",
-                  agentSdk: "codex",
+                  threadId: "thread-steer",
+                  model: "gpt-5.3-codex",
                 },
               },
             }),
@@ -2516,28 +1715,6 @@ test(
             if (message.payload.case === "requestError") {
               receivedRequestError = message;
               call.end();
-              return;
-            }
-
-            if (
-              !sentCreateThreadRequest &&
-              message.payload.case === "agentUpdate" &&
-              message.payload.value.agentId === "agent-steer" &&
-              message.payload.value.status === AgentStatus.READY
-            ) {
-              sentCreateThreadRequest = true;
-              call.write(
-                create(ServerMessageSchema, {
-                  request: {
-                    case: "createThreadRequest",
-                    value: {
-                      agentId: "agent-steer",
-                      threadId: "thread-steer",
-                      model: "gpt-5.3-codex",
-                    },
-                  },
-                }),
-              );
               return;
             }
 
@@ -2553,7 +1730,6 @@ test(
                   request: {
                     case: "createUserMessageRequest",
                     value: {
-                      agentId: "agent-steer",
                       threadId: createdThreadId,
                       text: "first message",
                       allowSteer: false,
@@ -2573,7 +1749,6 @@ test(
                     request: {
                       case: "createUserMessageRequest",
                       value: {
-                        agentId: "agent-steer",
                         threadId: createdThreadId!,
                         text: "steer message",
                         allowSteer: true,

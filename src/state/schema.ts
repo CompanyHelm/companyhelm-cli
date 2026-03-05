@@ -20,22 +20,10 @@ export const llmModels = sqliteTable("llm_models", {
     .$type<string[]>(),
 });
 
-// ── agents ──────────────────────────────────────────────────────────────────
-
-export const agents = sqliteTable("agents", {
-  id: text("id")
-    .primaryKey(),
-  name: text("name").notNull(),
-  sdk: text("sdk", { enum: ["codex"] }).notNull(),
-});
-
 // -- threads ──────────────────────────────────────────────────────────────────
 
 export const threads = sqliteTable("threads", {
   id: text("id").primaryKey(),
-  agentId: text("agent_id")
-    .notNull()
-    .references(() => agents.id),
   sdkThreadId: text("sdk_thread_id"),
   cliSecret: text("cli_secret"),
   model: text("model").notNull(),

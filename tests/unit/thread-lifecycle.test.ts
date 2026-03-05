@@ -30,9 +30,9 @@ test("resolveThreadsRootDirectory resolves relative threads directory under conf
   assert.equal(resolved, "/config/companyhelm/threads");
 });
 
-test("resolveThreadDirectory stores threads under agent and thread segmented path", () => {
-  const resolved = resolveThreadDirectory("/config/companyhelm", "workspaces", "123", "456");
-  assert.equal(resolved, "/config/companyhelm/workspaces/agent-123/thread-456");
+test("resolveThreadDirectory stores threads under thread segmented path", () => {
+  const resolved = resolveThreadDirectory("/config/companyhelm", "workspaces", "123");
+  assert.equal(resolved, "/config/companyhelm/workspaces/thread-123");
 });
 
 test("buildSharedThreadMounts reuses shared workspace and dedicated auth mount", () => {
