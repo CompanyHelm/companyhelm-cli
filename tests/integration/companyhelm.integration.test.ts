@@ -987,7 +987,7 @@ test("companyhelm root command writes synced GitHub installations payload and CL
       ["brainstorming", "systematic-debugging"],
     );
     assert.ok(threadAgentCliPayload, "expected thread agent CLI payload to be parsed");
-    assert.equal(threadAgentCliPayload.agent_api_url, "api.companyhelm.com:50052");
+    assert.equal(threadAgentCliPayload.agent_api_url, "https://api.companyhelm.com:50052");
     assert.equal(threadAgentCliPayload.token, "thread-secret-github-installations");
   } finally {
     reconnectDelaySpy.mockRestore();
