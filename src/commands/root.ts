@@ -2462,14 +2462,20 @@ async function executeCreateUserMessageRequest(
         throw new Error(`Thread '${request.threadId}' is marked running but has no current SDK turn id.`);
       }
 
+      const activeSdkTurnId = threadState.currentSdkTurnId;
       const steerParams: TurnSteerParams = {
         threadId: resolvedSdkThreadId,
         input,
-        expectedTurnId: threadState.currentSdkTurnId,
+        expectedTurnId: activeSdkTurnId,
       };
       try {
         const turnSteerResult = await appServer.steerTurn(steerParams);
-        sdkTurnId = turnSteerResult.turnId;
+        if (turnSteerResult.turnId && turnSteerResult.turnId !== activeSdkTurnId) {
+          logger.debug(
+            `turn/steer returned turn '${turnSteerResult.turnId}' for thread '${request.threadId}', preserving active turn '${activeSdkTurnId}' as the canonical turn id.`,
+          );
+        }
+        sdkTurnId = activeSdkTurnId;
       } catch (error: unknown) {
         if (!isNoActiveTurnSteerError(error)) {
           throw error;

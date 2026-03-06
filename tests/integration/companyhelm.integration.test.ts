@@ -1651,7 +1651,7 @@ test(
       return { turn: { id: "sdk-turn-steer-1" } };
     });
     const steerTurnSpy = vi.spyOn(AppServerService.prototype, "steerTurn").mockImplementation(async () => {
-      return { turnId: "sdk-turn-steer-1" };
+      return { turnId: "sdk-turn-steer-shadow" };
     });
 
     let completeTurn: (() => void) | null = null;
@@ -1693,6 +1693,8 @@ test(
       let sentFirstUserMessageRequest = false;
       let sentSteerRequest = false;
       let runningUpdateCount = 0;
+      const runningTurnIds: string[] = [];
+      const completedTurnIds: string[] = [];
 
       const started = await startFakeServer("/grpc", {
         registerRunner(call, callback) {
@@ -1742,6 +1744,7 @@ test(
 
             if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.RUNNING) {
               runningUpdateCount += 1;
+              runningTurnIds.push(message.payload.value.sdkTurnId);
               if (!sentSteerRequest) {
                 sentSteerRequest = true;
                 call.write(
@@ -1774,6 +1777,7 @@ test(
             }
 
             if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.COMPLETED) {
+              completedTurnIds.push(message.payload.value.sdkTurnId);
               shouldStopAfterValidation = true;
               call.end();
             }
@@ -1805,6 +1809,16 @@ test(
       assert.equal(steerTurnSpy.mock.calls.length, 1, "expected turn/steer for second user message");
       assert.equal(waitForTurnCompletionSpy.mock.calls.length, 1, "expected single completion waiter for running turn");
       assert.equal(runningUpdateCount, 2, "expected running updates for initial turn start and steer");
+      assert.deepEqual(
+        runningTurnIds,
+        ["sdk-turn-steer-1", "sdk-turn-steer-1"],
+        "expected steer updates to reuse the active running turn id",
+      );
+      assert.deepEqual(
+        completedTurnIds,
+        ["sdk-turn-steer-1"],
+        "expected completion updates to target the original running turn",
+      );
       assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected runtime readiness for both messages");
       assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
       assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
