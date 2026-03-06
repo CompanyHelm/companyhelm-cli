@@ -90,6 +90,8 @@ interface RootCommandOptions {
 const COMMAND_CHANNEL_CONNECT_RETRY_DELAY_MS = 1_000;
 const COMMAND_CHANNEL_OPEN_TIMEOUT_MS = 5_000;
 const TURN_COMPLETION_TIMEOUT_MS = 2 * 60 * 60_000;
+const TURN_STEER_NO_ACTIVE_RETRY_DELAY_MS = 100;
+const TURN_STEER_NO_ACTIVE_RETRY_TIMEOUT_MS = 2_000;
 const GITHUB_INSTALLATIONS_SYNC_INTERVAL_MS = 5 * 60_000;
 const GITHUB_INSTALLATIONS_MIN_SYNC_INTERVAL_MS = 30_000;
 const GITHUB_INSTALLATIONS_REFRESH_WINDOW_MS = 15 * 60_000;
@@ -301,6 +303,55 @@ export function shouldUseTurnSteer(allowSteer: boolean, startedFromIdle: boolean
 
 export function isNoActiveTurnSteerError(error: unknown): boolean {
   return /no active turn to steer/i.test(toErrorMessage(error));
+}
+
+interface TurnSteerResultLike {
+  turnId?: string | null;
+}
+
+async function steerTurnWhileWaitingForActiveTurn(params: {
+  appServer: AppServerService;
+  steerParams: TurnSteerParams;
+  threadId: string;
+  activeSdkTurnId: string;
+  logger: Logger;
+}): Promise<TurnSteerResultLike> {
+  const deadline = Date.now() + TURN_STEER_NO_ACTIVE_RETRY_TIMEOUT_MS;
+  let attempt = 0;
+  let lastNoActiveTurnError: unknown = null;
+
+  while (true) {
+    try {
+      const result = await params.appServer.steerTurn(params.steerParams);
+      if (attempt > 0) {
+        params.logger.debug(
+          `turn/steer succeeded for thread '${params.threadId}' after ${attempt + 1} attempts while preserving active turn '${params.activeSdkTurnId}'.`,
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      if (!isNoActiveTurnSteerError(error)) {
+        throw error;
+      }
+
+      lastNoActiveTurnError = error;
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        break;
+      }
+
+      attempt += 1;
+      const delayMs = Math.min(TURN_STEER_NO_ACTIVE_RETRY_DELAY_MS, remainingMs);
+      params.logger.debug(
+        `turn/steer reported no active turn for thread '${params.threadId}' while preserving active turn '${params.activeSdkTurnId}'. Retrying in ${delayMs}ms.`,
+      );
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, delayMs);
+      });
+    }
+  }
+
+  throw lastNoActiveTurnError ?? new Error(`No active turn to steer for thread '${params.threadId}'.`);
 }
 
 export function isNoRunningTurnInterruptError(error: unknown): boolean {
@@ -2469,7 +2520,13 @@ async function executeCreateUserMessageRequest(
         expectedTurnId: activeSdkTurnId,
       };
       try {
-        const turnSteerResult = await appServer.steerTurn(steerParams);
+        const turnSteerResult = await steerTurnWhileWaitingForActiveTurn({
+          appServer,
+          steerParams,
+          threadId: request.threadId,
+          activeSdkTurnId,
+          logger,
+        });
         if (turnSteerResult.turnId && turnSteerResult.turnId !== activeSdkTurnId) {
           logger.debug(
             `turn/steer returned turn '${turnSteerResult.turnId}' for thread '${request.threadId}', preserving active turn '${activeSdkTurnId}' as the canonical turn id.`,
@@ -2482,7 +2539,7 @@ async function executeCreateUserMessageRequest(
         }
 
         logger.warn(
-          `No active turn to steer for thread '${request.threadId}'. Starting a new turn for queued steer request.`,
+          `No active turn to steer for thread '${request.threadId}' after waiting ${TURN_STEER_NO_ACTIVE_RETRY_TIMEOUT_MS}ms. Starting a new turn for queued steer request.`,
         );
         shouldTrackTurnCompletion = true;
         sdkTurnId = await startNewTurn();

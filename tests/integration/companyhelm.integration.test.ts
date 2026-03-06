@@ -1863,3 +1863,278 @@ test(
   },
   180_000,
 );
+
+test(
+  "companyhelm root command retries transient no-active-turn steer errors before starting a new turn",
+  async () => {
+    const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-user-message-steer-retry-");
+    let server: grpc.Server | undefined;
+    const previousHome = process.env.HOME;
+    const reconnectStopError = new Error("stop root command after steer retry validation");
+    const nativeSetTimeout = global.setTimeout;
+    let shouldStopAfterValidation = false;
+    const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+      if (shouldStopAfterValidation && timeout === 1_000) {
+        throw reconnectStopError;
+      }
+      return nativeSetTimeout(handler, timeout as any, ...args);
+    }) as typeof global.setTimeout);
+
+    let createdThreadId: string | null = null;
+    let receivedRequestError: any = null;
+
+    const createThreadContainersSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+      .mockImplementation(async () => undefined);
+    const ensureContainerRunningSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerIdentitySpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerGitConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerToolingSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerBashrcSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerCodexConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+      .mockImplementation(async () => undefined);
+    const ensureRuntimeContainerAgentCliConfigSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+      .mockImplementation(async () => undefined);
+    const stopContainerSpy = vi
+      .spyOn(threadLifecycle.ThreadContainerService.prototype, "stopContainer")
+      .mockImplementation(async () => undefined);
+
+    const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+    const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
+      return { thread: { id: "sdk-thread-steer-retry", path: "/workspace/rollouts/steer-retry.json" } };
+    });
+    const startTurnSpy = vi.spyOn(AppServerService.prototype, "startTurn").mockImplementation(async () => {
+      return { turn: { id: "sdk-turn-steer-retry-1" } };
+    });
+
+    let steerAttemptCount = 0;
+    const steerTurnSpy = vi.spyOn(AppServerService.prototype, "steerTurn").mockImplementation(async () => {
+      steerAttemptCount += 1;
+      if (steerAttemptCount === 1) {
+        throw new Error("app-server returned an error for request 4: {\"code\":-32600,\"message\":\"no active turn to steer\"}");
+      }
+      return { turnId: "sdk-turn-steer-retry-shadow" };
+    });
+
+    let completeTurn: (() => void) | null = null;
+    const waitForTurnCompletionSpy = vi
+      .spyOn(AppServerService.prototype, "waitForTurnCompletion")
+      .mockImplementation(async (threadId: string, turnId: string, onNotification?: (notification: any) => Promise<void> | void) => {
+        const item = {
+          id: `${turnId}-agent-item`,
+          type: "agentMessage",
+          text: "steered response",
+        };
+        await onNotification?.({
+          method: "item/started",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+        await onNotification?.({
+          method: "item/completed",
+          params: {
+            threadId,
+            turnId,
+            item,
+          },
+        });
+
+        return await new Promise<"completed">((resolve) => {
+          completeTurn = () => resolve("completed");
+        });
+      });
+
+    try {
+      process.env.HOME = homeDirectory;
+      await seedStateDatabase(homeDirectory);
+      await writeHostAuthFile(homeDirectory);
+
+      let sentFirstUserMessageRequest = false;
+      let sentSteerRequest = false;
+      let runningUpdateCount = 0;
+      const runningTurnIds: string[] = [];
+      const completedTurnIds: string[] = [];
+
+      const started = await startFakeServer("/grpc", {
+        registerRunner(call, callback) {
+          callback(null, create(RegisterRunnerResponseSchema, {}));
+        },
+        controlChannel(call) {
+          call.write(
+            create(ServerMessageSchema, {
+              request: {
+                case: "createThreadRequest",
+                value: {
+                  threadId: "thread-steer-retry",
+                  model: "gpt-5.3-codex",
+                },
+              },
+            }),
+          );
+
+          call.on("data", (message) => {
+            if (message.payload.case === "requestError") {
+              receivedRequestError = message;
+              call.end();
+              return;
+            }
+
+            if (
+              !sentFirstUserMessageRequest &&
+              message.payload.case === "threadUpdate" &&
+              message.payload.value.status === ThreadStatus.READY
+            ) {
+              createdThreadId = message.payload.value.threadId;
+              sentFirstUserMessageRequest = true;
+              call.write(
+                create(ServerMessageSchema, {
+                  request: {
+                    case: "createUserMessageRequest",
+                    value: {
+                      threadId: createdThreadId,
+                      text: "first message",
+                      allowSteer: false,
+                    },
+                  },
+                }),
+              );
+              return;
+            }
+
+            if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.RUNNING) {
+              runningUpdateCount += 1;
+              runningTurnIds.push(message.payload.value.sdkTurnId);
+              if (!sentSteerRequest) {
+                sentSteerRequest = true;
+                call.write(
+                  create(ServerMessageSchema, {
+                    request: {
+                      case: "createUserMessageRequest",
+                      value: {
+                        threadId: createdThreadId!,
+                        text: "steer message",
+                        allowSteer: true,
+                      },
+                    },
+                  }),
+                );
+
+                setTimeout(() => {
+                  if (completeTurn) {
+                    completeTurn();
+                    completeTurn = null;
+                  }
+                }, 200);
+                return;
+              }
+
+              if (completeTurn) {
+                completeTurn();
+                completeTurn = null;
+              }
+              return;
+            }
+
+            if (message.payload.case === "turnUpdate" && message.payload.value.status === TurnStatus.COMPLETED) {
+              completedTurnIds.push(message.payload.value.sdkTurnId);
+              shouldStopAfterValidation = true;
+              call.end();
+            }
+          });
+        },
+      });
+
+      server = started.server;
+
+      await assert.rejects(
+        runRootCommand({
+          serverUrl: `127.0.0.1:${started.port}/grpc`,
+        }),
+        (error: unknown) => error === reconnectStopError,
+        "expected root command to stop after validating steer retry flow",
+      );
+
+      assert.equal(receivedRequestError, null, "did not expect requestError while retrying steer on a running turn");
+      assert.ok(createdThreadId, "expected thread id for steer retry flow");
+      assert.equal(createThreadContainersSpy.mock.calls.length, 1);
+      assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server session start");
+      assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server session stop on shutdown");
+      assert.equal(startThreadSpy.mock.calls.length, 1, "expected one sdk thread start");
+      assert.equal(startTurnSpy.mock.calls.length, 1, "expected no fallback turn/start after steer retry");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(startTurnSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on turn/start");
+      assert.deepEqual(startTurnSpy.mock.calls[0]?.[0]?.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
+      assert.equal(steerTurnSpy.mock.calls.length, 2, "expected turn/steer to retry after a transient no-active-turn error");
+      assert.equal(waitForTurnCompletionSpy.mock.calls.length, 1, "expected single completion waiter for retried steer flow");
+      assert.equal(runningUpdateCount, 2, "expected running updates for initial turn start and retried steer");
+      assert.deepEqual(
+        runningTurnIds,
+        ["sdk-turn-steer-retry-1", "sdk-turn-steer-retry-1"],
+        "expected retried steer updates to reuse the original running turn id",
+      );
+      assert.deepEqual(
+        completedTurnIds,
+        ["sdk-turn-steer-retry-1"],
+        "expected completion updates to target the original running turn after steer retry",
+      );
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected runtime readiness for both messages");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected bashrc bootstrap per message");
+      assert.equal(
+        ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
+        1,
+        "expected Codex config.toml write only before first app-server startup",
+      );
+      assert.equal(
+        ensureRuntimeContainerAgentCliConfigSpy.mock.calls.length,
+        0,
+        "expected no companyhelm-agent config writes when thread secret is missing",
+      );
+      assert.equal(stopContainerSpy.mock.calls.length, 2, "expected runtime+dind stop on daemon shutdown");
+    } finally {
+      reconnectDelaySpy.mockRestore();
+      createThreadContainersSpy.mockRestore();
+      ensureContainerRunningSpy.mockRestore();
+      ensureRuntimeContainerIdentitySpy.mockRestore();
+      ensureRuntimeContainerGitConfigSpy.mockRestore();
+      ensureRuntimeContainerToolingSpy.mockRestore();
+      ensureRuntimeContainerBashrcSpy.mockRestore();
+      ensureRuntimeContainerCodexConfigSpy.mockRestore();
+      ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
+      stopContainerSpy.mockRestore();
+      appServerStartSpy.mockRestore();
+      appServerStopSpy.mockRestore();
+      startThreadSpy.mockRestore();
+      startTurnSpy.mockRestore();
+      steerTurnSpy.mockRestore();
+      waitForTurnCompletionSpy.mockRestore();
+
+      if (server) {
+        await shutdownServer(server);
+      }
+
+      process.env.HOME = previousHome;
+      await rm(homeDirectory, { recursive: true, force: true });
+    }
+  },
+  180_000,
+);
