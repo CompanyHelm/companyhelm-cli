@@ -278,6 +278,13 @@ export class CompanyhelmCommandChannel implements AsyncIterable<ServerMessage> {
       this.failOpen(statusError);
       this.messages.fail(statusError);
     });
+
+    // Some reverse proxies delay initial response metadata for idle bidi gRPC streams
+    // until the stream carries traffic. Once the client-side call exists, treat the
+    // channel as usable unless it fails before the event loop yields.
+    queueMicrotask(() => {
+      this.setOpened();
+    });
   }
 
   private setOpened(): void {
