@@ -718,7 +718,7 @@ export class ThreadContainerService {
       }
     }
 
-    imageStatusReporter?.(`Docker image '${image}' not found locally. Downloading now.`);
+    imageStatusReporter?.(`Docker image '${image}' not found locally. Pulling remotely.`);
     await this.pullImage(image, imageStatusReporter);
     imageStatusReporter?.(`Docker image '${image}' is ready.`);
   }
@@ -731,6 +731,9 @@ export class ThreadContainerService {
       }
       await this.ensureImageAvailable(options.runtimeImage, options.imageStatusReporter);
       try {
+        options.imageStatusReporter?.(
+          `Creating Docker container '${options.names.runtime}' from image '${options.runtimeImage}'.`,
+        );
         await this.docker.createContainer(buildRuntimeContainerOptions(options));
       } catch (error) {
         await this.forceRemoveVolume(options.names.home).catch(() => undefined);
@@ -745,8 +748,12 @@ export class ThreadContainerService {
       await this.ensureImageAvailable(options.runtimeImage, options.imageStatusReporter);
     }
 
+    options.imageStatusReporter?.(`Creating Docker container '${options.names.dind}' from image '${options.dindImage}'.`);
     await this.docker.createContainer(buildDindContainerOptions(options));
     try {
+      options.imageStatusReporter?.(
+        `Creating Docker container '${options.names.runtime}' from image '${options.runtimeImage}'.`,
+      );
       await this.docker.createContainer(buildRuntimeContainerOptions(options));
     } catch (error) {
       await this.forceRemoveContainer(options.names.dind);
