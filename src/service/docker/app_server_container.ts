@@ -188,7 +188,7 @@ export class AppServerContainerService implements AppServerTransport {
       }
     }
 
-    this.reportImageStatus(`Docker image '${image}' not found locally. Downloading now.`);
+    this.reportImageStatus(`Docker image '${image}' not found locally. Pulling remotely.`);
     await this.pullImage(image);
     this.reportImageStatus(`Docker image '${image}' is ready.`);
   }
@@ -255,6 +255,7 @@ export class AppServerContainerService implements AppServerTransport {
       bootstrapScript,
     ];
 
+    this.reportImageStatus(`Launching Docker container from image '${cfg.runtime_image}'.`);
     const child = spawn("docker", args, {
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -279,6 +280,7 @@ export class AppServerContainerService implements AppServerTransport {
 
     this.child = child;
     this.running = true;
+    this.reportImageStatus(`Waiting for app-server to initialize in Docker container '${this.containerName}'.`);
   }
 
   async stop(): Promise<void> {

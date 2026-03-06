@@ -319,7 +319,7 @@ test("ThreadContainerService pulls missing images before creating containers", a
   assert.deepEqual(pulledImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
   assert.deepEqual(createdImages, ["docker:29-dind-rootless", "companyhelm/runner:latest"]);
   assert.equal(
-    reportedMessages.includes("Docker image 'docker:29-dind-rootless' not found locally. Downloading now."),
+    reportedMessages.includes("Docker image 'docker:29-dind-rootless' not found locally. Pulling remotely."),
     true,
   );
   assert.equal(
@@ -331,7 +331,7 @@ test("ThreadContainerService pulls missing images before creating containers", a
     true,
   );
   assert.equal(
-    reportedMessages.includes("Docker image 'companyhelm/runner:latest' not found locally. Downloading now."),
+    reportedMessages.includes("Docker image 'companyhelm/runner:latest' not found locally. Pulling remotely."),
     true,
   );
   assert.equal(
@@ -340,6 +340,18 @@ test("ThreadContainerService pulls missing images before creating containers", a
   );
   assert.equal(
     reportedMessages.includes("Docker image 'companyhelm/runner:latest' is ready."),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes(
+      "Creating Docker container 'companyhelm-dind-thread-thread-pull' from image 'docker:29-dind-rootless'.",
+    ),
+    true,
+  );
+  assert.equal(
+    reportedMessages.includes(
+      "Creating Docker container 'companyhelm-runtime-thread-thread-pull' from image 'companyhelm/runner:latest'.",
+    ),
     true,
   );
 });
