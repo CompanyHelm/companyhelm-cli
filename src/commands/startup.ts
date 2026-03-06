@@ -110,10 +110,8 @@ async function dedicatedAuth(cfg: Config, db: any) {
   p.log.success(`Codex auth saved to ${destPath}`);
 }
 
-export async function startup() {
+export async function startup(cfg: Config = configSchema.parse({})) {
   banner();
-
-  const cfg: Config = configSchema.parse({});
 
   const s = p.spinner();
   s.start("Initializing state database");

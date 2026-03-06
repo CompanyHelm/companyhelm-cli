@@ -75,11 +75,13 @@ import { createLogger, type Logger } from "../utils/logger.js";
 import { ensureWorkspaceAgentsMd } from "../service/workspace_agents.js";
 
 interface RootCommandOptions {
+  configPath?: string;
   serverUrl?: string;
   agentApiUrl?: string;
   daemon?: boolean;
   logLevel?: string;
   secret?: string;
+  stateDbPath?: string;
   useHostDockerRuntime?: boolean;
   hostDockerPath?: string;
   threadGitSkillsDirectory?: string;
@@ -2700,13 +2702,7 @@ function buildGrpcAuthCallOptions(secret: string | undefined): { metadata: grpc.
 
 export async function runRootCommand(options: RootCommandOptions): Promise<void> {
   const logger = createLogger(options.logLevel ?? "INFO", { daemonMode: options.daemon ?? false });
-  const cfg: Config = configSchema.parse({
-    companyhelm_api_url: options.serverUrl,
-    agent_api_url: options.agentApiUrl,
-    use_host_docker_runtime: options.useHostDockerRuntime,
-    host_docker_path: options.hostDockerPath,
-    thread_git_skills_directory: options.threadGitSkillsDirectory,
-  });
+  const cfg = buildRootConfig(options);
 
   const configuredSdks = await hasConfiguredSdks(cfg);
   if (!configuredSdks && options.daemon) {
@@ -2714,7 +2710,7 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   }
 
   if (!configuredSdks) {
-    await startup();
+    await startup(cfg);
   }
 
   await refreshCodexModelsForRegistration(cfg, logger);
@@ -2794,14 +2790,28 @@ export async function runRootCommand(options: RootCommandOptions): Promise<void>
   }
 }
 
+export function buildRootConfig(options: RootCommandOptions): Config {
+  return configSchema.parse({
+    config_directory: options.configPath,
+    state_db_path: options.stateDbPath,
+    companyhelm_api_url: options.serverUrl,
+    agent_api_url: options.agentApiUrl,
+    use_host_docker_runtime: options.useHostDockerRuntime,
+    host_docker_path: options.hostDockerPath,
+    thread_git_skills_directory: options.threadGitSkillsDirectory,
+  });
+}
+
 export function registerRootCommand(program: Command): void {
   program
+    .option("--config-path <path>", "Config directory override (defaults to ~/.config/companyhelm).")
     .option("--server-url <url>", "CompanyHelm gRPC API URL override.")
     .option(
       "--agent-api-url <url>",
       "Agent gRPC API URL for companyhelm-agent in runtime containers (localhost is rewritten to http://host.docker.internal).",
     )
     .option("--secret <secret>", "Bearer secret used as gRPC Authorization header.")
+    .option("--state-db-path <path>", "State database path override (defaults to ~/.local/share/companyhelm/state.db).")
     .option(
       "--use-host-docker-runtime",
       "Mount host Docker socket into runtime containers instead of creating DinD sidecars.",
