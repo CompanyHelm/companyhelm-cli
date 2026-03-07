@@ -1007,6 +1007,160 @@ test("companyhelm root command writes synced GitHub installations payload and CL
   }
 });
 
+test("companyhelm root command echoes app-server thread/start response id on thread READY updates", async () => {
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-request-id-");
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after create-thread request id validation");
+  const nativeSetTimeout = global.setTimeout;
+  let shouldStopAfterValidation = false;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
+
+  const createThreadContainersSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+    .mockImplementation(async () => undefined);
+  const ensureContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+    .mockImplementation(async () => undefined);
+  const waitForContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerIdentitySpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerGitConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerToolingSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerBashrcSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerCodexConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerAgentCliConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerThreadGitSkillsSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
+    .mockImplementation(async () => undefined);
+  const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+  const startThreadWithResponseSpy = vi
+    .spyOn(AppServerService.prototype, "startThreadWithResponse")
+    .mockImplementation(async (_params: any, requestId?: string | number) => ({
+      id: requestId ?? "unexpected-missing-request-id",
+      result: {
+        thread: {
+          id: "sdk-thread-request-id-1",
+          path: "/workspace/rollouts/request-id-thread.json",
+        },
+      },
+    }));
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+    await writeHostAuthFile(homeDirectory);
+
+    const requestId = "request-create-thread-1";
+    let receivedReadyUpdate: any = null;
+    let receivedRequestError: any = null;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        const createThreadMessage = create(
+          ServerMessageSchema,
+          {
+            request: {
+              case: "createThreadRequest",
+              value: {
+                threadId: "thread-request-id",
+                model: "gpt-5.3-codex",
+                reasoningLevel: "high",
+                cliSecret: "thread-secret-request-id",
+              },
+            },
+          },
+        ) as {
+          $unknown?: Array<{ no: number; wireType: number; data: Buffer }>;
+        };
+        createThreadMessage.$unknown = [
+          {
+            no: 1,
+            wireType: 2,
+            data: Buffer.concat([Buffer.from([requestId.length]), Buffer.from(requestId, "utf8")]),
+          },
+        ];
+        call.write(createThreadMessage);
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.READY
+          ) {
+            receivedReadyUpdate = message;
+            shouldStopAfterValidation = true;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after create-thread request id validation",
+    );
+
+    assert.equal(receivedRequestError, null, "did not expect requestError during createThread request-id flow");
+    assert.ok(receivedReadyUpdate, "expected thread READY update");
+    assert.equal(receivedReadyUpdate.requestId, requestId);
+    assert.equal(startThreadWithResponseSpy.mock.calls.length, 1, "expected one app-server thread/start call");
+    assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[1], requestId, "expected request id to be forwarded to app-server");
+    assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server session start during thread creation");
+    assert.equal(createThreadContainersSpy.mock.calls.length, 1, "expected thread containers to be created once");
+  } finally {
+    reconnectDelaySpy.mockRestore();
+    createThreadContainersSpy.mockRestore();
+    ensureContainerRunningSpy.mockRestore();
+    waitForContainerRunningSpy.mockRestore();
+    ensureRuntimeContainerIdentitySpy.mockRestore();
+    ensureRuntimeContainerGitConfigSpy.mockRestore();
+    ensureRuntimeContainerToolingSpy.mockRestore();
+    ensureRuntimeContainerBashrcSpy.mockRestore();
+    ensureRuntimeContainerCodexConfigSpy.mockRestore();
+    ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
+    ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
+    appServerStartSpy.mockRestore();
+    startThreadWithResponseSpy.mockRestore();
+    if (server) {
+      await shutdownServer(server);
+    }
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
 test("companyhelm root command handles full lifecycle: create thread and delete thread", async () => {
   const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-thread-lifecycle-");
   let server: grpc.Server | undefined;
