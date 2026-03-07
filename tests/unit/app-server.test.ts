@@ -8,7 +8,7 @@ type TransportEvent =
   | { type: "error"; reason: string };
 
 class FakeTransport {
-  readonly sentRequests: Array<{ id: number; method: string }> = [];
+  readonly sentRequests: Array<{ id: string | number; method: string }> = [];
   private readonly queue: Array<TransportEvent | null> = [];
   private readonly waiters: Array<(event: TransportEvent | null) => void> = [];
   private closed = false;
@@ -26,8 +26,8 @@ class FakeTransport {
       .filter((line) => line.length > 0);
 
     for (const line of lines) {
-      const message = JSON.parse(line) as { id?: number; method?: string };
-      if (typeof message.id === "number" && typeof message.method === "string") {
+      const message = JSON.parse(line) as { id?: string | number; method?: string };
+      if ((typeof message.id === "number" || typeof message.id === "string") && typeof message.method === "string") {
         this.sentRequests.push({ id: message.id, method: message.method });
       }
 
@@ -86,7 +86,7 @@ class FakeTransport {
 
 class DelayedInitializeRetryTransport extends FakeTransport {
   private initializeAttempts = 0;
-  private firstInitializeRequestId: number | null = null;
+  private firstInitializeRequestId: string | number | null = null;
 
   override async sendRaw(payload: string): Promise<void> {
     const lines = payload
@@ -95,8 +95,8 @@ class DelayedInitializeRetryTransport extends FakeTransport {
       .filter((line) => line.length > 0);
 
     for (const line of lines) {
-      const message = JSON.parse(line) as { id?: number; method?: string };
-      if (typeof message.id === "number" && typeof message.method === "string") {
+      const message = JSON.parse(line) as { id?: string | number; method?: string };
+      if ((typeof message.id === "number" || typeof message.id === "string") && typeof message.method === "string") {
         this.sentRequests.push({ id: message.id, method: message.method });
       }
 
@@ -135,7 +135,7 @@ async function waitForRequestId(
   transport: FakeTransport,
   method: string,
   timeoutMs = 1_000,
-): Promise<number> {
+): Promise<string | number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const request = transport.sentRequests.find((entry) => entry.method === method);
@@ -335,6 +335,48 @@ test("AppServerService logs outgoing thread/start payload including developerIns
     ),
     true,
   );
+
+  await service.stop();
+});
+
+test("AppServerService uses caller supplied request id for thread/start and returns the response envelope", async () => {
+  const transport = new FakeTransport();
+  const service = new AppServerService(transport as any, "test-client");
+
+  await service.start();
+
+  const startPromise = service.startThreadWithResponse(
+    {
+      model: "gpt-5.3-codex",
+      modelProvider: null,
+      cwd: "/workspace",
+      approvalPolicy: "never",
+      sandbox: "danger-full-access",
+      config: null,
+      baseInstructions: null,
+      developerInstructions: null,
+      personality: null,
+      ephemeral: null,
+      experimentalRawEvents: false,
+      persistExtendedHistory: true,
+    },
+    "create-thread-request-1",
+  );
+  const requestId = await waitForRequestId(transport, "thread/start");
+  assert.equal(requestId, "create-thread-request-1");
+  transport.emitJson({
+    id: "create-thread-request-1",
+    result: {
+      thread: {
+        id: "sdk-thread-1",
+        path: "/workspace/rollouts/thread.json",
+      },
+    },
+  });
+
+  const response = await startPromise;
+  assert.equal(response.id, "create-thread-request-1");
+  assert.equal(response.result.thread.id, "sdk-thread-1");
 
   await service.stop();
 });

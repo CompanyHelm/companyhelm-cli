@@ -29,7 +29,7 @@ type AppServerLogContextProvider = () => AppServerLogContext;
 const NOOP_APP_SERVER_LOG_CONTEXT_PROVIDER: AppServerLogContextProvider = () => ({});
 
 interface PendingRequest {
-  resolve: (result: unknown) => void;
+  resolve: (message: AppServerResponseMessage) => void;
   reject: (error: Error) => void;
   timeout: NodeJS.Timeout;
 }
@@ -38,6 +38,11 @@ export interface AppServerResponseMessage {
   id: RequestId;
   result?: unknown;
   error?: unknown;
+}
+
+export interface AppServerRequestResponse<TResult> {
+  id: RequestId;
+  result: TResult;
 }
 
 export interface AppServerParseErrorMessage {
@@ -193,7 +198,7 @@ export class AppServerService {
   }
 
   async listModels(cursor: string | null, limit: number): Promise<ModelListResponse> {
-    const result = await this.request("model/list", { cursor, limit }, 10_000);
+    const result = await this.request<ModelListResponse>("model/list", { cursor, limit }, 10_000);
     if (!isModelListResponse(result)) {
       throw new Error("app-server returned an invalid model/list payload");
     }
@@ -201,27 +206,34 @@ export class AppServerService {
   }
 
   async startThread(params: ThreadStartParams): Promise<ThreadStartResponse> {
-    return this.request("thread/start", params, 15_000) as Promise<ThreadStartResponse>;
+    return this.request<ThreadStartResponse>("thread/start", params, 15_000);
+  }
+
+  async startThreadWithResponse(
+    params: ThreadStartParams,
+    requestId?: RequestId,
+  ): Promise<AppServerRequestResponse<ThreadStartResponse>> {
+    return this.requestWithResponse<ThreadStartResponse>("thread/start", params, 15_000, requestId);
   }
 
   async resumeThread(params: ThreadResumeParams): Promise<ThreadResumeResponse> {
-    return this.request("thread/resume", params, 15_000) as Promise<ThreadResumeResponse>;
+    return this.request<ThreadResumeResponse>("thread/resume", params, 15_000);
   }
 
   async readThread(params: ThreadReadParams): Promise<ThreadReadResponse> {
-    return this.request("thread/read", params, 15_000) as Promise<ThreadReadResponse>;
+    return this.request<ThreadReadResponse>("thread/read", params, 15_000);
   }
 
   async startTurn(params: TurnStartParams): Promise<TurnStartResponse> {
-    return this.request("turn/start", params, 15_000) as Promise<TurnStartResponse>;
+    return this.request<TurnStartResponse>("turn/start", params, 15_000);
   }
 
   async steerTurn(params: TurnSteerParams): Promise<TurnSteerResponse> {
-    return this.request("turn/steer", params, 15_000) as Promise<TurnSteerResponse>;
+    return this.request<TurnSteerResponse>("turn/steer", params, 15_000);
   }
 
   async interruptTurn(params: TurnInterruptParams): Promise<TurnInterruptResponse> {
-    return this.request("turn/interrupt", params, 15_000) as Promise<TurnInterruptResponse>;
+    return this.request<TurnInterruptResponse>("turn/interrupt", params, 15_000);
   }
 
   async waitForTurnCompletion(
@@ -332,16 +344,30 @@ export class AppServerService {
     }
   }
 
-  private async request(method: ClientRequest["method"], params: unknown, timeoutMs: number): Promise<unknown> {
-    const requestId = this.nextRequestId++;
+  private async request<TResult>(method: ClientRequest["method"], params: unknown, timeoutMs: number): Promise<TResult> {
+    const response = await this.requestWithResponse(method, params, timeoutMs);
+    return response.result as TResult;
+  }
+
+  private async requestWithResponse<TResult>(
+    method: ClientRequest["method"],
+    params: unknown,
+    timeoutMs: number,
+    requestId?: RequestId,
+  ): Promise<AppServerRequestResponse<TResult>> {
+    const resolvedRequestId = requestId ?? this.nextRequestId++;
     const request = {
       method,
-      id: requestId,
+      id: resolvedRequestId,
       params,
     } as ClientRequest;
 
     await this.sendMessage(request);
-    return this.waitForResponseResult(requestId, timeoutMs);
+    const response = await this.waitForResponseMessage(resolvedRequestId, timeoutMs);
+    return {
+      id: response.id,
+      result: response.result as TResult,
+    };
   }
 
   private async sendMessage(message: AppServerOutgoingMessage): Promise<void> {
@@ -521,7 +547,7 @@ export class AppServerService {
       );
       return;
     }
-    pendingRequest.resolve(message.result);
+    pendingRequest.resolve(message);
   }
 
   private rejectAllPendingRequests(error: Error): void {
@@ -532,17 +558,17 @@ export class AppServerService {
     }
   }
 
-  private async waitForResponseResult(requestId: RequestId, timeoutMs: number): Promise<unknown> {
+  private async waitForResponseMessage(requestId: RequestId, timeoutMs: number): Promise<AppServerResponseMessage> {
     const immediateResponse = this.pendingResponses.get(requestId);
     if (immediateResponse) {
       this.pendingResponses.delete(requestId);
       if (immediateResponse.error !== undefined) {
         throw new Error(`app-server returned an error for request ${String(requestId)}: ${formatUnknownError(immediateResponse.error)}`);
       }
-      return immediateResponse.result;
+      return immediateResponse;
     }
 
-    return new Promise<unknown>((resolve, reject) => {
+    return new Promise<AppServerResponseMessage>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pendingRequests.delete(requestId);
         reject(new AppServerTimeoutError(`Timed out waiting for response to request ${String(requestId)}`));
@@ -550,8 +576,8 @@ export class AppServerService {
 
       const pendingRequest: PendingRequest = {
         timeout,
-        resolve: (result: unknown) => {
-          resolve(result);
+        resolve: (message: AppServerResponseMessage) => {
+          resolve(message);
         },
         reject: (error: Error) => {
           reject(error);
@@ -572,7 +598,7 @@ export class AppServerService {
         reject(new Error(`app-server returned an error for request ${String(requestId)}: ${formatUnknownError(bufferedResponse.error)}`));
         return;
       }
-      resolve(bufferedResponse.result);
+      resolve(bufferedResponse);
     });
   }
 

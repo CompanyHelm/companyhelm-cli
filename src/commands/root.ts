@@ -1678,8 +1678,10 @@ async function sendThreadUpdate(
   commandChannel: ClientMessageSink,
   threadId: string,
   status: ThreadStatus,
+  requestId?: string,
 ): Promise<void> {
   const message = create(ClientMessageSchema, {
+    requestId,
     payload: {
       case: "threadUpdate",
       value: {
@@ -2002,9 +2004,101 @@ async function handleCreateThreadRequest(
     return;
   }
 
+  let readyRequestId: string | undefined;
   const { db: updateDb, client: updateClient } = await initDb(cfg.state_db_path);
   try {
-    await updateDb.update(threads).set({ status: "ready" }).where(eq(threads.id, threadId));
+    const threadState = await loadThreadMessageExecutionState(cfg.state_db_path, threadId);
+    if (!threadState) {
+      throw new Error(`Thread '${threadId}' disappeared before SDK bootstrap.`);
+    }
+
+    const threadMcpSetup = buildThreadCodexMcpSetup(
+      readWorkspaceThreadMcpConfig(threadState.workspace, logger),
+    );
+    const threadAgentCliConfig = readWorkspaceThreadAgentCliConfig(threadState.workspace, logger);
+    const appServerSession = await getOrCreateThreadAppServerSession(
+      threadId,
+      threadState.runtimeContainer,
+      threadMcpSetup.appServerEnv,
+      cfg.codex.app_server_client_name,
+      logger,
+    );
+    const runtimeUser = {
+      uid: threadState.uid,
+      gid: threadState.gid,
+      agentUser: cfg.agent_user,
+      agentHomeDirectory: threadState.homeDirectory,
+    };
+
+    await ensureThreadRuntimeReady({
+      dindContainer: threadState.dindContainer,
+      runtimeContainer: threadState.runtimeContainer,
+      containerService,
+      gitUserName: cfg.git_user_name,
+      gitUserEmail: cfg.git_user_email,
+      user: runtimeUser,
+    });
+    await ensureThreadGitSkillsInRuntime(cfg, threadState, containerService, logger);
+    if (threadAgentCliConfig) {
+      await containerService.ensureRuntimeContainerAgentCliConfig(
+        threadState.runtimeContainer,
+        runtimeUser,
+        threadAgentCliConfig,
+      );
+    }
+    if (!appServerSession.started) {
+      await containerService.ensureRuntimeContainerCodexConfig(
+        threadState.runtimeContainer,
+        runtimeUser,
+        threadMcpSetup.configToml,
+      );
+    }
+
+    await ensureThreadAppServerSessionStarted(appServerSession);
+
+    const developerInstructions = buildThreadDeveloperInstructions(threadState.additionalModelInstructions);
+    logger.debug(
+      `Starting app-server thread '${threadId}' with developer instructions: ${JSON.stringify(developerInstructions)}.`,
+    );
+    const threadStartResponse = await appServerSession.appServer.startThreadWithResponse(
+      {
+        model: threadState.model,
+        modelProvider: null,
+        cwd: "/workspace",
+        approvalPolicy: YOLO_APPROVAL_POLICY,
+        sandbox: YOLO_SANDBOX_MODE,
+        config: null,
+        baseInstructions: null,
+        developerInstructions,
+        personality: null,
+        ephemeral: null,
+        experimentalRawEvents: false,
+        persistExtendedHistory: true,
+      },
+      requestId,
+    );
+    if (requestId && threadStartResponse.id !== requestId) {
+      throw new Error(
+        `App-server thread/start response id '${String(threadStartResponse.id)}' did not match runner request id '${requestId}'.`,
+      );
+    }
+    if (!threadStartResponse.result.thread?.id) {
+      throw new Error(`App-server thread/start did not return an SDK thread id for thread '${threadId}'.`);
+    }
+    readyRequestId = typeof threadStartResponse.id === "string" && threadStartResponse.id.length > 0
+      ? threadStartResponse.id
+      : undefined;
+    appServerSession.sdkThreadId = threadStartResponse.result.thread.id;
+    appServerSession.rolloutPath = threadStartResponse.result.thread.path;
+    rememberThreadRolloutPath(threadId, threadStartResponse.result.thread.path);
+
+    await updateDb
+      .update(threads)
+      .set({
+        status: "ready",
+        sdkThreadId: threadStartResponse.result.thread.id,
+      })
+      .where(eq(threads.id, threadId));
   } catch (error: unknown) {
     logger.warn(`Failed to mark thread '${threadId}' as ready: ${toErrorMessage(error)}`);
     await containerService.forceRemoveContainer(containerNames.runtime);
@@ -2024,7 +2118,7 @@ async function handleCreateThreadRequest(
   }
 
   logger.info(`Thread '${threadId}' created and ready.`);
-  await sendThreadUpdate(commandChannel, threadId, ThreadStatus.READY);
+  await sendThreadUpdate(commandChannel, threadId, ThreadStatus.READY, readyRequestId);
 }
 
 type ExistingThreadResource = {

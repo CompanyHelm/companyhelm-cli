@@ -829,6 +829,45 @@ test("companyhelm root command writes synced GitHub installations payload and CL
   const createThreadContainersSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
     .mockImplementation(async () => undefined);
+  const ensureContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+    .mockImplementation(async () => undefined);
+  const waitForContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerIdentitySpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerGitConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerToolingSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerBashrcSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerCodexConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerAgentCliConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerThreadGitSkillsSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
+    .mockImplementation(async () => undefined);
+  const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+  const startThreadWithResponseSpy = vi
+    .spyOn(AppServerService.prototype, "startThreadWithResponse")
+    .mockImplementation(async () => ({
+      id: "github-installations-thread-start",
+      result: {
+        thread: {
+          id: "sdk-thread-github-installations",
+          path: "/workspace/rollouts/github-installations.json",
+        },
+      },
+    }));
 
   try {
     process.env.HOME = homeDirectory;
@@ -999,6 +1038,171 @@ test("companyhelm root command writes synced GitHub installations payload and CL
   } finally {
     reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
+    ensureContainerRunningSpy.mockRestore();
+    waitForContainerRunningSpy.mockRestore();
+    ensureRuntimeContainerIdentitySpy.mockRestore();
+    ensureRuntimeContainerGitConfigSpy.mockRestore();
+    ensureRuntimeContainerToolingSpy.mockRestore();
+    ensureRuntimeContainerBashrcSpy.mockRestore();
+    ensureRuntimeContainerCodexConfigSpy.mockRestore();
+    ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
+    ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
+    appServerStartSpy.mockRestore();
+    startThreadWithResponseSpy.mockRestore();
+    if (server) {
+      await shutdownServer(server);
+    }
+    process.env.HOME = previousHome;
+    await rm(homeDirectory, { recursive: true, force: true });
+  }
+});
+
+test("companyhelm root command echoes app-server thread/start response id on thread READY updates", async () => {
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-request-id-");
+  let server: grpc.Server | undefined;
+  const previousHome = process.env.HOME;
+  const reconnectStopError = new Error("stop root command after create-thread request id validation");
+  const nativeSetTimeout = global.setTimeout;
+  let shouldStopAfterValidation = false;
+  const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
+    if (shouldStopAfterValidation && timeout === 1_000) {
+      throw reconnectStopError;
+    }
+    return nativeSetTimeout(handler, timeout as any, ...args);
+  }) as typeof global.setTimeout);
+
+  const createThreadContainersSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "createThreadContainers")
+    .mockImplementation(async () => undefined);
+  const ensureContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+    .mockImplementation(async () => undefined);
+  const waitForContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerIdentitySpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerGitConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerToolingSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerBashrcSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerCodexConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerAgentCliConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerThreadGitSkillsSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
+    .mockImplementation(async () => undefined);
+  const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+  const startThreadWithResponseSpy = vi
+    .spyOn(AppServerService.prototype, "startThreadWithResponse")
+    .mockImplementation(async (_params: any, requestId?: string | number) => ({
+      id: requestId ?? "unexpected-missing-request-id",
+      result: {
+        thread: {
+          id: "sdk-thread-request-id-1",
+          path: "/workspace/rollouts/request-id-thread.json",
+        },
+      },
+    }));
+
+  try {
+    process.env.HOME = homeDirectory;
+    await seedStateDatabase(homeDirectory);
+    await writeHostAuthFile(homeDirectory);
+
+    const requestId = "request-create-thread-1";
+    let receivedReadyUpdate: any = null;
+    let receivedRequestError: any = null;
+
+    const started = await startFakeServer("/grpc", {
+      registerRunner(call, callback) {
+        callback(null, create(RegisterRunnerResponseSchema, {}));
+      },
+      controlChannel(call) {
+        const createThreadMessage = create(
+          ServerMessageSchema,
+          {
+            request: {
+              case: "createThreadRequest",
+              value: {
+                threadId: "thread-request-id",
+                model: "gpt-5.3-codex",
+                reasoningLevel: "high",
+                cliSecret: "thread-secret-request-id",
+              },
+            },
+          },
+        ) as {
+          $unknown?: Array<{ no: number; wireType: number; data: Buffer }>;
+        };
+        createThreadMessage.$unknown = [
+          {
+            no: 1,
+            wireType: 2,
+            data: Buffer.concat([Buffer.from([requestId.length]), Buffer.from(requestId, "utf8")]),
+          },
+        ];
+        call.write(createThreadMessage);
+
+        call.on("data", (message) => {
+          if (message.payload.case === "requestError") {
+            receivedRequestError = message;
+            call.end();
+            return;
+          }
+
+          if (
+            message.payload.case === "threadUpdate" &&
+            message.payload.value.status === ThreadStatus.READY
+          ) {
+            receivedReadyUpdate = message;
+            shouldStopAfterValidation = true;
+            call.end();
+          }
+        });
+      },
+    });
+
+    server = started.server;
+
+    await assert.rejects(
+      runRootCommand({
+        serverUrl: `127.0.0.1:${started.port}/grpc`,
+      }),
+      (error: unknown) => error === reconnectStopError,
+      "expected root command to stop after create-thread request id validation",
+    );
+
+    assert.equal(receivedRequestError, null, "did not expect requestError during createThread request-id flow");
+    assert.ok(receivedReadyUpdate, "expected thread READY update");
+    assert.equal(receivedReadyUpdate.requestId, requestId);
+    assert.equal(startThreadWithResponseSpy.mock.calls.length, 1, "expected one app-server thread/start call");
+    assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[1], requestId, "expected request id to be forwarded to app-server");
+    assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server session start during thread creation");
+    assert.equal(createThreadContainersSpy.mock.calls.length, 1, "expected thread containers to be created once");
+  } finally {
+    reconnectDelaySpy.mockRestore();
+    createThreadContainersSpy.mockRestore();
+    ensureContainerRunningSpy.mockRestore();
+    waitForContainerRunningSpy.mockRestore();
+    ensureRuntimeContainerIdentitySpy.mockRestore();
+    ensureRuntimeContainerGitConfigSpy.mockRestore();
+    ensureRuntimeContainerToolingSpy.mockRestore();
+    ensureRuntimeContainerBashrcSpy.mockRestore();
+    ensureRuntimeContainerCodexConfigSpy.mockRestore();
+    ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
+    ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
+    appServerStartSpy.mockRestore();
+    startThreadWithResponseSpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }
@@ -1031,6 +1235,45 @@ test("companyhelm root command handles full lifecycle: create thread and delete 
       activeVolumeNames.add(options.names.home);
       activeVolumeNames.add(options.names.tmp);
     });
+  const ensureContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureContainerRunning")
+    .mockImplementation(async () => undefined);
+  const waitForContainerRunningSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "waitForContainerRunning")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerIdentitySpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerIdentity")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerGitConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerGitConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerToolingSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerTooling")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerBashrcSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerBashrc")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerCodexConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerCodexConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerAgentCliConfigSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerAgentCliConfig")
+    .mockImplementation(async () => undefined);
+  const ensureRuntimeContainerThreadGitSkillsSpy = vi
+    .spyOn(threadLifecycle.ThreadContainerService.prototype, "ensureRuntimeContainerThreadGitSkills")
+    .mockImplementation(async () => undefined);
+  const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
+  const startThreadWithResponseSpy = vi
+    .spyOn(AppServerService.prototype, "startThreadWithResponse")
+    .mockImplementation(async () => ({
+      id: "lifecycle-thread-start",
+      result: {
+        thread: {
+          id: "sdk-thread-lifecycle",
+          path: "/workspace/rollouts/lifecycle.json",
+        },
+      },
+    }));
   const forceRemoveContainerSpy = vi
     .spyOn(threadLifecycle.ThreadContainerService.prototype, "forceRemoveContainer")
     .mockImplementation(async (name) => {
@@ -1215,6 +1458,17 @@ test("companyhelm root command handles full lifecycle: create thread and delete 
   } finally {
     reconnectDelaySpy.mockRestore();
     createThreadContainersSpy.mockRestore();
+    ensureContainerRunningSpy.mockRestore();
+    waitForContainerRunningSpy.mockRestore();
+    ensureRuntimeContainerIdentitySpy.mockRestore();
+    ensureRuntimeContainerGitConfigSpy.mockRestore();
+    ensureRuntimeContainerToolingSpy.mockRestore();
+    ensureRuntimeContainerBashrcSpy.mockRestore();
+    ensureRuntimeContainerCodexConfigSpy.mockRestore();
+    ensureRuntimeContainerAgentCliConfigSpy.mockRestore();
+    ensureRuntimeContainerThreadGitSkillsSpy.mockRestore();
+    appServerStartSpy.mockRestore();
+    startThreadWithResponseSpy.mockRestore();
     forceRemoveContainerSpy.mockRestore();
     forceRemoveVolumeSpy.mockRestore();
     if (server) {
@@ -1284,8 +1538,16 @@ test(
 
     const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
     const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadWithResponseSpy = vi
+      .spyOn(AppServerService.prototype, "startThreadWithResponse")
+      .mockImplementation(async () => ({
+        id: "bootstrap-thread-start",
+        result: {
+          thread: { id: "sdk-thread-1", path: rolloutPath },
+        },
+      }));
     const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
-      return { thread: { id: "sdk-thread-1", path: rolloutPath } };
+      return { thread: { id: "unexpected-sdk-thread", path: "/workspace/rollouts/unexpected.json" } };
     });
     const resumeThreadSpy = vi.spyOn(AppServerService.prototype, "resumeThread").mockImplementation(async () => {
       return { thread: { id: "sdk-thread-1", path: rolloutPath } };
@@ -1477,15 +1739,16 @@ test(
       assert.equal(receivedRequestError, null, "did not expect requestError for repeated user messages");
       assert.ok(createdThreadId, "expected thread id for user message flow");
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
-      assert.equal(startThreadSpy.mock.calls.length, 1, "expected first user message to create sdk thread");
+      assert.equal(startThreadWithResponseSpy.mock.calls.length, 1, "expected create-thread bootstrap to create sdk thread once");
+      assert.equal(startThreadSpy.mock.calls.length, 0, "expected first user message to reuse bootstrapped sdk thread");
       assert.equal(resumeThreadSpy.mock.calls.length, 0, "expected warm app-server session to avoid resume calls");
       assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server to start for user message flow");
       assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server to stop during command shutdown");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
       assert.equal(
-        startThreadSpy.mock.calls[0]?.[0]?.developerInstructions,
+        startThreadWithResponseSpy.mock.calls[0]?.[0]?.developerInstructions,
         normalizedAdditionalModelInstructions,
         "expected additional model instructions to be sent as thread/start developerInstructions",
       );
@@ -1498,6 +1761,17 @@ test(
         true,
         "expected debug logs to include thread/start developer instructions",
       );
+
+      const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+      const { db, client } = await initDb(stateDbPath);
+      try {
+        const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
+        assert.equal(threadRow?.sdkThreadId, "sdk-thread-1", "expected create-thread bootstrap to persist sdk thread id");
+      } finally {
+        client.close();
+      }
+
+      assert.equal(startTurnSpy.mock.calls[0]?.[0]?.threadId, "sdk-thread-1", "expected first user message to reuse bootstrapped sdk thread id");
       for (const [params] of startTurnSpy.mock.calls) {
         assert.equal(params.approvalPolicy, "never", "expected yolo approval on turn/start");
         assert.deepEqual(params.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
@@ -1527,12 +1801,12 @@ test(
       const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
       const stoppedContainerNames = stopContainerSpy.mock.calls.map((call) => call[0]);
       assert.deepEqual(stoppedContainerNames, [expectedRuntimeContainer, expectedDindContainer]);
-      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 6, "expected dind/runtime ensure during create-thread bootstrap and each message");
       assert.equal(waitForContainerRunningSpy.mock.calls.length, 0, "expected no explicit dind wait in runtime ready helper");
-      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
-      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected runtime git config bootstrap on each message");
-      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
-      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected runtime bashrc bootstrap on each message");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 3, "expected runtime identity bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 3, "expected runtime git config bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 3, "expected runtime tooling bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 3, "expected runtime bashrc bootstrap during create-thread bootstrap and each message");
       assert.equal(
         ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
         1,
@@ -1540,8 +1814,8 @@ test(
       );
       assert.equal(
         ensureRuntimeContainerAgentCliConfigSpy.mock.calls.length,
-        2,
-        "expected companyhelm-agent config writes on each user message when thread secret exists",
+        3,
+        "expected companyhelm-agent config writes during create-thread bootstrap and each user message when thread secret exists",
       );
       const firstAgentCliConfig = ensureRuntimeContainerAgentCliConfigSpy.mock.calls[0]?.[2];
       assert.equal(firstAgentCliConfig?.agent_api_url, "https://api.companyhelm.com:50052");
@@ -1557,8 +1831,8 @@ test(
       );
       assert.equal(
         ensureRuntimeContainerThreadGitSkillsSpy.mock.calls.length,
-        2,
-        "expected runtime thread git skill provisioning on each message",
+        3,
+        "expected runtime thread git skill provisioning during create-thread bootstrap and each message",
       );
       assert.equal(
         ensureRuntimeContainerThreadGitSkillsSpy.mock.calls[0]?.[2]?.cloneRootDirectory,
@@ -1585,6 +1859,7 @@ test(
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
+      startThreadWithResponseSpy.mockRestore();
       startThreadSpy.mockRestore();
       resumeThreadSpy.mockRestore();
       startTurnSpy.mockRestore();
@@ -1651,8 +1926,16 @@ test(
 
     const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
     const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadWithResponseSpy = vi
+      .spyOn(AppServerService.prototype, "startThreadWithResponse")
+      .mockImplementation(async () => ({
+        id: "steer-thread-start",
+        result: {
+          thread: { id: "sdk-thread-steer", path: "/workspace/rollouts/steer.json" },
+        },
+      }));
     const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
-      return { thread: { id: "sdk-thread-steer", path: "/workspace/rollouts/steer.json" } };
+      return { thread: { id: "unexpected-sdk-thread-steer", path: "/workspace/rollouts/unexpected-steer.json" } };
     });
     const startTurnSpy = vi.spyOn(AppServerService.prototype, "startTurn").mockImplementation(async () => {
       return { turn: { id: "sdk-turn-steer-1" } };
@@ -1807,10 +2090,11 @@ test(
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
       assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server session start");
       assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server session stop on shutdown");
-      assert.equal(startThreadSpy.mock.calls.length, 1, "expected one sdk thread start");
+      assert.equal(startThreadWithResponseSpy.mock.calls.length, 1, "expected one sdk thread bootstrap during create-thread");
+      assert.equal(startThreadSpy.mock.calls.length, 0, "expected no extra thread/start during steer flow");
       assert.equal(startTurnSpy.mock.calls.length, 1, "expected only initial turn/start call");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
       assert.equal(startTurnSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on turn/start");
       assert.deepEqual(startTurnSpy.mock.calls[0]?.[0]?.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
       assert.equal(steerTurnSpy.mock.calls.length, 1, "expected turn/steer for second user message");
@@ -1826,11 +2110,11 @@ test(
         ["sdk-turn-steer-1"],
         "expected completion updates to target the original running turn",
       );
-      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected runtime readiness for both messages");
-      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected identity bootstrap per message");
-      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected git config bootstrap per message");
-      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected tooling bootstrap per message");
-      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected bashrc bootstrap per message");
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 6, "expected runtime readiness during create-thread bootstrap and both messages");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 3, "expected identity bootstrap during create-thread bootstrap and per message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 3, "expected git config bootstrap during create-thread bootstrap and per message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 3, "expected tooling bootstrap during create-thread bootstrap and per message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 3, "expected bashrc bootstrap during create-thread bootstrap and per message");
       assert.equal(
         ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
         1,
@@ -1855,6 +2139,7 @@ test(
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
+      startThreadWithResponseSpy.mockRestore();
       startThreadSpy.mockRestore();
       startTurnSpy.mockRestore();
       steerTurnSpy.mockRestore();
