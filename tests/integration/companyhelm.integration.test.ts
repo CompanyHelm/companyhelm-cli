@@ -633,11 +633,15 @@ test("companyhelm root command retries until server becomes available", async ()
 });
 
 test("companyhelm root command returns requestError for createThreadRequest when model is not configured", async () => {
-  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-missing-model-");
+  const homeDirectory = await makeTemporaryHomeDirectory("companyhelm-cli-create-thread-unconfigured-");
   let server: grpc.Server | undefined;
   const previousHome = process.env.HOME;
   const reconnectStopError = new Error("stop root command after missing-model thread create validation");
   let shouldStopAfterValidation = false;
+  const createThreadContainersSpy = vi.spyOn(
+    threadLifecycle.ThreadContainerService.prototype,
+    "createThreadContainers",
+  );
   const nativeSetTimeout = global.setTimeout;
   const reconnectDelaySpy = vi.spyOn(global, "setTimeout").mockImplementation(((handler: any, timeout?: any, ...args: any[]) => {
     if (shouldStopAfterValidation && timeout === 1_000) {
@@ -664,7 +668,7 @@ test("companyhelm root command returns requestError for createThreadRequest when
             request: {
                 case: "createThreadRequest",
                 value: {
-                threadId: "thread-missing-model",
+                threadId: "thread-unconfigured",
                 model: "gpt-5.3-missing-model",
                 },
               },
@@ -704,9 +708,12 @@ test("companyhelm root command returns requestError for createThreadRequest when
     assert.ok(receivedClientUpdate, "expected CLI to send response for createThreadRequest");
     assert.equal(receivedClientUpdate.payload.case, "requestError");
     assert.equal(receivedClientUpdate.requestId, requestId);
-    assert.match(receivedClientUpdate.payload.value.errorMessage, /model/i);
+    assert.match(receivedClientUpdate.payload.value.errorMessage, /not configured/i);
+    assert.match(receivedClientUpdate.payload.value.errorMessage, /gpt-5\.3-missing-model/i);
+    assert.equal(createThreadContainersSpy.mock.calls.length, 0);
   } finally {
     reconnectDelaySpy.mockRestore();
+    createThreadContainersSpy.mockRestore();
     if (server) {
       await shutdownServer(server);
     }

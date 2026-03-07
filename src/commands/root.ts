@@ -1852,9 +1852,17 @@ async function handleCreateThreadRequest(
   logger: Logger,
 ): Promise<void> {
   const threadId = (request.threadId ?? "").trim();
+  const modelName = (request.model ?? "").trim();
+  const requestedReasoningLevel = (request.reasoningLevel ?? "").trim();
   if (!threadId) {
     logger.warn("Rejecting createThreadRequest: threadId is required.");
     await sendRequestError(commandChannel, "Thread id is required.", requestId);
+    return;
+  }
+
+  if (!modelName) {
+    logger.warn("Rejecting createThreadRequest: model is required.");
+    await sendRequestError(commandChannel, "Model is required.", requestId);
     return;
   }
 
@@ -1869,7 +1877,7 @@ async function handleCreateThreadRequest(
   const threadMcpServers = normalizeThreadMcpServersForThreadConfig(request.mcpServers, logger);
   const cliSecret = String(request.cliSecret ?? "").trim();
   logger.debug(
-    `Received createThreadRequest for thread '${threadId}' (model '${request.model}', reasoning '${request.reasoningLevel ?? ""}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
+    `Received createThreadRequest for thread '${threadId}' (model '${modelName}', reasoning '${requestedReasoningLevel}', additional instructions length '${normalizedAdditionalModelInstructions?.length ?? 0}', git skill packages '${threadGitSkillPackages.length}', MCP servers '${threadMcpServers.length}').`,
   );
 
   let authMode: ThreadAuthMode;
@@ -1877,12 +1885,41 @@ async function handleCreateThreadRequest(
   try {
     authMode = await resolveThreadAuthMode(cfg);
 
+    const modelConfig = await db
+      .select({
+        name: llmModels.name,
+        reasoningLevels: llmModels.reasoningLevels,
+      })
+      .from(llmModels)
+      .where(eq(llmModels.name, modelName))
+      .get();
+    const configuredModelSample = await db
+      .select({ name: llmModels.name })
+      .from(llmModels)
+      .limit(1)
+      .all();
+
+    if (configuredModelSample.length > 0) {
+      if (!modelConfig) {
+        throw new Error(`Model '${modelName}' is not configured.`);
+      }
+
+      if (requestedReasoningLevel.length > 0) {
+        const supportedReasoningLevels = normalizeReasoningLevels(modelConfig.reasoningLevels);
+        if (supportedReasoningLevels.length > 0 && !supportedReasoningLevels.includes(requestedReasoningLevel)) {
+          throw new Error(
+            `Reasoning level '${requestedReasoningLevel}' is not configured for model '${modelName}'.`,
+          );
+        }
+      }
+    }
+
     await db.insert(threads).values({
       id: threadId,
       sdkThreadId: null,
       cliSecret: cliSecret.length > 0 ? cliSecret : null,
-      model: request.model,
-      reasoningLevel: request.reasoningLevel ?? "",
+      model: modelName,
+      reasoningLevel: requestedReasoningLevel,
       additionalModelInstructions: normalizedAdditionalModelInstructions,
       status: "pending",
       currentSdkTurnId: null,
