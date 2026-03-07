@@ -1438,8 +1438,16 @@ test(
 
     const appServerStartSpy = vi.spyOn(AppServerService.prototype, "start").mockImplementation(async () => undefined);
     const appServerStopSpy = vi.spyOn(AppServerService.prototype, "stop").mockImplementation(async () => undefined);
+    const startThreadWithResponseSpy = vi
+      .spyOn(AppServerService.prototype, "startThreadWithResponse")
+      .mockImplementation(async () => ({
+        id: "bootstrap-thread-start",
+        result: {
+          thread: { id: "sdk-thread-1", path: rolloutPath },
+        },
+      }));
     const startThreadSpy = vi.spyOn(AppServerService.prototype, "startThread").mockImplementation(async () => {
-      return { thread: { id: "sdk-thread-1", path: rolloutPath } };
+      return { thread: { id: "unexpected-sdk-thread", path: "/workspace/rollouts/unexpected.json" } };
     });
     const resumeThreadSpy = vi.spyOn(AppServerService.prototype, "resumeThread").mockImplementation(async () => {
       return { thread: { id: "sdk-thread-1", path: rolloutPath } };
@@ -1631,15 +1639,16 @@ test(
       assert.equal(receivedRequestError, null, "did not expect requestError for repeated user messages");
       assert.ok(createdThreadId, "expected thread id for user message flow");
       assert.equal(createThreadContainersSpy.mock.calls.length, 1);
-      assert.equal(startThreadSpy.mock.calls.length, 1, "expected first user message to create sdk thread");
+      assert.equal(startThreadWithResponseSpy.mock.calls.length, 1, "expected create-thread bootstrap to create sdk thread once");
+      assert.equal(startThreadSpy.mock.calls.length, 0, "expected first user message to reuse bootstrapped sdk thread");
       assert.equal(resumeThreadSpy.mock.calls.length, 0, "expected warm app-server session to avoid resume calls");
       assert.equal(appServerStartSpy.mock.calls.length >= 1, true, "expected app-server to start for user message flow");
       assert.equal(appServerStopSpy.mock.calls.length >= 1, true, "expected app-server to stop during command shutdown");
       assert.equal(startTurnSpy.mock.calls.length, 2, "expected one turn per user message");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
-      assert.equal(startThreadSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.approvalPolicy, "never", "expected yolo approval on thread/start");
+      assert.equal(startThreadWithResponseSpy.mock.calls[0]?.[0]?.sandbox, "danger-full-access", "expected yolo sandbox on thread/start");
       assert.equal(
-        startThreadSpy.mock.calls[0]?.[0]?.developerInstructions,
+        startThreadWithResponseSpy.mock.calls[0]?.[0]?.developerInstructions,
         normalizedAdditionalModelInstructions,
         "expected additional model instructions to be sent as thread/start developerInstructions",
       );
@@ -1652,6 +1661,17 @@ test(
         true,
         "expected debug logs to include thread/start developer instructions",
       );
+
+      const stateDbPath = path.join(homeDirectory, ".local", "share", "companyhelm", "state.db");
+      const { db, client } = await initDb(stateDbPath);
+      try {
+        const [threadRow] = await db.select().from(threads).where(eq(threads.id, createdThreadId!)).limit(1);
+        assert.equal(threadRow?.sdkThreadId, "sdk-thread-1", "expected create-thread bootstrap to persist sdk thread id");
+      } finally {
+        client.close();
+      }
+
+      assert.equal(startTurnSpy.mock.calls[0]?.[0]?.threadId, "sdk-thread-1", "expected first user message to reuse bootstrapped sdk thread id");
       for (const [params] of startTurnSpy.mock.calls) {
         assert.equal(params.approvalPolicy, "never", "expected yolo approval on turn/start");
         assert.deepEqual(params.sandboxPolicy, { type: "dangerFullAccess" }, "expected yolo sandbox on turn/start");
@@ -1681,12 +1701,12 @@ test(
       const expectedDindContainer = `companyhelm-dind-thread-${createdThreadId}`;
       const stoppedContainerNames = stopContainerSpy.mock.calls.map((call) => call[0]);
       assert.deepEqual(stoppedContainerNames, [expectedRuntimeContainer, expectedDindContainer]);
-      assert.equal(ensureContainerRunningSpy.mock.calls.length, 4, "expected dind/runtime ensure on each message");
+      assert.equal(ensureContainerRunningSpy.mock.calls.length, 6, "expected dind/runtime ensure during create-thread bootstrap and each message");
       assert.equal(waitForContainerRunningSpy.mock.calls.length, 0, "expected no explicit dind wait in runtime ready helper");
-      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 2, "expected runtime identity bootstrap on each message");
-      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 2, "expected runtime git config bootstrap on each message");
-      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 2, "expected runtime tooling bootstrap on each message");
-      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 2, "expected runtime bashrc bootstrap on each message");
+      assert.equal(ensureRuntimeContainerIdentitySpy.mock.calls.length, 3, "expected runtime identity bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerGitConfigSpy.mock.calls.length, 3, "expected runtime git config bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerToolingSpy.mock.calls.length, 3, "expected runtime tooling bootstrap during create-thread bootstrap and each message");
+      assert.equal(ensureRuntimeContainerBashrcSpy.mock.calls.length, 3, "expected runtime bashrc bootstrap during create-thread bootstrap and each message");
       assert.equal(
         ensureRuntimeContainerCodexConfigSpy.mock.calls.length,
         1,
@@ -1694,8 +1714,8 @@ test(
       );
       assert.equal(
         ensureRuntimeContainerAgentCliConfigSpy.mock.calls.length,
-        2,
-        "expected companyhelm-agent config writes on each user message when thread secret exists",
+        3,
+        "expected companyhelm-agent config writes during create-thread bootstrap and each user message when thread secret exists",
       );
       const firstAgentCliConfig = ensureRuntimeContainerAgentCliConfigSpy.mock.calls[0]?.[2];
       assert.equal(firstAgentCliConfig?.agent_api_url, "https://api.companyhelm.com:50052");
@@ -1711,8 +1731,8 @@ test(
       );
       assert.equal(
         ensureRuntimeContainerThreadGitSkillsSpy.mock.calls.length,
-        2,
-        "expected runtime thread git skill provisioning on each message",
+        3,
+        "expected runtime thread git skill provisioning during create-thread bootstrap and each message",
       );
       assert.equal(
         ensureRuntimeContainerThreadGitSkillsSpy.mock.calls[0]?.[2]?.cloneRootDirectory,
@@ -1739,6 +1759,7 @@ test(
       stopContainerSpy.mockRestore();
       appServerStartSpy.mockRestore();
       appServerStopSpy.mockRestore();
+      startThreadWithResponseSpy.mockRestore();
       startThreadSpy.mockRestore();
       resumeThreadSpy.mockRestore();
       startTurnSpy.mockRestore();
