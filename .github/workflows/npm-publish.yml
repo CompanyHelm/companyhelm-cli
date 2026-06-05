@@ -121,4 +121,4 @@ jobs:
           fi
 
           echo "Publishing ${package_name}@${package_version} from ${tarball}."
-          npm publish "${tarball}" --access public --provenance
+          npm publish "./${tarball}" --access public --provenance
