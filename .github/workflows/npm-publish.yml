@@ -62,14 +62,14 @@ jobs:
       - name: Pack package
         run: |
           set -euo pipefail
-          mkdir -p .npm-packages
-          npm pack --pack-destination .npm-packages
+          mkdir -p npm-packages
+          npm pack --pack-destination npm-packages
 
       - name: Upload package tarball
         uses: actions/upload-artifact@v4
         with:
           name: npm-package
-          path: .npm-packages/*.tgz
+          path: npm-packages/*.tgz
           if-no-files-found: error
 
   publish:
@@ -84,7 +84,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: npm-package
-          path: .npm-packages
+          path: npm-packages
 
       - name: Set up Node.js for npm trusted publishing
         uses: actions/setup-node@v4
@@ -100,7 +100,7 @@ jobs:
           set -euo pipefail
 
           shopt -s nullglob
-          tarballs=(.npm-packages/*.tgz)
+          tarballs=(npm-packages/*.tgz)
           if [ "${#tarballs[@]}" -ne 1 ]; then
             echo "Expected exactly 1 npm package tarball, found ${#tarballs[@]}." >&2
             exit 1
