@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   registerOAuthProvider,
@@ -110,6 +113,42 @@ class CustomApiFetchStub extends ProviderLoginFetchStub {
       if (url === "http://localhost:4000/model-provider-credential-login/complete") {
         return Response.json({
           credentialId: "credential-2",
+          status: "completed",
+        });
+      }
+
+      return originalFetch(input, init);
+    }) as typeof fetch;
+  }
+}
+
+class XaiAuthFileFetchStub extends ProviderLoginFetchStub {
+  install(): void {
+    const originalFetch = globalThis.fetch;
+    super.install();
+    globalThis.fetch = (async (input, init) => {
+      const url = String(input);
+      this.requests.push({
+        body: init?.body ? JSON.parse(String(init.body)) as unknown : null,
+        method: init?.method ?? "GET",
+        url,
+      });
+      if (url === "https://api.companyhelm.com/model-provider-credential-login/resolve?code=chpl_xai_auth") {
+        return Response.json({
+          companyName: "CompanyHelm Local",
+          credentialName: "Grok Subscription",
+          expiresAt: "2026-06-04T12:00:00.000Z",
+          modelProvider: "xai",
+          piOauthProviderId: "xai-auth",
+          providerName: "Grok",
+          requestId: "request-xai",
+          requestedBy: "Andrea",
+        });
+      }
+
+      if (url === "https://api.companyhelm.com/model-provider-credential-login/complete") {
+        return Response.json({
+          credentialId: "credential-xai",
           status: "completed",
         });
       }
@@ -240,6 +279,53 @@ test("provider login accepts a custom API URL", async () => {
   assert.equal(io.errors.length, 0);
   assert.match(output, /✅.*Credential "Codex Local" added to CompanyHelm Local/);
   assert.doesNotMatch(output, /credential-2/);
+});
+
+test("provider login completes xAI OAuth requests from an official Grok CLI auth file", async () => {
+  const io = new CapturingCliIo();
+  const fetchStub = new XaiAuthFileFetchStub();
+  const authDirectory = mkdtempSync(join(tmpdir(), "companyhelm-cli-xai-"));
+  const authFile = join(authDirectory, "auth.json");
+  const previousAuthFile = process.env.COMPANYHELM_GROK_AUTH_FILE;
+  const expiresAt = 4_102_444_800_000;
+  writeFileSync(authFile, JSON.stringify({
+    "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
+      expires_at: expiresAt,
+      key: "xai-access-token",
+      refresh_token: "xai-refresh-token",
+    },
+  }));
+  process.env.COMPANYHELM_GROK_AUTH_FILE = authFile;
+  fetchStub.install();
+
+  try {
+    await new CompanyHelmCli(io).run(["node", "companyhelm", "provider", "login", "--code", "chpl_xai_auth"]);
+  } finally {
+    fetchStub.restore();
+    if (previousAuthFile === undefined) {
+      delete process.env.COMPANYHELM_GROK_AUTH_FILE;
+    } else {
+      process.env.COMPANYHELM_GROK_AUTH_FILE = previousAuthFile;
+    }
+    rmSync(authDirectory, { force: true, recursive: true });
+  }
+
+  const output = io.lines.join("\n");
+  assert.equal(io.errors.length, 0);
+  assert.match(output, /ℹ.*Adding Grok credential to CompanyHelm/);
+  assert.match(output, /Using existing Grok CLI credentials/);
+  assert.match(output, /✅.*Credential "Grok Subscription" added to CompanyHelm Local/);
+  assert.doesNotMatch(output, /credential-xai/);
+  assert.deepEqual(fetchStub.requests[1]?.body, {
+    code: "chpl_xai_auth",
+    credentials: {
+      access: "xai-access-token",
+      expires: expiresAt - 120_000,
+      refresh: "xai-refresh-token",
+      tokenEndpoint: "https://auth.x.ai/oauth2/token",
+      tokenType: "Bearer",
+    },
+  });
 });
 
 
