@@ -1,4 +1,5 @@
 import { getOAuthProvider, type OAuthCredentials } from "@mariozechner/pi-ai/oauth";
+import { BrowserOpener } from "../browser_opener.js";
 import type { CliIo } from "../cli_io_interface.js";
 import { TerminalStyle } from "../terminal_style.js";
 
@@ -7,9 +8,11 @@ import { TerminalStyle } from "../terminal_style.js";
  * small CLI IO interface. This keeps provider-specific login mechanics outside command parsing.
  */
 export class ProviderOauthLoginRunner {
+  private readonly browserOpener: BrowserOpener;
   private readonly io: CliIo;
 
-  constructor(io: CliIo) {
+  constructor(io: CliIo, browserOpener: BrowserOpener = new BrowserOpener()) {
+    this.browserOpener = browserOpener;
     this.io = io;
   }
 
@@ -21,8 +24,11 @@ export class ProviderOauthLoginRunner {
 
     return provider.login({
       onAuth: (info) => {
-        this.io.writeLine(TerminalStyle.info("Complete the provider login in your browser."));
-        this.io.writeLine(TerminalStyle.detail("Login URL", info.url));
+        void this.browserOpener.open(info.url);
+        this.io.writeLine(TerminalStyle.info("Trying to open your browser for provider login."));
+        this.io.writeLine(TerminalStyle.nextAction("Next step: approve the provider login in your browser."));
+        this.io.writeLine(TerminalStyle.detail("Open", TerminalStyle.link("Open provider login", info.url)));
+        this.io.writeLine(TerminalStyle.detail("Copy URL", info.url));
       },
       onProgress: (message) => {
         this.io.writeLine(TerminalStyle.progress(message));
