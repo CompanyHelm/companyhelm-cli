@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.npm-packages/
+
+# environment variables/secrets
+.env*
+!.env.example
+
+.DS_Store
