@@ -27,8 +27,12 @@ export class ProviderOauthLoginRunner {
         void this.browserOpener.open(info.url);
         this.io.writeLine(TerminalStyle.info("Trying to open your browser for provider login."));
         this.io.writeLine(TerminalStyle.nextAction("Next step: approve the provider login in your browser."));
-        this.io.writeLine(TerminalStyle.detail("Open", TerminalStyle.link("Open provider login", info.url)));
-        this.io.writeLine(TerminalStyle.detail("Copy URL", info.url));
+        this.io.writeLine(
+          TerminalStyle.note("If no browser appears, click the link below or copy/paste the URL into your browser."),
+        );
+        this.io.writeLine(TerminalStyle.detail("Open link", TerminalStyle.link("Open provider login", info.url)));
+        this.io.writeLine(TerminalStyle.note("Copy/paste URL:"));
+        this.io.writeLine(TerminalStyle.rawUrl(info.url));
       },
       onProgress: (message) => {
         this.io.writeLine(TerminalStyle.progress(message));

@@ -195,8 +195,9 @@ test("provider login defaults to the production API URL and completes the reques
   assert.match(output, /•.*Credential: Codex Subscription/);
   assert.match(output, /Trying to open your browser for provider login/);
   assert.match(output, /Next step: approve the provider login in your browser/);
-  assert.match(output, /Open provider login/);
-  assert.match(output, /Copy URL: https:\/\/auth\.example\.test\/oauth/);
+  assert.match(output, /If no browser appears, click the link below or copy\/paste the URL into your browser/);
+  assert.match(output, /Open link: .*Open provider login/);
+  assert.match(output, /Copy\/paste URL:[\s\S]*https:\/\/auth\.example\.test\/oauth/);
   assert.match(output, /✅.*Credential "Codex Subscription" added to CompanyHelm Local/);
   assert.doesNotMatch(output, /credential-1/);
   assert.doesNotMatch(output, /Paste the authorization code or redirect URL/);

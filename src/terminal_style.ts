@@ -28,6 +28,14 @@ export class TerminalStyle {
     return `\u001B]8;;${url}${TerminalStyle.bell}${label}\u001B]8;;${TerminalStyle.bell}`;
   }
 
+  static note(message: string): string {
+    return `${TerminalStyle.gray}•${TerminalStyle.reset} ${message}`;
+  }
+
+  static rawUrl(url: string): string {
+    return `  ${url}`;
+  }
+
   static nextAction(message: string): string {
     return `${TerminalStyle.green}➜${TerminalStyle.reset} ${TerminalStyle.bold}${message}${TerminalStyle.reset}`;
   }
