@@ -1,7 +1,4 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import {
   registerOAuthProvider,
@@ -41,8 +38,9 @@ class ProviderLoginFetchStub {
   install(): void {
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
+      const rawBody = init?.body ? String(init.body) : "";
       this.requests.push({
-        body: init?.body ? JSON.parse(String(init.body)) as unknown : null,
+        body: rawBody ? parseRequestBody(rawBody) : null,
         method: init?.method ?? "GET",
         url,
       });
@@ -122,14 +120,15 @@ class CustomApiFetchStub extends ProviderLoginFetchStub {
   }
 }
 
-class XaiAuthFileFetchStub extends ProviderLoginFetchStub {
+class XaiOAuthFetchStub extends ProviderLoginFetchStub {
   install(): void {
     const originalFetch = globalThis.fetch;
     super.install();
     globalThis.fetch = (async (input, init) => {
       const url = String(input);
+      const rawBody = init?.body ? String(init.body) : "";
       this.requests.push({
-        body: init?.body ? JSON.parse(String(init.body)) as unknown : null,
+        body: rawBody ? parseRequestBody(rawBody) : null,
         method: init?.method ?? "GET",
         url,
       });
@@ -153,9 +152,46 @@ class XaiAuthFileFetchStub extends ProviderLoginFetchStub {
         });
       }
 
+      if (url === "https://auth.x.ai/.well-known/openid-configuration") {
+        return Response.json({
+          authorization_endpoint: "https://auth.x.ai/oauth2/auth",
+          token_endpoint: "https://auth.x.ai/oauth2/token",
+        });
+      }
+
+      if (url === "https://auth.x.ai/oauth2/token") {
+        return Response.json({
+          access_token: "xai-oauth-access-token",
+          expires_in: 3600,
+          refresh_token: "xai-oauth-refresh-token",
+          token_type: "Bearer",
+        });
+      }
+
       return originalFetch(input, init);
     }) as typeof fetch;
   }
+}
+
+function parseRequestBody(body: string): unknown {
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return body;
+  }
+}
+
+async function waitForLine(lines: string[], predicate: (line: string) => boolean): Promise<string> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const line = lines.find(predicate);
+    if (line) {
+      return line;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  throw new Error("Timed out waiting for CLI output.");
 }
 
 class TestOAuthProviderRegistry {
@@ -281,47 +317,45 @@ test("provider login accepts a custom API URL", async () => {
   assert.doesNotMatch(output, /credential-2/);
 });
 
-test("provider login completes xAI OAuth requests from an official Grok CLI auth file", async () => {
+test("provider login completes xAI OAuth requests through the OAuth callback flow", async () => {
   const io = new CapturingCliIo();
-  const fetchStub = new XaiAuthFileFetchStub();
-  const authDirectory = mkdtempSync(join(tmpdir(), "companyhelm-cli-xai-"));
-  const authFile = join(authDirectory, "auth.json");
-  const previousAuthFile = process.env.COMPANYHELM_GROK_AUTH_FILE;
-  const expiresAt = 4_102_444_800_000;
-  writeFileSync(authFile, JSON.stringify({
-    "https://auth.x.ai::b1a00492-073a-47ea-816f-4c329264a828": {
-      expires_at: expiresAt,
-      key: "xai-access-token",
-      refresh_token: "xai-refresh-token",
-    },
-  }));
-  process.env.COMPANYHELM_GROK_AUTH_FILE = authFile;
+  const fetchStub = new XaiOAuthFetchStub();
   fetchStub.install();
 
   try {
-    await new CompanyHelmCli(io).run(["node", "companyhelm", "provider", "login", "--code", "chpl_xai_auth"]);
+    const loginPromise = new CompanyHelmCli(io).run(["node", "companyhelm", "provider", "login", "--code", "chpl_xai_auth"]);
+    const authorizationUrlLine = await waitForLine(io.lines, (line) => line.trim().startsWith("https://auth.x.ai/oauth2/auth"));
+    const authorizationUrl = new URL(authorizationUrlLine.trim());
+    const redirectUri = authorizationUrl.searchParams.get("redirect_uri");
+    const state = authorizationUrl.searchParams.get("state");
+    assert.ok(redirectUri);
+    assert.ok(state);
+    await fetch(`${redirectUri}?code=xai-authorization-code&state=${state}`);
+    assert.equal(await loginPromise, 0, io.errors.join("\n"));
   } finally {
     fetchStub.restore();
-    if (previousAuthFile === undefined) {
-      delete process.env.COMPANYHELM_GROK_AUTH_FILE;
-    } else {
-      process.env.COMPANYHELM_GROK_AUTH_FILE = previousAuthFile;
-    }
-    rmSync(authDirectory, { force: true, recursive: true });
   }
 
   const output = io.lines.join("\n");
   assert.equal(io.errors.length, 0);
   assert.match(output, /ℹ.*Adding Grok credential to CompanyHelm/);
-  assert.match(output, /Using existing Grok CLI credentials/);
+  assert.match(output, /Starting xAI Grok OAuth login/);
+  assert.match(output, /Trying to open your browser for provider login/);
+  assert.match(output, /Exchanging xAI authorization code for tokens/);
   assert.match(output, /✅.*Credential "Grok Subscription" added to CompanyHelm Local/);
   assert.doesNotMatch(output, /credential-xai/);
-  assert.deepEqual(fetchStub.requests[1]?.body, {
+  assert.equal(fetchStub.requests.some((request) => request.url === "https://auth.x.ai/oauth2/token"), true);
+  const completeRequest = fetchStub.requests.findLast((request) => request.url === "https://api.companyhelm.com/model-provider-credential-login/complete");
+  const completeBody = completeRequest?.body as { credentials: { expires: number } } | undefined;
+  assert.ok(completeBody);
+  assert.equal(typeof completeBody.credentials.expires, "number");
+  assert.deepEqual(completeRequest?.body, {
     code: "chpl_xai_auth",
     credentials: {
-      access: "xai-access-token",
-      expires: expiresAt - 120_000,
-      refresh: "xai-refresh-token",
+      access: "xai-oauth-access-token",
+      expires: completeBody.credentials.expires,
+      idToken: "",
+      refresh: "xai-oauth-refresh-token",
       tokenEndpoint: "https://auth.x.ai/oauth2/token",
       tokenType: "Bearer",
     },

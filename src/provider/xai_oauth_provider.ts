@@ -1,8 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import {
   getOAuthProvider,
   registerOAuthProvider,
@@ -46,8 +43,6 @@ const XAI_OAUTH_REDIRECT_PATH = "/callback";
 const XAI_OAUTH_REDIRECT_PORT = 56121;
 const XAI_OAUTH_REFRESH_SKEW_MILLISECONDS = 120_000;
 const XAI_OAUTH_CALLBACK_TIMEOUT_MILLISECONDS = 180_000;
-const XAI_GROK_CLI_AUTH_SCOPE_KEY = `${XAI_OAUTH_ISSUER}::${XAI_OAUTH_CLIENT_ID}`;
-const XAI_GROK_CLI_LEGACY_AUTH_SCOPE_KEY = "https://accounts.x.ai/sign-in";
 const XAI_OAUTH_PROVIDER_IDS = ["xai-auth", "xai"] as const;
 
 /**
@@ -73,16 +68,6 @@ class XaiOAuthProvider implements OAuthProviderInterface {
   }
 
   async login(callbacks: OAuthLoginCallbacks): Promise<OAuthCredentials> {
-    const existingCredentials = getGrokAuthCredentials();
-    if (existingCredentials) {
-      callbacks.onProgress?.("Using existing Grok CLI credentials from ~/.grok/auth.json...");
-      try {
-        return await ensureFreshXaiCredentials(existingCredentials);
-      } catch (error) {
-        callbacks.onProgress?.(`Existing Grok CLI credentials could not be refreshed: ${messageFromError(error)}`);
-      }
-    }
-
     callbacks.onProgress?.("Starting xAI Grok OAuth login...");
     const discovery = await discoverXaiEndpoints();
     const pkce = createPkcePair();
@@ -130,10 +115,6 @@ class XaiOAuthProvider implements OAuthProviderInterface {
   getApiKey(credentials: OAuthCredentials): string {
     return credentials.access;
   }
-}
-
-function messageFromError(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown error";
 }
 
 function createPkcePair(): { challenge: string; verifier: string } {
@@ -319,12 +300,6 @@ async function refreshXaiCredentials(credentials: OAuthCredentials): Promise<OAu
   return credentialsFromTokenPayload(payload, tokenEndpoint, credentials.refresh);
 }
 
-async function ensureFreshXaiCredentials(credentials: OAuthCredentials): Promise<OAuthCredentials> {
-  if (credentials.expires > Date.now()) {
-    return credentials;
-  }
-  return refreshXaiCredentials(credentials);
-}
 
 function credentialsFromTokenPayload(payload: XaiTokenPayload, tokenEndpoint: string, fallbackRefresh = ""): OAuthCredentials {
   const access = String(payload.access_token || "").trim();
@@ -352,88 +327,4 @@ function credentialsFromTokenPayload(payload: XaiTokenPayload, tokenEndpoint: st
     tokenEndpoint,
     tokenType: String(payload.token_type || "Bearer"),
   };
-}
-
-function getGrokAuthCredentials(): OAuthCredentials | null {
-  const authPath = process.env.COMPANYHELM_GROK_AUTH_FILE || join(homedir(), ".grok", "auth.json");
-  if (!existsSync(authPath)) {
-    return null;
-  }
-
-  try {
-    const document = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
-    return parseOfficialGrokCliCredentials(document) || parseLegacyGrokCredentials(document) || parseTopLevelCredentials(document);
-  } catch {
-    return null;
-  }
-}
-
-function parseOfficialGrokCliCredentials(document: Record<string, unknown>): OAuthCredentials | null {
-  const entry = document[XAI_GROK_CLI_AUTH_SCOPE_KEY];
-  if (!entry || typeof entry !== "object") {
-    return null;
-  }
-  const entryDocument = entry as Record<string, unknown>;
-  const access = String(entryDocument.key || entryDocument.access_token || entryDocument.token || "").trim();
-  if (!access) {
-    return null;
-  }
-
-  return {
-    access,
-    expires: (parseExpiry(entryDocument.expires_at) || Date.now() + 6 * 60 * 60 * 1000) - XAI_OAUTH_REFRESH_SKEW_MILLISECONDS,
-    refresh: String(entryDocument.refresh_token || entryDocument.refresh || ""),
-    tokenEndpoint: `${XAI_OAUTH_ISSUER}/oauth2/token`,
-    tokenType: "Bearer",
-  };
-}
-
-function parseLegacyGrokCredentials(document: Record<string, unknown>): OAuthCredentials | null {
-  const entry = document[XAI_GROK_CLI_LEGACY_AUTH_SCOPE_KEY];
-  if (!entry || typeof entry !== "object") {
-    return null;
-  }
-  const entryDocument = entry as Record<string, unknown>;
-  const access = String(entryDocument.key || entryDocument.access_token || entryDocument.token || "").trim();
-  if (!access) {
-    return null;
-  }
-
-  return {
-    access,
-    expires: Date.now() + 30 * 24 * 60 * 60 * 1000,
-    refresh: "",
-  };
-}
-
-function parseTopLevelCredentials(document: Record<string, unknown>): OAuthCredentials | null {
-  const access = String(document.access_token || document.token || "").trim();
-  if (!access) {
-    return null;
-  }
-
-  return {
-    access,
-    expires: parseExpiry(document.expires_at || document.expires) || Date.now() + 30 * 24 * 60 * 60 * 1000,
-    refresh: String(document.refresh_token || document.refresh || ""),
-    tokenEndpoint: `${XAI_OAUTH_ISSUER}/oauth2/token`,
-    tokenType: String(document.token_type || "Bearer"),
-  };
-}
-
-function parseExpiry(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return undefined;
-  }
-
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return numeric;
-  }
-
-  const parsedDate = Date.parse(value);
-  return Number.isFinite(parsedDate) ? parsedDate : undefined;
 }
