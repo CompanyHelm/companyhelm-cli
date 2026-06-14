@@ -2,6 +2,7 @@ import { getOAuthProvider, type OAuthCredentials } from "@mariozechner/pi-ai/oau
 import { BrowserOpener } from "../browser_opener.js";
 import type { CliIo } from "../cli_io_interface.js";
 import { TerminalStyle } from "../terminal_style.js";
+import { registerCompanyHelmXaiOAuthProviders } from "./xai_oauth_provider.js";
 
 /**
  * Runs the provider OAuth flow supplied by Pi Mono and adapts its terminal callbacks to CompanyHelm's
@@ -17,6 +18,7 @@ export class ProviderOauthLoginRunner {
   }
 
   async login(providerId: string): Promise<OAuthCredentials> {
+    registerCompanyHelmXaiOAuthProviders();
     const provider = getOAuthProvider(providerId);
     if (!provider) {
       throw new Error(`Pi OAuth provider is not registered: ${providerId}`);
