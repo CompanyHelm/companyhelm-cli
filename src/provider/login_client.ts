@@ -1,4 +1,4 @@
-export type ProviderLoginResolvedRequest = {
+type ProviderLoginResolvedRequest = {
   companyName: string;
   credentialName: string;
   expiresAt: string;
@@ -9,7 +9,7 @@ export type ProviderLoginResolvedRequest = {
   requestedBy: string;
 };
 
-export type ProviderLoginCredentials = {
+type ProviderLoginCredentials = {
   access: string;
   expires: number;
   refresh: string;
