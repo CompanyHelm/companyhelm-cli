@@ -3,7 +3,7 @@ import { TerminalStyle } from "../terminal_style.js";
 import { ProviderLoginClient } from "./login_client.js";
 import { ProviderOauthLoginRunner } from "./oauth_login_runner.js";
 
-export type ProviderLoginCommandOptions = {
+type ProviderLoginCommandOptions = {
   apiUrl: string;
   code: string;
 };
