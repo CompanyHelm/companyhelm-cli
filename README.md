@@ -53,7 +53,3 @@ Publish options:
 2. Or manually run the **Publish npm package** workflow from `main`.
 
 The workflow verifies the package, packs it, skips if the exact version is already on npm, and publishes with provenance using OIDC.
-
-## Provider accounts
-
-Operator account and publishing resource usage is documented in the encrypted [provider account inventory](docs/provider-accounts.md).

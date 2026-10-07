@@ -9,6 +9,3 @@ coverage/
 
 .DS_Store
 .playwright-mcp/
-
-# Native operator account inventory
-/docs/provider-accounts.yaml
