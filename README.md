@@ -49,7 +49,22 @@ Trusted publisher configuration on npm must match:
 
 Publish options:
 
-1. Create and push a semver tag such as `v0.4.5` on a commit contained in `main`.
-2. Or manually run the **Publish npm package** workflow from `main`.
+1. Increase the stable SemVer `version` in `package.json` (and update the npm lockfile), review the change in a PR, and merge to `main`. Only a version increase requests automatic publication.
+2. Or manually run **Publish npm package** from `main`. Manual publishing retains its explicit application validation and may publish a version prepared earlier.
 
-The workflow verifies the package, packs it, skips if the exact version is already on npm, and publishes with provenance using OIDC.
+| Event | Work |
+| --- | --- |
+| PR opened or updated | `Test CLI`: checks, tests, build, workflow contracts, and version-transition validation |
+| Main push changing `package.json` | Resolve version intent; publish only an increasing, unpublished stable version |
+| Package metadata edit without a version increase | Resolution only; no install, build, or publication |
+| Source, docs, application lockfile, workflow, native version file, or secret-only push | Zero push workflow runs; an open PR still validates |
+| Tag push | Zero workflow runs |
+| Manual publication from main | Resolve current version, validate, and publish if eligible |
+
+Development changes do not require version bumps. Published versions are immutable: a version already on npm is a no-op, even after unversioned source changes; a new version must exceed every published stable version, independently of npm's mutable `latest` tag. Registry errors fail closed. Do not decrement the package version for rollback; consumers can select an existing published version.
+
+Publication resolves before dependency installation, builds once, and packs once with lifecycle scripts disabled. The build job uploads the archive, dependency-lock inventory, and release metadata (source revision, workflow identity, timestamp, lockfile digest, archive digest). The publishing job checks the exact archive against the build job's SHA-256 output and the reviewed revision, rechecks npm history, then publishes that archive with OIDC provenance. Automatic publication does not repeat the PR application test suite. Publication concurrency is separate from PR cancellation.
+
+This package owns no deployed runtime, production selection manifest, Terraform, or mobile release. It has no runtime-secret synchronization operation. Secret-only pushes require no manual synchronization and trigger nothing.
+
+Keep `Test CLI` required in main's branch rules and require reviewed PRs before merge; direct pushes no longer receive application-test evidence. The workflow filename and blank npm trusted-publisher Environment stay unchanged. This policy change does not configure branch rules or npm settings.
